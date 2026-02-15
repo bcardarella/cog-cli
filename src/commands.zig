@@ -7,6 +7,13 @@ const client = @import("client.zig");
 const tui = @import("tui.zig");
 
 const Config = config_mod.Config;
+const help = @import("help_text.zig");
+
+// ANSI styles
+const cyan = "\x1B[36m";
+const bold = "\x1B[1m";
+const dim = "\x1B[2m";
+const reset = "\x1B[0m";
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -95,6 +102,11 @@ fn readStdinLine(allocator: std.mem.Allocator) ![]const u8 {
     return allocator.dupe(u8, line);
 }
 
+fn printCommandHelp(comptime help_text: []const u8) void {
+    tui.header();
+    printErr(help_text);
+}
+
 fn callAndPrint(allocator: std.mem.Allocator, cfg: Config, tool_name: []const u8, args_json: []const u8) !void {
     const result = try client.call(allocator, cfg.url, cfg.api_key, tool_name, args_json);
     defer allocator.free(result);
@@ -156,8 +168,12 @@ const JsonBuilder = struct {
 // ── Read Commands ───────────────────────────────────────────────────────
 
 pub fn recall(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (args.len == 0 or std.mem.eql(u8, args[0], "--help")) {
-        printErr("Usage: cog recall <query> [--limit N] [--predicate-filter P]... [--exclude-predicate P]... [--created-after DATE] [--created-before DATE] [--no-strengthen]\n");
+    if (hasFlag(args, "--help")) {
+        printCommandHelp(help.recall);
+        return;
+    }
+    if (args.len == 0) {
+        printErr("error: query is required\nRun " ++ dim ++ "cog mem/recall --help" ++ reset ++ " for usage.\n");
         return error.Explained;
     }
 
@@ -231,8 +247,12 @@ pub fn recall(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Con
 }
 
 pub fn get(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (args.len == 0 or std.mem.eql(u8, args[0], "--help")) {
-        printErr("Usage: cog get <engram-id>\n");
+    if (hasFlag(args, "--help")) {
+        printCommandHelp(help.get);
+        return;
+    }
+    if (args.len == 0) {
+        printErr("error: engram-id is required\nRun " ++ dim ++ "cog mem/get --help" ++ reset ++ " for usage.\n");
         return error.Explained;
     }
 
@@ -250,8 +270,12 @@ pub fn get(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config
 }
 
 pub fn connections(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (args.len == 0 or std.mem.eql(u8, args[0], "--help")) {
-        printErr("Usage: cog connections <engram-id> [--direction incoming|outgoing|both]\n");
+    if (hasFlag(args, "--help")) {
+        printCommandHelp(help.connections);
+        return;
+    }
+    if (args.len == 0) {
+        printErr("error: engram-id is required\nRun " ++ dim ++ "cog mem/connections --help" ++ reset ++ " for usage.\n");
         return error.Explained;
     }
 
@@ -275,8 +299,12 @@ pub fn connections(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg
 }
 
 pub fn trace(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (args.len < 2 or std.mem.eql(u8, args[0], "--help")) {
-        printErr("Usage: cog trace <from-id> <to-id>\n");
+    if (hasFlag(args, "--help")) {
+        printCommandHelp(help.trace);
+        return;
+    }
+    if (args.len < 2) {
+        printErr("error: from-id and to-id are required\nRun " ++ dim ++ "cog mem/trace --help" ++ reset ++ " for usage.\n");
         return error.Explained;
     }
 
@@ -296,8 +324,12 @@ pub fn trace(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Conf
 }
 
 pub fn bulkRecall(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (args.len == 0 or std.mem.eql(u8, args[0], "--help")) {
-        printErr("Usage: cog bulk-recall <query1> <query2> ... [--limit N]\n");
+    if (hasFlag(args, "--help")) {
+        printCommandHelp(help.bulk_recall);
+        return;
+    }
+    if (args.len == 0) {
+        printErr("error: at least one query is required\nRun " ++ dim ++ "cog mem/bulk-recall --help" ++ reset ++ " for usage.\n");
         return error.Explained;
     }
 
@@ -336,6 +368,10 @@ pub fn bulkRecall(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg:
 }
 
 pub fn listShortTerm(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
+    if (hasFlag(args, "--help")) {
+        printCommandHelp(help.list_short_term);
+        return;
+    }
     const limit = findFlag(args, "--limit");
 
     var aw: Writer.Allocating = .init(allocator);
@@ -358,6 +394,10 @@ pub fn listShortTerm(allocator: std.mem.Allocator, args: []const [:0]const u8, c
 }
 
 pub fn stale(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
+    if (hasFlag(args, "--help")) {
+        printCommandHelp(help.stale);
+        return;
+    }
     const level = findFlag(args, "--level");
     const limit = findFlag(args, "--limit");
 
@@ -385,13 +425,20 @@ pub fn stale(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Conf
 }
 
 pub fn stats(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    _ = args;
+    if (hasFlag(args, "--help")) {
+        printCommandHelp(help.stats);
+        return;
+    }
     const args_json = try jsonEmpty(allocator);
     defer allocator.free(args_json);
     try callAndPrint(allocator, cfg, "stats", args_json);
 }
 
 pub fn orphans(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
+    if (hasFlag(args, "--help")) {
+        printCommandHelp(help.orphans);
+        return;
+    }
     const limit = findFlag(args, "--limit");
 
     var aw: Writer.Allocating = .init(allocator);
@@ -414,13 +461,20 @@ pub fn orphans(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Co
 }
 
 pub fn connectivity(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    _ = args;
+    if (hasFlag(args, "--help")) {
+        printCommandHelp(help.connectivity);
+        return;
+    }
     const args_json = try jsonEmpty(allocator);
     defer allocator.free(args_json);
     try callAndPrint(allocator, cfg, "connectivity", args_json);
 }
 
 pub fn listTerms(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
+    if (hasFlag(args, "--help")) {
+        printCommandHelp(help.list_terms);
+        return;
+    }
     const limit = findFlag(args, "--limit");
 
     var aw: Writer.Allocating = .init(allocator);
@@ -445,6 +499,10 @@ pub fn listTerms(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: 
 // ── Write Commands ──────────────────────────────────────────────────────
 
 pub fn learn(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
+    if (hasFlag(args, "--help")) {
+        printCommandHelp(help.learn);
+        return;
+    }
     const term = findFlag(args, "--term") orelse {
         printErr("error: --term is required\n");
         return error.Explained;
@@ -515,6 +573,10 @@ pub fn learn(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Conf
 }
 
 pub fn associate(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
+    if (hasFlag(args, "--help")) {
+        printCommandHelp(help.associate);
+        return;
+    }
     const source = findFlag(args, "--source") orelse {
         printErr("error: --source is required\n");
         return error.Explained;
@@ -545,6 +607,10 @@ pub fn associate(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: 
 }
 
 pub fn bulkLearn(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
+    if (hasFlag(args, "--help")) {
+        printCommandHelp(help.bulk_learn);
+        return;
+    }
     var items = try findRepeatedFlag(allocator, args, "--item");
     defer items.deinit(allocator);
 
@@ -584,6 +650,10 @@ pub fn bulkLearn(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: 
 }
 
 pub fn bulkAssociate(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
+    if (hasFlag(args, "--help")) {
+        printCommandHelp(help.bulk_associate);
+        return;
+    }
     var links = try findRepeatedFlag(allocator, args, "--link");
     defer links.deinit(allocator);
 
@@ -623,8 +693,12 @@ pub fn bulkAssociate(allocator: std.mem.Allocator, args: []const [:0]const u8, c
 }
 
 pub fn update(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (args.len == 0 or std.mem.eql(u8, args[0], "--help")) {
-        printErr("Usage: cog update <engram-id> [--term TERM] [--definition DEF]\n");
+    if (hasFlag(args, "--help")) {
+        printCommandHelp(help.update);
+        return;
+    }
+    if (args.len == 0) {
+        printErr("error: engram-id is required\nRun " ++ dim ++ "cog mem/update --help" ++ reset ++ " for usage.\n");
         return error.Explained;
     }
 
@@ -653,8 +727,12 @@ pub fn update(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Con
 }
 
 pub fn unlink(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (args.len == 0 or std.mem.eql(u8, args[0], "--help")) {
-        printErr("Usage: cog unlink <synapse-id>\n");
+    if (hasFlag(args, "--help")) {
+        printCommandHelp(help.unlink);
+        return;
+    }
+    if (args.len == 0) {
+        printErr("error: synapse-id is required\nRun " ++ dim ++ "cog mem/unlink --help" ++ reset ++ " for usage.\n");
         return error.Explained;
     }
 
@@ -672,6 +750,10 @@ pub fn unlink(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Con
 }
 
 pub fn refactor(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
+    if (hasFlag(args, "--help")) {
+        printCommandHelp(help.refactor);
+        return;
+    }
     const term = findFlag(args, "--term") orelse {
         printErr("error: --term is required\n");
         return error.Explained;
@@ -697,6 +779,10 @@ pub fn refactor(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: C
 }
 
 pub fn deprecate(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
+    if (hasFlag(args, "--help")) {
+        printCommandHelp(help.deprecate);
+        return;
+    }
     const term = findFlag(args, "--term") orelse {
         printErr("error: --term is required\n");
         return error.Explained;
@@ -716,8 +802,12 @@ pub fn deprecate(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: 
 }
 
 pub fn reinforce(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (args.len == 0 or std.mem.eql(u8, args[0], "--help")) {
-        printErr("Usage: cog reinforce <engram-id>\n");
+    if (hasFlag(args, "--help")) {
+        printCommandHelp(help.reinforce);
+        return;
+    }
+    if (args.len == 0) {
+        printErr("error: engram-id is required\nRun " ++ dim ++ "cog mem/reinforce --help" ++ reset ++ " for usage.\n");
         return error.Explained;
     }
 
@@ -735,8 +825,12 @@ pub fn reinforce(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: 
 }
 
 pub fn flush(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (args.len == 0 or std.mem.eql(u8, args[0], "--help")) {
-        printErr("Usage: cog flush <engram-id>\n");
+    if (hasFlag(args, "--help")) {
+        printCommandHelp(help.flush);
+        return;
+    }
+    if (args.len == 0) {
+        printErr("error: engram-id is required\nRun " ++ dim ++ "cog mem/flush --help" ++ reset ++ " for usage.\n");
         return error.Explained;
     }
 
@@ -754,8 +848,12 @@ pub fn flush(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Conf
 }
 
 pub fn verify(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (args.len == 0 or std.mem.eql(u8, args[0], "--help")) {
-        printErr("Usage: cog verify <synapse-id>\n");
+    if (hasFlag(args, "--help")) {
+        printCommandHelp(help.verify);
+        return;
+    }
+    if (args.len == 0) {
+        printErr("error: synapse-id is required\nRun " ++ dim ++ "cog mem/verify --help" ++ reset ++ " for usage.\n");
         return error.Explained;
     }
 
@@ -773,6 +871,10 @@ pub fn verify(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Con
 }
 
 pub fn meld(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
+    if (hasFlag(args, "--help")) {
+        printCommandHelp(help.meld);
+        return;
+    }
     const target = findFlag(args, "--target") orelse {
         printErr("error: --target is required\n");
         return error.Explained;
@@ -800,7 +902,7 @@ pub fn meld(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Confi
 
 pub fn init(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     if (hasFlag(args, "--help")) {
-        printErr("Usage: cog init [--host HOST]\n\nInteractively configure a .cog.json file and system prompt for the current directory.\n");
+        printCommandHelp(help.init);
         return;
     }
 
@@ -851,14 +953,16 @@ pub fn init(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     printErr(username);
     printErr("\n\n");
 
-    // Check if .cog.json already exists
+    // Check if .cog/settings.json already exists
     const cog_exists = blk: {
-        const f = std.fs.cwd().openFile(".cog.json", .{}) catch break :blk false;
+        var dir = std.fs.cwd().openDir(".cog", .{}) catch break :blk false;
+        defer dir.close();
+        const f = dir.openFile("settings.json", .{}) catch break :blk false;
         f.close();
         break :blk true;
     };
     const write_cog = if (cog_exists)
-        try tui.confirm(".cog.json already exists. Overwrite?")
+        try tui.confirm(".cog/settings.json already exists. Overwrite?")
     else
         true;
 
@@ -901,7 +1005,16 @@ pub fn init(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         const selected_brain = selection.?.brain_name;
         defer allocator.free(selected_brain);
 
-        // Write .cog.json file
+        // Create .cog/ directory if needed
+        std.fs.cwd().makeDir(".cog") catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => {
+                printErr("error: failed to create .cog directory\n");
+                return error.Explained;
+            },
+        };
+
+        // Write .cog/settings.json file
         const cog_content = try std.fmt.allocPrint(allocator,
             \\{{
             \\  "brain": {{
@@ -912,23 +1025,23 @@ pub fn init(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         , .{ host, account_slug, selected_brain });
         defer allocator.free(cog_content);
 
-        const file = std.fs.cwd().createFile(".cog.json", .{}) catch {
-            printErr("error: failed to write .cog.json file\n");
+        const file = std.fs.cwd().createFile(".cog/settings.json", .{}) catch {
+            printErr("error: failed to write .cog/settings.json\n");
             return error.Explained;
         };
         defer file.close();
         var write_buf: [4096]u8 = undefined;
         var fw = file.writer(&write_buf);
         fw.interface.writeAll(cog_content) catch {
-            printErr("error: failed to write .cog.json file\n");
+            printErr("error: failed to write .cog/settings.json\n");
             return error.Explained;
         };
         fw.interface.flush() catch {
-            printErr("error: failed to write .cog.json file\n");
+            printErr("error: failed to write .cog/settings.json\n");
             return error.Explained;
         };
 
-        printErr("  Wrote .cog.json\n");
+        printErr("  Wrote .cog/settings.json\n");
     }
 
     tui.separator();
@@ -938,6 +1051,24 @@ pub fn init(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     tui.separator();
 
     // Install agent skill
+    try installSkill(allocator, host);
+}
+
+pub fn updatePromptAndSkill(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
+    if (hasFlag(args, "--help")) {
+        printCommandHelp(help.update_cmd);
+        return;
+    }
+
+    const host: []const u8 = findFlag(args, "--host") orelse "trycog.ai";
+
+    tui.header();
+
+    // Update system prompt
+    try setupSystemPrompt(allocator, host);
+    tui.separator();
+
+    // Update agent skill
     try installSkill(allocator, host);
 }
 
@@ -1368,10 +1499,58 @@ fn installSkill(allocator: std.mem.Allocator, host: []const u8) !void {
     tui.checkmark();
     printErr("\n");
 
-    // Create {base_dir}/cog/ directory (recursive)
+    // Compute paths
     const skill_dir = try std.fmt.allocPrint(allocator, "{s}/cog", .{base_dir});
     defer allocator.free(skill_dir);
+    const skill_path = try std.fmt.allocPrint(allocator, "{s}/cog/SKILL.md", .{base_dir});
+    defer allocator.free(skill_path);
 
+    // Check if SKILL.md already exists
+    const existing_content = readAbsoluteFileAlloc(allocator, skill_path);
+    defer if (existing_content) |c| allocator.free(c);
+
+    if (existing_content) |existing| {
+        if (std.mem.eql(u8, existing, skill_content)) {
+            printErr("  SKILL.md is already up to date.\n");
+            return;
+        }
+
+        // File exists but differs — let user decide
+        while (true) {
+            const update_options = [_]tui.MenuItem{
+                .{ .label = "View diff" },
+                .{ .label = "Update" },
+                .{ .label = "Skip" },
+            };
+
+            const update_result = try tui.select(allocator, .{
+                .prompt = "SKILL.md has changed:",
+                .items = &update_options,
+            });
+
+            switch (update_result) {
+                .selected => |idx| switch (idx) {
+                    0 => {
+                        showDiff(allocator, existing, skill_content);
+                        continue;
+                    },
+                    1 => break,
+                    2 => {
+                        printErr("  Skipped skill update.\n");
+                        return;
+                    },
+                    else => unreachable,
+                },
+                .back, .cancelled => {
+                    printErr("  Skipped skill update.\n");
+                    return;
+                },
+                .input => unreachable,
+            }
+        }
+    }
+
+    // Create {base_dir}/cog/ directory (recursive)
     makeDirsAbsolute(skill_dir) catch {
         printErr("  error: failed to create directory ");
         printErr(skill_dir);
@@ -1380,14 +1559,12 @@ fn installSkill(allocator: std.mem.Allocator, host: []const u8) !void {
     };
 
     // Write SKILL.md
-    const skill_path = try std.fmt.allocPrint(allocator, "{s}/cog/SKILL.md", .{base_dir});
-    defer allocator.free(skill_path);
-
     writeAbsoluteFile(skill_path, skill_content) catch {
         return error.Explained;
     };
 
-    printErr("  Installed ");
+    const verb: []const u8 = if (existing_content != null) "  Updated " else "  Installed ";
+    printErr(verb);
     printErr(skill_path);
     printErr("\n");
 }
@@ -1422,6 +1599,129 @@ fn writeAbsoluteFile(path: []const u8, content: []const u8) !void {
         printErr("\n");
         return error.Explained;
     };
+}
+
+fn readAbsoluteFileAlloc(allocator: std.mem.Allocator, path: []const u8) ?[]const u8 {
+    const file = std.fs.openFileAbsolute(path, .{}) catch return null;
+    defer file.close();
+    return file.readToEndAlloc(allocator, 1048576) catch return null;
+}
+
+fn splitLines(allocator: std.mem.Allocator, content: []const u8) ?[]const []const u8 {
+    var count: usize = 0;
+    var iter = std.mem.splitSequence(u8, content, "\n");
+    while (iter.next()) |_| count += 1;
+
+    const lines = allocator.alloc([]const u8, count) catch return null;
+    var iter2 = std.mem.splitSequence(u8, content, "\n");
+    var idx: usize = 0;
+    while (iter2.next()) |line| : (idx += 1) {
+        lines[idx] = line;
+    }
+    return lines;
+}
+
+fn showDiff(allocator: std.mem.Allocator, old_content: []const u8, new_content: []const u8) void {
+    const old_lines = splitLines(allocator, old_content) orelse return;
+    defer allocator.free(old_lines);
+    const new_lines = splitLines(allocator, new_content) orelse return;
+    defer allocator.free(new_lines);
+
+    const m = old_lines.len;
+    const n = new_lines.len;
+    const stride = n + 1;
+
+    // Build LCS table
+    const dp = allocator.alloc(usize, (m + 1) * (n + 1)) catch return;
+    defer allocator.free(dp);
+
+    for (0..m + 1) |i| {
+        for (0..n + 1) |j| {
+            if (i == 0 or j == 0) {
+                dp[i * stride + j] = 0;
+            } else if (std.mem.eql(u8, old_lines[i - 1], new_lines[j - 1])) {
+                dp[i * stride + j] = dp[(i - 1) * stride + (j - 1)] + 1;
+            } else {
+                dp[i * stride + j] = @max(dp[(i - 1) * stride + j], dp[i * stride + (j - 1)]);
+            }
+        }
+    }
+
+    // Backtrack to produce diff entries
+    const DiffKind = enum { same, removed, added };
+    const DiffEntry = struct { kind: DiffKind, line: []const u8 };
+
+    const diff_buf = allocator.alloc(DiffEntry, m + n) catch return;
+    defer allocator.free(diff_buf);
+    var diff_len: usize = 0;
+
+    var i = m;
+    var j = n;
+    while (i > 0 or j > 0) {
+        if (i > 0 and j > 0 and std.mem.eql(u8, old_lines[i - 1], new_lines[j - 1])) {
+            diff_buf[diff_len] = .{ .kind = .same, .line = old_lines[i - 1] };
+            diff_len += 1;
+            i -= 1;
+            j -= 1;
+        } else if (j > 0 and (i == 0 or dp[i * stride + (j - 1)] >= dp[(i - 1) * stride + j])) {
+            diff_buf[diff_len] = .{ .kind = .added, .line = new_lines[j - 1] };
+            diff_len += 1;
+            j -= 1;
+        } else {
+            diff_buf[diff_len] = .{ .kind = .removed, .line = old_lines[i - 1] };
+            diff_len += 1;
+            i -= 1;
+        }
+    }
+
+    const entries = diff_buf[0..diff_len];
+    std.mem.reverse(DiffEntry, entries);
+
+    // Determine which lines to show (within 3 lines of any change)
+    const show = allocator.alloc(bool, diff_len) catch return;
+    defer allocator.free(show);
+    @memset(show, false);
+
+    const ctx: usize = 3;
+    for (entries, 0..) |entry, idx| {
+        if (entry.kind != .same) {
+            const start = if (idx >= ctx) idx - ctx else 0;
+            const end = @min(idx + ctx + 1, diff_len);
+            for (start..end) |k| show[k] = true;
+        }
+    }
+
+    // Display with color
+    printErr("\n");
+    var in_gap = false;
+    for (entries, 0..) |entry, idx| {
+        if (!show[idx]) {
+            in_gap = true;
+            continue;
+        }
+        if (in_gap) {
+            printErr("  \x1B[2m...\x1B[0m\n");
+            in_gap = false;
+        }
+        switch (entry.kind) {
+            .same => {
+                printErr("  \x1B[2m ");
+                printErr(entry.line);
+                printErr("\x1B[0m\n");
+            },
+            .removed => {
+                printErr("  \x1B[31m-");
+                printErr(entry.line);
+                printErr("\x1B[0m\n");
+            },
+            .added => {
+                printErr("  \x1B[32m+");
+                printErr(entry.line);
+                printErr("\x1B[0m\n");
+            },
+        }
+    }
+    printErr("\n");
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────

@@ -1,4 +1,5 @@
 const std = @import("std");
+const paths = @import("paths.zig");
 
 pub const Config = struct {
     api_key: []const u8,
@@ -16,7 +17,8 @@ pub const Config = struct {
 
         const cog_content = findCogFile(allocator) catch |err| switch (err) {
             error.NoCogFile => {
-                printErr("error: no .cog.json file found (searched up to home directory)\n");
+                printErr("error: no .cog/settings.json found (searched up to home directory)\n");
+                printErr("       Run " ++ "\x1B[2m" ++ "cog init" ++ "\x1B[0m" ++ " to set up a brain.\n");
                 return error.Explained;
             },
             else => return err,
@@ -25,7 +27,7 @@ pub const Config = struct {
 
         const url = resolveUrl(allocator, cog_content) catch |err| switch (err) {
             error.InvalidCogUrl => {
-                printErr("error: invalid URL in .cog.json file\n");
+                printErr("error: invalid URL in settings file\n");
                 return error.Explained;
             },
             else => return err,
@@ -79,8 +81,14 @@ pub fn findCogFile(allocator: std.mem.Allocator) ![]const u8 {
     defer allocator.free(current);
 
     while (true) {
-        // Try .cog.json first, fall back to legacy .cog
-        const raw = readFileInDir(allocator, current, ".cog.json") orelse
+        // Try .cog/settings.json first, then .cog.json, then legacy .cog
+        const settings_path = std.fmt.allocPrint(allocator, "{s}/.cog/settings.json", .{current}) catch null;
+        const raw = if (settings_path) |sp| blk: {
+            defer allocator.free(sp);
+            break :blk readFileAtPath(allocator, sp) orelse
+                readFileInDir(allocator, current, ".cog.json") orelse
+                readFileInDir(allocator, current, ".cog");
+        } else readFileInDir(allocator, current, ".cog.json") orelse
             readFileInDir(allocator, current, ".cog");
 
         if (raw) |content| {
@@ -101,6 +109,12 @@ pub fn findCogFile(allocator: std.mem.Allocator) ![]const u8 {
     }
 
     return error.NoCogFile;
+}
+
+fn readFileAtPath(allocator: std.mem.Allocator, path: []const u8) ?[]const u8 {
+    const file = std.fs.openFileAbsolute(path, .{}) catch return null;
+    defer file.close();
+    return file.readToEndAlloc(allocator, 4096) catch return null;
 }
 
 fn readFileInDir(allocator: std.mem.Allocator, dir_path: []const u8, filename: []const u8) ?[]const u8 {
