@@ -111,6 +111,7 @@ const RawTerminal = struct {
 // ── Stderr Writer Helper ────────────────────────────────────────────────
 
 fn stderrWrite(data: []const u8) void {
+    if (@import("builtin").is_test) return;
     var buf: [8192]u8 = undefined;
     var w = std.fs.File.stderr().writer(&buf);
     w.interface.writeAll(data) catch {};
@@ -155,6 +156,12 @@ const h4 = h3 ++ hh;
 
 // ── Public Helpers ──────────────────────────────────────────────────────
 
+/// Check if stderr is a TTY (for progress display gating).
+pub fn isStderrTty() bool {
+    if (@import("builtin").is_test) return false;
+    return posix.isatty(std.fs.File.stderr().handle);
+}
+
 /// Print the Cog ASCII art header
 pub fn header() void {
     stderrWrite("\n" ++ cyan);
@@ -163,7 +170,7 @@ pub fn header() void {
     stderrWrite("  " ++ vv ++ "      " ++ vv ++ "   " ++ vv ++ "  " ++ vv ++ " " ++ hh ++ hh ++ tr ++ "\n");
     stderrWrite("  " ++ cb ++ h4 ++ "  " ++ cb ++ h3 ++ br ++ "  " ++ cb ++ h3 ++ br ++ "\n");
     stderrWrite(reset);
-    stderrWrite(dim ++ "  Memory for AI agents\n" ++ reset);
+    stderrWrite(dim ++ "  Tools for AI coding\n" ++ reset);
     stderrWrite("\n");
 }
 
@@ -175,6 +182,158 @@ pub fn checkmark() void {
 /// Print a dim horizontal rule to stderr
 pub fn separator() void {
     stderrWrite(dim ++ "  \xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80" ++ reset ++ "\n");
+}
+
+// ── Progress Display ─────────────────────────────────────────────────────
+
+/// Format a number with comma separators (e.g., 1234 → "1,234").
+/// Returns the formatted slice within the provided buffer.
+fn formatNumber(buf: []u8, n: usize) []const u8 {
+    if (n == 0) {
+        buf[0] = '0';
+        return buf[0..1];
+    }
+
+    // First, write digits in reverse
+    var tmp: [20]u8 = undefined;
+    var tmp_len: usize = 0;
+    var val = n;
+    while (val > 0) : (tmp_len += 1) {
+        tmp[tmp_len] = @intCast('0' + val % 10);
+        val /= 10;
+    }
+
+    // Now write to buf with commas (grouped from the right)
+    var pos: usize = 0;
+    var i: usize = 0;
+    while (i < tmp_len) : (i += 1) {
+        if (i > 0 and (tmp_len - i) % 3 == 0) {
+            buf[pos] = ',';
+            pos += 1;
+        }
+        buf[pos] = tmp[tmp_len - 1 - i];
+        pos += 1;
+    }
+    return buf[0..pos];
+}
+
+/// Truncate a file path to fit within max_len chars.
+/// If too long, returns "..." + last (max_len - 3) chars.
+fn truncatePath(buf: []u8, path: []const u8, max_len: usize) []const u8 {
+    if (path.len <= max_len) return path;
+    const suffix_len = max_len - 3;
+    buf[0] = '.';
+    buf[1] = '.';
+    buf[2] = '.';
+    @memcpy(buf[3..][0..suffix_len], path[path.len - suffix_len ..]);
+    return buf[0..max_len];
+}
+
+// Box-drawing characters for progress bar
+const bar_filled = "\xE2\x94\x81"; // ━ (heavy horizontal)
+const bar_empty = "\xE2\x94\x80"; // ─ (light horizontal)
+const bar_width = 30;
+
+/// Render a progress bar into a buffer. Returns the written slice.
+/// Format: "━━━━━━━━━━──────────────────── 42%"
+fn renderBar(buf: []u8, current: usize, total: usize) []const u8 {
+    const pct: usize = if (total == 0) 0 else @min(current * 100 / total, 100);
+    const filled: usize = if (total == 0) 0 else @min(current * bar_width / total, bar_width);
+
+    var pos: usize = 0;
+
+    // Cyan for filled portion
+    const cyan_bytes = cyan;
+    @memcpy(buf[pos..][0..cyan_bytes.len], cyan_bytes);
+    pos += cyan_bytes.len;
+
+    for (0..filled) |_| {
+        @memcpy(buf[pos..][0..bar_filled.len], bar_filled);
+        pos += bar_filled.len;
+    }
+
+    // Dim for empty portion
+    const dim_bytes = dim;
+    @memcpy(buf[pos..][0..dim_bytes.len], dim_bytes);
+    pos += dim_bytes.len;
+
+    for (0..bar_width - filled) |_| {
+        @memcpy(buf[pos..][0..bar_empty.len], bar_empty);
+        pos += bar_empty.len;
+    }
+
+    // Reset + percentage
+    const reset_bytes = reset;
+    @memcpy(buf[pos..][0..reset_bytes.len], reset_bytes);
+    pos += reset_bytes.len;
+
+    // " NNN%"
+    const pct_str = std.fmt.bufPrint(buf[pos..], " {d}%", .{pct}) catch return buf[0..pos];
+    pos += pct_str.len;
+
+    return buf[0..pos];
+}
+
+/// Print the initial progress block (6 lines):
+///   Indexing\n \n     bar 0%\n     Files  0 / total\n     Symbols  0\n     \n
+pub fn progressStart(total_files: usize) void {
+    stderrWrite("  " ++ cyan ++ bold ++ "Indexing" ++ reset ++ "\n");
+    stderrWrite("\n");
+    var bar_buf: [512]u8 = undefined;
+    stderrWrite("    ");
+    stderrWrite(renderBar(&bar_buf, 0, total_files));
+    stderrWrite("\n");
+    var num_buf: [32]u8 = undefined;
+    stderrWrite("    " ++ bold ++ "Files" ++ reset ++ "    0 / ");
+    stderrWrite(formatNumber(&num_buf, total_files));
+    stderrWrite("\n");
+    stderrWrite("    " ++ bold ++ "Symbols" ++ reset ++ "  0\n");
+    stderrWrite("\n");
+}
+
+/// Update the bottom 4 progress lines (bar, Files, Symbols, current file).
+pub fn progressUpdate(files: usize, total_files: usize, symbols: usize, current_file: []const u8) void {
+    clearLines(4);
+    var bar_buf: [512]u8 = undefined;
+    stderrWrite("    ");
+    stderrWrite(renderBar(&bar_buf, files, total_files));
+    stderrWrite("\n");
+    var num_buf: [32]u8 = undefined;
+    stderrWrite("    " ++ bold ++ "Files" ++ reset ++ "    ");
+    stderrWrite(formatNumber(&num_buf, files));
+    stderrWrite(" / ");
+    stderrWrite(formatNumber(&num_buf, total_files));
+    stderrWrite("\n");
+    stderrWrite("    " ++ bold ++ "Symbols" ++ reset ++ "  ");
+    stderrWrite(formatNumber(&num_buf, symbols));
+    stderrWrite("\n");
+    var path_buf: [64]u8 = undefined;
+    stderrWrite("    " ++ dim);
+    stderrWrite(truncatePath(&path_buf, current_file, 60));
+    stderrWrite(reset ++ "\n");
+}
+
+/// Replace all 6 progress lines with final state (Indexing ✓ + stats + path).
+pub fn progressFinish(files: usize, symbols: usize, skipped: usize, index_path: []const u8) void {
+    clearLines(6);
+    stderrWrite("  " ++ cyan ++ bold ++ "Indexing " ++ check ++ reset ++ "\n");
+    stderrWrite("\n");
+    var num_buf: [32]u8 = undefined;
+    stderrWrite("    " ++ bold ++ "Files" ++ reset ++ "    ");
+    stderrWrite(formatNumber(&num_buf, files));
+    if (skipped > 0) {
+        stderrWrite(dim ++ "  (");
+        stderrWrite(formatNumber(&num_buf, skipped));
+        stderrWrite(" skipped)" ++ reset);
+    }
+    stderrWrite("\n");
+    stderrWrite("    " ++ bold ++ "Symbols" ++ reset ++ "  ");
+    stderrWrite(formatNumber(&num_buf, symbols));
+    stderrWrite("\n");
+    var path_buf: [64]u8 = undefined;
+    stderrWrite("    " ++ dim);
+    stderrWrite(truncatePath(&path_buf, index_path, 60));
+    stderrWrite(reset ++ "\n");
 }
 
 // ── Select (TTY) ────────────────────────────────────────────────────────

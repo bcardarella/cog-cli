@@ -297,6 +297,7 @@ fn writeJsonValueTo(w: *Writer, value: json.Value) !void {
 }
 
 fn printErr(msg: []const u8) void {
+    if (@import("builtin").is_test) return;
     var buf: [4096]u8 = undefined;
     var w = std.fs.File.stderr().writer(&buf);
     w.interface.writeAll(msg) catch {};

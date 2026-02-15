@@ -1,3 +1,18 @@
 .zig-cache/
 zig-out/
 .claude/
+.cog/
+
+# Build artifacts
+/root
+
+# Vendored tree-sitter grammars (fetched during build)
+/grammars/
+
+# Session notes
+/debug*.md
+/treeplan.md
+/CODE_QUERY_IMPROVEMENTS.md
+
+# External indexer config
+/tsconfig.json
