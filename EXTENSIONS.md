@@ -1,18 +1,24 @@
 # Writing a Language Extension
 
-Cog's code intelligence is powered by [SCIP](https://github.com/sourcegraph/scip) (Source Code Intelligence Protocol). A language extension is a program that reads source files and produces a SCIP index. This guide covers everything you need to build one.
+Cog's code intelligence uses two indexing layers:
+
+1. **Tree-sitter** (built-in) — Cog ships with tree-sitter grammars and query files for 9 languages: Go, TypeScript, TSX, JavaScript, Python, Java, Rust, C, and C++. These run in-process, per-file, with no external dependencies.
+
+2. **SCIP extensions** (external) — For languages tree-sitter doesn't cover, Cog invokes an external indexer that produces a [SCIP](https://github.com/sourcegraph/scip) (Source Code Intelligence Protocol) index. This is what extensions provide.
+
+A language extension is a program that reads source files and writes a SCIP protobuf index. This guide covers how to build one.
 
 ## How It Works
 
 When you run `cog code/index`, Cog:
 
 1. Expands the glob pattern to a list of files
-2. Groups files by extension (`.rb`, `.zig`, etc.)
-3. For each group, finds a matching extension (installed first, then built-in)
-4. Invokes the extension binary with the project path and a temp output path
-5. Reads the SCIP protobuf output and merges it into `.cog/index.scip`
+2. For each file, tries the **tree-sitter** indexer first (built-in, per-file)
+3. If tree-sitter doesn't support the file extension, looks for a **SCIP extension** (installed first, then built-in)
+4. Invokes each matched extension binary with the project path and a temp output path
+5. Reads the SCIP protobuf output and merges everything into `.cog/index.scip`
 
-Your extension is the program that does step 4 — it receives a path and writes SCIP.
+Both layers produce the same SCIP format internally — tree-sitter results are converted to SCIP documents before merging. Your extension provides step 4 for languages that tree-sitter doesn't handle.
 
 ## Repository Layout
 
@@ -244,9 +250,27 @@ func main() {
 }
 ```
 
-## Built-in Extensions
+## Built-in Language Support
 
-These are compiled into Cog. Your extension overrides them if it handles the same file types.
+### Tree-sitter (in-process)
+
+These languages are indexed by the built-in tree-sitter grammars. No external tools needed.
+
+| Language | Extensions |
+|----------|-----------|
+| Go | `.go` |
+| TypeScript | `.ts` |
+| TSX | `.tsx` |
+| JavaScript | `.js` |
+| Python | `.py` |
+| Java | `.java` |
+| Rust | `.rs` |
+| C | `.c` |
+| C++ | `.cpp` |
+
+### SCIP extensions (external)
+
+These are built-in SCIP extension definitions. Cog invokes them as external processes when tree-sitter indexing is not available or when a richer index is needed. Your installed extension overrides these if it handles the same file types.
 
 | Name | Extensions | Args pattern |
 |------|------------|-------------|

@@ -418,7 +418,7 @@ cog mem/meld --target "other-brain" --description "Shared architecture"
 
 ## Code Intelligence
 
-SCIP-based code indexing and querying. Works locally — no account required.
+Code indexing and querying powered by tree-sitter and [SCIP](https://github.com/sourcegraph/scip). Tree-sitter grammars are built in for 9 languages (Go, TypeScript, JavaScript, Python, Java, Rust, C, C++, TSX). Additional languages are supported via [SCIP extensions](EXTENSIONS.md). Works locally — no account required.
 
 ### Benchmarks
 
@@ -435,7 +435,7 @@ Across these tasks, Cog averages **2.8x faster** with **89% fewer tokens** compa
 
 ### `code/index`
 
-Build a SCIP code index. Expands a glob pattern to match files, resolves each to a language extension, invokes the indexer per-file, and merges results into `.cog/index.scip`.
+Build a code index. For each file, Cog tries the built-in tree-sitter indexer first, then falls back to a matching SCIP extension. Results are merged into `.cog/index.scip`.
 
 ```
 cog code/index [pattern]
@@ -459,7 +459,11 @@ cog code/index "src/**/*.go"    # All .go files under src/
 cog code/index "*.py"           # .py files in current dir only
 ```
 
-**Built-in extensions:**
+**Built-in tree-sitter support:**
+
+Go, TypeScript, TSX, JavaScript, Python, Java, Rust, C, C++
+
+**Built-in SCIP extensions** (external fallback):
 
 | Indexer | File types |
 |---------|------------|
@@ -469,7 +473,7 @@ cog code/index "*.py"           # .py files in current dir only
 | scip-java | `.java` |
 | rust-analyzer | `.rs` |
 
-Installed extensions (`~/.config/cog/extensions/`) override built-ins.
+Installed extensions (`~/.config/cog/extensions/`) override built-ins. See [Writing a Language Extension](EXTENSIONS.md).
 
 ### `code/query`
 
