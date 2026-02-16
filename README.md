@@ -627,14 +627,7 @@ cog install https://github.com/example/scip-zig.git
 
 Extensions are installed to `~/.config/cog/extensions/<name>/`. Installed extensions override built-in indexers for shared file extensions.
 
-**Manifest format** (`cog-extension.json` in repo root):
-
-| Field | Description |
-|-------|-------------|
-| `name` | Extension name (also the binary name) |
-| `extensions` | File extensions this indexer handles |
-| `build` | Shell command to build the indexer |
-| `args` | Args template with `{file}` and `{output}` placeholders |
+See **[Writing a Language Extension](EXTENSIONS.md)** for a complete guide on building your own — manifest format, SCIP output, debugger support, and a worked example.
 
 ---
 
