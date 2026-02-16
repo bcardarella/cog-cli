@@ -74,6 +74,20 @@ fn mainInner() !void {
         return;
     }
 
+    // Handle group help: cog mem, cog code, cog debug
+    if (std.mem.eql(u8, subcmd, "mem")) {
+        printMemHelp();
+        return;
+    }
+    if (std.mem.eql(u8, subcmd, "code")) {
+        printCodeHelp();
+        return;
+    }
+    if (std.mem.eql(u8, subcmd, "debug")) {
+        printDebugHelp();
+        return;
+    }
+
     // Handle code/* commands (don't need config — use local .cog/index.scip)
     if (std.mem.startsWith(u8, subcmd, "code/")) {
         try code_intel.dispatch(allocator, subcmd, cmd_args);
@@ -108,10 +122,26 @@ fn printHelp() void {
         bold ++ "  Usage: " ++ reset ++ "cog <command> [options]\n"
         ++ "\n"
         ++ cyan ++ bold ++ "  Setup" ++ reset ++ "\n"
-        ++ "    " ++ bold ++ "init" ++ reset ++ "                  " ++ dim ++ "Interactive setup — verify key, pick brain, write .cog/settings.json" ++ reset ++ "\n"
+        ++ "    " ++ bold ++ "init" ++ reset ++ "                  " ++ dim ++ "Interactive setup for the current directory" ++ reset ++ "\n"
         ++ "    " ++ bold ++ "update" ++ reset ++ "                " ++ dim ++ "Fetch latest system prompt and agent skill" ++ reset ++ "\n"
         ++ "\n"
-        ++ cyan ++ bold ++ "  Memory" ++ reset ++ dim ++ "  Read" ++ reset ++ "\n"
+        ++ cyan ++ bold ++ "  Commands" ++ reset ++ "\n"
+        ++ "    " ++ bold ++ "mem" ++ reset ++ "                   " ++ dim ++ "Persistent associative memory" ++ reset ++ "\n"
+        ++ "    " ++ bold ++ "code" ++ reset ++ "                  " ++ dim ++ "Code intelligence and indexing" ++ reset ++ "\n"
+        ++ "    " ++ bold ++ "debug" ++ reset ++ "                 " ++ dim ++ "Debug server for AI agents" ++ reset ++ "\n"
+        ++ "    " ++ bold ++ "install" ++ reset ++ "               " ++ dim ++ "Install a language extension from a git URL" ++ reset ++ "\n"
+        ++ "\n"
+        ++ dim ++ "  Run 'cog <command> --help' for details on a specific command." ++ reset ++ "\n"
+        ++ "\n"
+    );
+}
+
+fn printMemHelp() void {
+    tui.header();
+    printErr(
+        bold ++ "  cog mem" ++ reset ++ " — Persistent associative memory\n"
+        ++ "\n"
+        ++ cyan ++ bold ++ "  Read" ++ reset ++ "\n"
         ++ "    " ++ bold ++ "mem/recall" ++ reset ++ "            " ++ dim ++ "Search memory for relevant concepts" ++ reset ++ "\n"
         ++ "    " ++ bold ++ "mem/get" ++ reset ++ "               " ++ dim ++ "Retrieve a specific engram by ID" ++ reset ++ "\n"
         ++ "    " ++ bold ++ "mem/connections" ++ reset ++ "       " ++ dim ++ "List connections from an engram" ++ reset ++ "\n"
@@ -124,7 +154,7 @@ fn printHelp() void {
         ++ "    " ++ bold ++ "mem/connectivity" ++ reset ++ "      " ++ dim ++ "Analyze graph connectivity" ++ reset ++ "\n"
         ++ "    " ++ bold ++ "mem/list-terms" ++ reset ++ "        " ++ dim ++ "List all engram terms" ++ reset ++ "\n"
         ++ "\n"
-        ++ cyan ++ bold ++ "  Memory" ++ reset ++ dim ++ "  Write" ++ reset ++ "\n"
+        ++ cyan ++ bold ++ "  Write" ++ reset ++ "\n"
         ++ "    " ++ bold ++ "mem/learn" ++ reset ++ "             " ++ dim ++ "Store a new concept" ++ reset ++ "\n"
         ++ "    " ++ bold ++ "mem/associate" ++ reset ++ "         " ++ dim ++ "Link two concepts" ++ reset ++ "\n"
         ++ "    " ++ bold ++ "mem/bulk-learn" ++ reset ++ "        " ++ dim ++ "Batch store concepts" ++ reset ++ "\n"
@@ -138,22 +168,39 @@ fn printHelp() void {
         ++ "    " ++ bold ++ "mem/verify" ++ reset ++ "            " ++ dim ++ "Confirm synapse accuracy" ++ reset ++ "\n"
         ++ "    " ++ bold ++ "mem/meld" ++ reset ++ "              " ++ dim ++ "Create cross-brain connection" ++ reset ++ "\n"
         ++ "\n"
-        ++ cyan ++ bold ++ "  Code Intelligence" ++ reset ++ "\n"
+        ++ dim ++ "  Run 'cog mem/<command> --help' for details on a specific command." ++ reset ++ "\n"
+        ++ "\n"
+    );
+}
+
+fn printCodeHelp() void {
+    tui.header();
+    printErr(
+        bold ++ "  cog code" ++ reset ++ " — Code intelligence and indexing\n"
+        ++ "\n"
+        ++ cyan ++ bold ++ "  Commands" ++ reset ++ "\n"
         ++ "    " ++ bold ++ "code/index" ++ reset ++ "            " ++ dim ++ "Build SCIP code index (per-file incremental)" ++ reset ++ "\n"
-        ++ "    " ++ bold ++ "code/query" ++ reset ++ "            " ++ dim ++ "Unified query: --find, --refs, --symbols, --structure" ++ reset ++ "\n"
+        ++ "    " ++ bold ++ "code/query" ++ reset ++ "            " ++ dim ++ "Find definitions, references, symbols, structure" ++ reset ++ "\n"
         ++ "    " ++ bold ++ "code/edit" ++ reset ++ "             " ++ dim ++ "Edit a file and re-index" ++ reset ++ "\n"
         ++ "    " ++ bold ++ "code/create" ++ reset ++ "           " ++ dim ++ "Create a file and index it" ++ reset ++ "\n"
         ++ "    " ++ bold ++ "code/delete" ++ reset ++ "           " ++ dim ++ "Delete a file and remove from index" ++ reset ++ "\n"
         ++ "    " ++ bold ++ "code/rename" ++ reset ++ "           " ++ dim ++ "Rename a file and update index" ++ reset ++ "\n"
         ++ "    " ++ bold ++ "code/status" ++ reset ++ "           " ++ dim ++ "Report index status" ++ reset ++ "\n"
         ++ "\n"
-        ++ cyan ++ bold ++ "  Debug" ++ reset ++ "\n"
+        ++ dim ++ "  Run 'cog code/<command> --help' for details on a specific command." ++ reset ++ "\n"
+        ++ "\n"
+    );
+}
+
+fn printDebugHelp() void {
+    tui.header();
+    printErr(
+        bold ++ "  cog debug" ++ reset ++ " — Debug server for AI agents\n"
+        ++ "\n"
+        ++ cyan ++ bold ++ "  Commands" ++ reset ++ "\n"
         ++ "    " ++ bold ++ "debug/serve" ++ reset ++ "           " ++ dim ++ "Start MCP debug server (stdio transport)" ++ reset ++ "\n"
         ++ "\n"
-        ++ cyan ++ bold ++ "  Extensions" ++ reset ++ "\n"
-        ++ "    " ++ bold ++ "install" ++ reset ++ "               " ++ dim ++ "Install a language extension from a git URL" ++ reset ++ "\n"
-        ++ "\n"
-        ++ dim ++ "  Run 'cog <command> --help' for details on a specific command." ++ reset ++ "\n"
+        ++ dim ++ "  Run 'cog debug/<command> --help' for details on a specific command." ++ reset ++ "\n"
         ++ "\n"
     );
 }

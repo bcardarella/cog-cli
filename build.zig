@@ -58,6 +58,17 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
+    // Code-sign on macOS for debug server (task_for_pid requires debugger entitlement)
+    // Runs after the install step so the installed binary gets the entitlement.
+    const codesign = b.addSystemCommand(&.{
+        "codesign", "--entitlements", "debug-entitlements.plist", "-fs", "-",
+        b.getInstallPath(.bin, "cog"),
+    });
+    codesign.step.dependOn(b.getInstallStep());
+
+    const sign_step = b.step("sign", "Code-sign the binary with debug entitlements");
+    sign_step.dependOn(&codesign.step);
+
     // Run step
     const run_step = b.step("run", "Run the app");
     const run_cmd = b.addRunArtifact(exe);
@@ -96,6 +107,21 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench", "Run query benchmark");
     bench_step.dependOn(&bench_run.step);
     if (b.args) |args| bench_run.addArgs(args);
+
+    // Integration test
+    const integ_exe = b.addExecutable(.{
+        .name = "test-integration",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/test_integration.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const integ_run = b.addRunArtifact(integ_exe);
+    integ_run.step.dependOn(b.getInstallStep());
+    const integ_step = b.step("test-integration", "Run integration tests");
+    integ_step.dependOn(&integ_run.step);
+    if (b.args) |args| integ_run.addArgs(args);
 
     // Grammar check: compilation depends on it, setup does not
     exe.step.dependOn(&check_grammars.step);

@@ -5,15 +5,20 @@ const process_mod = @import("process.zig");
 
 // ── Software Breakpoint Management ─────────────────────────────────────
 
-const INT3: u8 = 0xCC;
-const BRK_IMM16: u32 = 0xD4200000; // ARM64 BRK #0
+const is_arm = builtin.cpu.arch == .aarch64;
+// ARM64: BRK #0 = 0xD4200000 (4 bytes little-endian)
+// x86_64: INT3 = 0xCC (1 byte)
+pub const bp_size: usize = if (is_arm) 4 else 1;
+const brk_bytes = [4]u8{ 0x00, 0x00, 0x20, 0xD4 };
+const int3_bytes = [1]u8{0xCC};
+pub const trap_instruction: []const u8 = if (is_arm) &brk_bytes else &int3_bytes;
 
 pub const Breakpoint = struct {
     id: u32,
     address: u64,
     file: []const u8,
     line: u32,
-    original_byte: u8,
+    original_bytes: [bp_size]u8,
     enabled: bool,
     hit_count: u32,
     condition: ?[]const u8,
@@ -33,6 +38,9 @@ pub const BreakpointManager = struct {
     }
 
     pub fn deinit(self: *BreakpointManager) void {
+        for (self.breakpoints.items) |bp| {
+            if (bp.file.len > 0) self.allocator.free(bp.file);
+        }
         self.breakpoints.deinit(self.allocator);
     }
 
@@ -65,12 +73,15 @@ pub const BreakpointManager = struct {
 
         const address = best_addr orelse return error.NoAddressForLine;
 
+        const owned_file = try self.allocator.dupe(u8, file);
+        errdefer self.allocator.free(owned_file);
+
         const bp = Breakpoint{
             .id = self.next_id,
             .address = address,
-            .file = file,
+            .file = owned_file,
             .line = best_line,
-            .original_byte = 0,
+            .original_bytes = std.mem.zeroes([bp_size]u8),
             .enabled = true,
             .hit_count = 0,
             .condition = condition,
@@ -90,12 +101,15 @@ pub const BreakpointManager = struct {
         const id = self.next_id;
         self.next_id += 1;
 
+        const owned_file = try self.allocator.dupe(u8, file);
+        errdefer self.allocator.free(owned_file);
+
         try self.breakpoints.append(self.allocator, .{
             .id = id,
             .address = address,
-            .file = file,
+            .file = owned_file,
             .line = line,
-            .original_byte = 0,
+            .original_bytes = std.mem.zeroes([bp_size]u8),
             .enabled = true,
             .hit_count = 0,
             .condition = null,
@@ -104,33 +118,31 @@ pub const BreakpointManager = struct {
         return id;
     }
 
-    /// Write INT3 to the breakpoint address in the target process.
+    /// Write a trap instruction to the breakpoint address in the target process.
     pub fn writeBreakpoint(self: *BreakpointManager, id: u32, process: *process_mod.ProcessControl) !void {
         for (self.breakpoints.items) |*bp| {
             if (bp.id == id and bp.enabled) {
-                // Read original byte
-                const mem = try process.readMemory(bp.address, 1, self.allocator);
+                // Read original bytes
+                const mem = try process.readMemory(bp.address, bp_size, self.allocator);
                 defer self.allocator.free(mem);
-                bp.original_byte = mem[0];
+                @memcpy(&bp.original_bytes, mem[0..bp_size]);
 
-                // Write INT3
-                const int3 = [_]u8{INT3};
-                try process.writeMemory(bp.address, &int3);
+                // Write trap instruction (BRK #0 on ARM64, INT3 on x86)
+                try process.writeMemory(bp.address, trap_instruction);
                 return;
             }
         }
         return error.BreakpointNotFound;
     }
 
-    /// Restore original byte at breakpoint address.
+    /// Restore original bytes at breakpoint address.
     pub fn removeBreakpoint(self: *BreakpointManager, id: u32, process: *process_mod.ProcessControl) !void {
         for (self.breakpoints.items, 0..) |*bp, i| {
             if (bp.id == id) {
                 if (bp.enabled) {
-                    // Restore original byte
-                    const original = [_]u8{bp.original_byte};
-                    try process.writeMemory(bp.address, &original);
+                    try process.writeMemory(bp.address, &bp.original_bytes);
                 }
+                if (bp.file.len > 0) self.allocator.free(bp.file);
                 _ = self.breakpoints.swapRemove(i);
                 return;
             }
@@ -142,6 +154,7 @@ pub const BreakpointManager = struct {
     pub fn remove(self: *BreakpointManager, id: u32) !void {
         for (self.breakpoints.items, 0..) |bp, i| {
             if (bp.id == id) {
+                if (bp.file.len > 0) self.allocator.free(bp.file);
                 _ = self.breakpoints.swapRemove(i);
                 return;
             }
@@ -421,36 +434,24 @@ test "breakpoint hit stops process at correct address" {
     try std.testing.expectEqual(@as(u32, 2), bp.?.hit_count);
 }
 
-test "setBreakpoint saves original byte and writes INT3 via mock process" {
+test "writeBreakpoint requires a live process" {
     var mgr = BreakpointManager.init(std.testing.allocator);
     defer mgr.deinit();
 
     const id = try mgr.setAtAddress(0x1000, "test.c", 5);
 
-    // Use the real ProcessControl (which has stub readMemory/writeMemory)
+    // ProcessControl with no pid should return NoProcess error
     var pc = process_mod.ProcessControl{};
-
-    // writeBreakpoint reads original byte and writes INT3
-    try mgr.writeBreakpoint(id, &pc);
-
-    const bp = mgr.findById(id);
-    try std.testing.expect(bp != null);
-    // Original byte should have been read (stub returns 0)
-    try std.testing.expectEqual(@as(u8, 0), bp.?.original_byte);
+    try std.testing.expectError(error.NoProcess, mgr.writeBreakpoint(id, &pc));
 }
 
-test "removeBreakpoint restores original byte via mock process" {
+test "removeBreakpoint without process removes from list" {
     var mgr = BreakpointManager.init(std.testing.allocator);
     defer mgr.deinit();
 
     const id = try mgr.setAtAddress(0x1000, "test.c", 5);
 
-    var pc = process_mod.ProcessControl{};
-
-    // Write breakpoint, then remove it
-    try mgr.writeBreakpoint(id, &pc);
-    try mgr.removeBreakpoint(id, &pc);
-
-    // Breakpoint should be removed from the list
+    // remove() doesn't need a process — just removes from the list
+    try mgr.remove(id);
     try std.testing.expectEqual(@as(usize, 0), mgr.list().len);
 }

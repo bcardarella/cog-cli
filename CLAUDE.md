@@ -1,15 +1,41 @@
 <cog>
-# Cog Memory System
+# Cog
 
-You have persistent associative memory via Cog. Checking it before work and recording to it after work is how you avoid repeating mistakes, surface known gotchas, and build institutional knowledge. This is not optional overhead — it is how you operate effectively.
+You have persistent associative memory and code intelligence via Cog. Checking memory before work and recording after work is how you avoid repeating mistakes, surface known gotchas, and build institutional knowledge. Using cog code tools for file mutations keeps the code index in sync. This is not optional overhead — it is how you operate effectively.
 
 **Truth hierarchy:** Current code > User statements > Cog knowledge
 
-## The Memory Lifecycle
+## Code Intelligence
+
+When a cog code index exists (`.cog/index.scip`), **all file mutations must go through cog CLI tools** to keep the index in sync. This is not a suggestion — it is a hard requirement. Using native file tools (Edit, Write, rm, mv) bypasses the index and causes stale or incorrect query results.
+
+### Tool Override Rules
+
+Do NOT use your native file editing, creation, deletion, or renaming tools. Use the cog CLI equivalents instead:
+
+| Action | Use (shell out to) | Do NOT use |
+|--------|---------------------|------------|
+| Edit file content | `cog code/edit <file> --old OLD --new NEW` | Edit, Write, sed, awk |
+| Create new file | `cog code/create <file> --content CONTENT` | Write, touch, echo > |
+| Delete file | `cog code/delete <file>` | rm, delete |
+| Rename/move file | `cog code/rename <old> --to <new>` | mv, rename |
+| Find symbol definitions | `cog code/query --find <name>` | grep, ripgrep, find |
+| Find symbol references | `cog code/query --refs <name>` | grep for usage patterns |
+| List file symbols | `cog code/query --symbols <file>` | Reading file to scan for functions |
+
+**Reading files is unchanged** — use your normal Read/cat tools. Only mutations and symbol lookups are overridden.
+
+**Why:** Each cog mutation tool edits the file AND re-indexes it atomically. Native tools only touch the file, leaving the index stale. Subsequent `--find` and `--refs` queries return wrong results.
+
+**When no `.cog/index.scip` exists:** Use your native tools normally. The override only applies to indexed projects.
+
+## Memory System
+
+### The Memory Lifecycle
 
 Every task follows four steps. This is your operating procedure, not a guideline.
 
-### 1. RECALL — before reading code
+#### 1. RECALL — before reading code
 
 Your first action for any task is querying Cog. Before reading source files, before exploring, before planning — check what you already know. Do not formulate an approach before recalling. Plans made without Cog context miss known solutions and repeat past mistakes. The 2-second query may reveal gotchas, prior solutions, or context that changes your entire approach.
 
@@ -29,7 +55,7 @@ cog:mem/recall({"query": "authentication session token expiration JWT refresh li
 
 If Cog returns results, follow the paths it reveals and read referenced components first. If Cog is wrong, correct it with `cog:mem/update`.
 
-### 2. WORK + RECORD — learn, recall, and record continuously
+#### 2. WORK + RECORD — learn, recall, and record continuously
 
 Work normally, guided by what Cog returned. **Whenever you learn something new, record it immediately.** Don't wait. The moment you understand something you didn't before — that's when you call `cog:mem/learn`.
 
@@ -64,7 +90,7 @@ cog:mem/learn({
 
 **Engram quality:** Terms are 2-5 specific words ("Auth Token Refresh Timing" not "Architecture"). Definitions are 1-3 sentences covering what it is, why it matters, and keywords for search. Broad terms like "Overview" or "Architecture" pollute search results — be specific.
 
-### 3. REINFORCE — after completing work, reflect
+#### 3. REINFORCE — after completing work, reflect
 
 When a unit of work is done, step back and reflect. Ask: *what's the higher-level lesson from this work?* Record a synthesis that captures the overall insight, not just the individual details you recorded during work. Then reinforce the memories you're confident in.
 
@@ -80,7 +106,7 @@ cog:mem/learn({
 cog:mem/reinforce({"engram_id": "..."})
 ```
 
-### 4. CONSOLIDATE — before your final response
+#### 4. CONSOLIDATE — before your final response
 
 Short-term memories decay in 24 hours. Before ending, review and preserve what you learned.
 
@@ -97,7 +123,15 @@ For each entry: `cog:mem/reinforce` if valid and useful, `cog:mem/flush` if wron
 
 ## Announce Cog Operations
 
-Print ⚙️ before read operations (`cog:mem/recall`, `cog:mem/get`, `cog:mem/trace`, `cog:mem/connections`, `cog:mem/bulk_recall`, `cog:mem/list_short_term`, `cog:mem/stale`, `cog:mem/stats`, `cog:mem/orphans`, `cog:mem/connectivity`, `cog:mem/list_terms`) and 🧠 before write operations (`cog:mem/learn`, `cog:mem/associate`, `cog:mem/bulk_learn`, `cog:mem/bulk_associate`, `cog:mem/update`, `cog:mem/refactor`, `cog:mem/deprecate`, `cog:mem/reinforce`, `cog:mem/flush`, `cog:mem/unlink`, `cog:mem/verify`, `cog:mem/meld`).
+Print ⚙️ before read operations and 🧠 before write operations. This applies to both memory MCP tools and code CLI tools.
+
+**⚙️ Read operations:**
+- Memory: `cog:mem/recall`, `cog:mem/get`, `cog:mem/trace`, `cog:mem/connections`, `cog:mem/bulk_recall`, `cog:mem/list_short_term`, `cog:mem/stale`, `cog:mem/stats`, `cog:mem/orphans`, `cog:mem/connectivity`, `cog:mem/list_terms`
+- Code: `cog code/query`
+
+**🧠 Write operations:**
+- Memory: `cog:mem/learn`, `cog:mem/associate`, `cog:mem/bulk_learn`, `cog:mem/bulk_associate`, `cog:mem/update`, `cog:mem/refactor`, `cog:mem/deprecate`, `cog:mem/reinforce`, `cog:mem/flush`, `cog:mem/unlink`, `cog:mem/verify`, `cog:mem/meld`
+- Code: `cog code/edit`, `cog code/create`, `cog code/delete`, `cog code/rename`, `cog code/index`
 
 ## Example
 
@@ -131,7 +165,15 @@ User: "Fix the login bug where sessions expire too early"
      "associations": [{"target": "Token Refresh Race Condition", "predicate": "derived_from"}]
    })
 
-   [Write test, implement fix using server-issued timestamps, verify tests pass]
+   [Find where token expiry is calculated]
+   ⚙️ Querying code...
+   cog code/query --find calculateTokenExpiry
+
+   [Fix it using cog code/edit — NOT native Edit]
+   🧠 Editing via Cog...
+   cog code/edit src/auth/token.js --old "Date.now() + ttl" --new "serverTimestamp + ttl"
+
+   [Write test, verify tests pass]
 
 3. REINFORCE
    🧠 Recording to Cog...

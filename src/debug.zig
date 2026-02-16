@@ -2,6 +2,7 @@ pub const types = @import("debug/types.zig");
 pub const driver = @import("debug/driver.zig");
 pub const session = @import("debug/session.zig");
 pub const server = @import("debug/server.zig");
+pub const dashboard = @import("debug/dashboard.zig");
 pub const dap_protocol = @import("debug/dap/protocol.zig");
 pub const dap_transport = @import("debug/dap/transport.zig");
 pub const dap_proxy = @import("debug/dap/proxy.zig");
@@ -71,6 +72,7 @@ test {
     _ = driver;
     _ = session;
     _ = server;
+    _ = dashboard;
     _ = dap_protocol;
     _ = dap_transport;
     _ = dap_proxy;

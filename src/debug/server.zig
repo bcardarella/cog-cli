@@ -5,6 +5,7 @@ const Writer = std.io.Writer;
 const types = @import("types.zig");
 const session_mod = @import("session.zig");
 const driver_mod = @import("driver.zig");
+const dashboard_mod = @import("dashboard.zig");
 
 const SessionManager = session_mod.SessionManager;
 
@@ -15,6 +16,15 @@ pub const JsonRpcRequest = struct {
     id: ?json.Value = null,
     method: []const u8,
     params: ?json.Value = null,
+    /// Owns the parsed JSON tree — must be kept alive while id/params are in use.
+    _parsed: json.Parsed(json.Value),
+
+    pub fn deinit(self: *const JsonRpcRequest, allocator: std.mem.Allocator) void {
+        allocator.free(self.method);
+        // deinit is not const-qualified on Parsed, so we need a mutable copy
+        var p = self._parsed;
+        p.deinit();
+    }
 };
 
 pub const JsonRpcError = struct {
@@ -34,7 +44,7 @@ pub const INTERNAL_ERROR = -32603;
 
 pub fn parseJsonRpc(allocator: std.mem.Allocator, data: []const u8) !JsonRpcRequest {
     const parsed = try json.parseFromSlice(json.Value, allocator, data, .{});
-    defer parsed.deinit();
+    errdefer parsed.deinit();
 
     if (parsed.value != .object) return error.InvalidRequest;
     const obj = parsed.value.object;
@@ -57,6 +67,7 @@ pub fn parseJsonRpc(allocator: std.mem.Allocator, data: []const u8) !JsonRpcRequ
             .object, .array => p,
             else => null,
         } else null,
+        ._parsed = parsed,
     };
 }
 
@@ -179,11 +190,13 @@ const debug_stop_schema =
 pub const McpServer = struct {
     session_manager: SessionManager,
     allocator: std.mem.Allocator,
+    dashboard: dashboard_mod.Dashboard,
 
     pub fn init(allocator: std.mem.Allocator) McpServer {
         return .{
             .session_manager = SessionManager.init(allocator),
             .allocator = allocator,
+            .dashboard = dashboard_mod.Dashboard.init(),
         };
     }
 
@@ -300,6 +313,7 @@ pub const McpServer = struct {
 
             var driver = proxy.activeDriver();
             driver.launch(allocator, config) catch |err| {
+                self.dashboard.onError("debug_launch", @errorName(err));
                 return formatJsonRpcError(allocator, id, INTERNAL_ERROR, @errorName(err));
             };
 
@@ -307,6 +321,7 @@ pub const McpServer = struct {
             if (self.session_manager.getSession(session_id)) |s| {
                 s.status = .stopped;
             }
+            self.dashboard.onLaunch(session_id, config.program, "dap");
 
             var aw: Writer.Allocating = .init(allocator);
             defer aw.deinit();
@@ -331,6 +346,7 @@ pub const McpServer = struct {
 
             var driver = engine.activeDriver();
             driver.launch(allocator, config) catch |err| {
+                self.dashboard.onError("debug_launch", @errorName(err));
                 return formatJsonRpcError(allocator, id, INTERNAL_ERROR, @errorName(err));
             };
 
@@ -338,6 +354,7 @@ pub const McpServer = struct {
             if (self.session_manager.getSession(session_id)) |ss| {
                 ss.status = .stopped;
             }
+            self.dashboard.onLaunch(session_id, config.program, "native");
 
             var aw: Writer.Allocating = .init(allocator);
             defer aw.deinit();
@@ -377,8 +394,10 @@ pub const McpServer = struct {
             const condition = if (a.object.get("condition")) |c| (if (c == .string) c.string else null) else null;
 
             const bp = session.driver.setBreakpoint(allocator, file_val.string, @intCast(line_val.integer), condition) catch |err| {
+                self.dashboard.onError("debug_breakpoint", @errorName(err));
                 return formatJsonRpcError(allocator, id, INTERNAL_ERROR, @errorName(err));
             };
+            self.dashboard.onBreakpoint("set", bp);
 
             var aw: Writer.Allocating = .init(allocator);
             defer aw.deinit();
@@ -397,14 +416,28 @@ pub const McpServer = struct {
             if (bp_id_val != .integer) return formatJsonRpcError(allocator, id, INVALID_PARAMS, "id must be integer");
 
             session.driver.removeBreakpoint(allocator, @intCast(bp_id_val.integer)) catch |err| {
+                self.dashboard.onError("debug_breakpoint", @errorName(err));
                 return formatJsonRpcError(allocator, id, INTERNAL_ERROR, @errorName(err));
             };
+            self.dashboard.onBreakpoint("remove", .{
+                .id = @intCast(bp_id_val.integer),
+                .verified = false,
+                .file = "",
+                .line = 0,
+            });
 
             return formatJsonRpcResponse(allocator, id, "{\"removed\":true}");
         } else if (std.mem.eql(u8, action_str, "list")) {
             const bps = session.driver.listBreakpoints(allocator) catch |err| {
+                self.dashboard.onError("debug_breakpoint", @errorName(err));
                 return formatJsonRpcError(allocator, id, INTERNAL_ERROR, @errorName(err));
             };
+            self.dashboard.onBreakpoint("list", .{
+                .id = 0,
+                .verified = false,
+                .file = "",
+                .line = 0,
+            });
 
             var aw: Writer.Allocating = .init(allocator);
             defer aw.deinit();
@@ -443,10 +476,12 @@ pub const McpServer = struct {
 
         session.status = .running;
         const state = session.driver.run(allocator, action) catch |err| {
+            self.dashboard.onError("debug_run", @errorName(err));
             return formatJsonRpcError(allocator, id, INTERNAL_ERROR, @errorName(err));
         };
 
         session.status = if (state.stop_reason == .exit) .terminated else .stopped;
+        self.dashboard.onRun(session_id_val.string, action_val.string, state);
 
         var aw: Writer.Allocating = .init(allocator);
         defer aw.deinit();
@@ -475,8 +510,14 @@ pub const McpServer = struct {
         };
 
         const result_val = session.driver.inspect(allocator, request) catch |err| {
+            self.dashboard.onError("debug_inspect", @errorName(err));
             return formatJsonRpcError(allocator, id, INTERNAL_ERROR, @errorName(err));
         };
+        self.dashboard.onInspect(
+            session_id_val.string,
+            if (request.expression) |e| e else "(scope)",
+            result_val.result,
+        );
 
         var aw: Writer.Allocating = .init(allocator);
         defer aw.deinit();
@@ -500,6 +541,8 @@ pub const McpServer = struct {
             session.driver.stop(allocator) catch {};
         }
 
+        self.dashboard.onStop(session_id);
+
         // Copy key before destroying since destroySession frees the key
         const id_copy = try allocator.dupe(u8, session_id);
         defer allocator.free(id_copy);
@@ -516,12 +559,14 @@ pub const McpServer = struct {
         var reader_buf: [65536]u8 = undefined;
         var reader = stdin.reader(&reader_buf);
 
+        // Initial render
+        self.dashboard.render();
+
         while (true) {
-            const line = reader.interface.takeDelimiterExclusive('\n') catch |err| switch (err) {
-                error.ReadFailed => return, // EOF or read error
-                error.EndOfStream => return, // EOF
+            const line = reader.interface.takeDelimiter('\n') catch |err| switch (err) {
+                error.ReadFailed => return,
                 error.StreamTooLong => continue,
-            };
+            } orelse return; // null = EOF
 
             if (line.len == 0) continue;
 
@@ -534,9 +579,11 @@ pub const McpServer = struct {
                 w.interface.writeAll(err_resp) catch {};
                 w.interface.writeByte('\n') catch {};
                 w.interface.flush() catch {};
+                self.dashboard.onError("parse", "Parse error");
+                self.dashboard.render();
                 continue;
             };
-            defer self.allocator.free(parsed.method);
+            defer parsed.deinit(self.allocator);
 
             const response = try self.handleRequest(self.allocator, parsed.method, parsed.params, parsed.id);
             defer self.allocator.free(response);
@@ -546,6 +593,8 @@ pub const McpServer = struct {
             w.interface.writeAll(response) catch {};
             w.interface.writeByte('\n') catch {};
             w.interface.flush() catch {};
+
+            self.dashboard.render();
         }
     }
 };
@@ -558,7 +607,7 @@ test "parseJsonRpc extracts method and params from valid request" {
         \\{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}
     ;
     const req = try parseJsonRpc(allocator, input);
-    defer allocator.free(req.method);
+    defer req.deinit(allocator);
 
     try std.testing.expectEqualStrings("tools/list", req.method);
 }
@@ -578,7 +627,7 @@ test "parseJsonRpc handles request without params" {
         \\{"jsonrpc":"2.0","id":1,"method":"initialize"}
     ;
     const req = try parseJsonRpc(allocator, input);
-    defer allocator.free(req.method);
+    defer req.deinit(allocator);
 
     try std.testing.expectEqualStrings("initialize", req.method);
     try std.testing.expect(req.params == null);

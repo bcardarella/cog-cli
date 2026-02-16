@@ -980,25 +980,40 @@ fn reindexFile(allocator: std.mem.Allocator, file_path: []const u8) bool {
         defer indexer.deinit();
 
         const result = indexer.indexFile(allocator, source, file_path, lang) catch return false;
-        defer allocator.free(result.string_data);
         mergeDocument(allocator, &master_index, result.doc);
+
+        // Encode and write (must happen before freeing string_data,
+        // since symbol names are slices into it)
+        const encoded = scip_encode.encodeIndex(allocator, master_index) catch {
+            allocator.free(result.string_data);
+            return false;
+        };
+        allocator.free(result.string_data);
+        defer allocator.free(encoded);
+
+        const out_file = std.fs.createFileAbsolute(index_path, .{}) catch return false;
+        defer out_file.close();
+        out_file.writeAll(encoded) catch return false;
+        return true;
     } else {
         // Fall back to external indexer
         const extension = extensions.resolveByExtension(allocator, ext_str) orelse return false;
 
         const file_result = invokeIndexerForFile(allocator, file_path, &extension) catch return false;
-        defer allocator.free(file_result.backing_data);
         mergeDocument(allocator, &master_index, file_result.doc);
+
+        const encoded = scip_encode.encodeIndex(allocator, master_index) catch {
+            allocator.free(file_result.backing_data);
+            return false;
+        };
+        allocator.free(file_result.backing_data);
+        defer allocator.free(encoded);
+
+        const out_file = std.fs.createFileAbsolute(index_path, .{}) catch return false;
+        defer out_file.close();
+        out_file.writeAll(encoded) catch return false;
+        return true;
     }
-
-    // Encode and write
-    const encoded = scip_encode.encodeIndex(allocator, master_index) catch return false;
-    defer allocator.free(encoded);
-
-    const out_file = std.fs.createFileAbsolute(index_path, .{}) catch return false;
-    defer out_file.close();
-    out_file.writeAll(encoded) catch return false;
-    return true;
 }
 
 /// Write and save an index to disk.

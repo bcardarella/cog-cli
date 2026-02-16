@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const json = std.json;
 const Stringify = json.Stringify;
 const Writer = std.io.Writer;
@@ -105,6 +106,50 @@ fn readStdinLine(allocator: std.mem.Allocator) ![]const u8 {
 fn printCommandHelp(comptime help_text: []const u8) void {
     tui.header();
     printErr(help_text);
+}
+
+/// Process <cog:mem> tags in content.
+/// When keep_content is true (memory mode): removes tag lines, keeps content between them.
+/// When keep_content is false (tools-only mode): removes tag lines AND all content between them.
+/// Collapses consecutive blank lines left by stripping.
+fn processCogMemTags(allocator: std.mem.Allocator, content: []const u8, keep_content: bool) ![]const u8 {
+    var result: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer result.deinit(allocator);
+
+    const open_tag = "<cog:mem>";
+    const close_tag = "</cog:mem>";
+
+    var in_mem_block = false;
+    var prev_blank = false;
+    var first_line = true;
+    var lines = std.mem.splitSequence(u8, content, "\n");
+
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
+
+        if (std.mem.eql(u8, trimmed, open_tag)) {
+            in_mem_block = true;
+            continue;
+        }
+
+        if (std.mem.eql(u8, trimmed, close_tag)) {
+            in_mem_block = false;
+            continue;
+        }
+
+        if (in_mem_block and !keep_content) continue;
+
+        // Collapse consecutive blank lines
+        const is_blank = trimmed.len == 0;
+        if (is_blank and prev_blank) continue;
+        prev_blank = is_blank;
+
+        if (!first_line) try result.append(allocator, '\n');
+        try result.appendSlice(allocator, line);
+        first_line = false;
+    }
+
+    return try result.toOwnedSlice(allocator);
 }
 
 fn callAndPrint(allocator: std.mem.Allocator, cfg: Config, tool_name: []const u8, args_json: []const u8) !void {
@@ -910,9 +955,54 @@ pub fn init(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
 
     tui.header();
 
+    // Ask which features to set up
+    const feature_options = [_]tui.MenuItem{
+        .{ .label = "Memory + Tools" },
+        .{ .label = "Tools only" },
+    };
+    const feature_result = try tui.select(allocator, .{
+        .prompt = "What would you like to set up?",
+        .items = &feature_options,
+    });
+    const setup_mem = switch (feature_result) {
+        .selected => |idx| idx == 0,
+        .back, .cancelled => {
+            printErr("  Aborted.\n");
+            return;
+        },
+        .input => unreachable,
+    };
+
+    if (setup_mem) {
+        printErr("\n");
+        printErr("  Cog Memory gives your AI agents persistent, associative\n");
+        printErr("  memory powered by a knowledge graph with biological\n");
+        printErr("  memory dynamics.\n\n");
+        printErr("  " ++ dim ++ "A trycog.ai account is required." ++ reset ++ "\n");
+        printErr("  " ++ dim ++ "Sign up at " ++ reset ++ cyan ++ "https://trycog.ai" ++ reset ++ "\n\n");
+        try initBrain(allocator, host);
+    }
+
+    tui.separator();
+
+    // Set up system prompt (memory content stripped if tools-only)
+    try setupSystemPrompt(allocator, host, setup_mem);
+    tui.separator();
+
+    // Install agent skill (memory content stripped if tools-only)
+    try installSkill(allocator, host, setup_mem);
+
+    // Code-sign for debug server on macOS
+    if (builtin.os.tag == .macos) {
+        tui.separator();
+        signForDebug(allocator);
+    }
+}
+
+fn initBrain(allocator: std.mem.Allocator, host: []const u8) !void {
     // Get API key
     const api_key = config_mod.getApiKey(allocator) catch {
-        printErr("error: COG_API_KEY not set. Set it in your environment or .env file.\n");
+        printErr("  error: COG_API_KEY not set. Set it in your environment or .env file.\n");
         return error.Explained;
     };
     defer allocator.free(api_key);
@@ -953,20 +1043,7 @@ pub fn init(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     printErr(username);
     printErr("\n\n");
 
-    // Check if .cog/settings.json already exists
-    const cog_exists = blk: {
-        var dir = std.fs.cwd().openDir(".cog", .{}) catch break :blk false;
-        defer dir.close();
-        const f = dir.openFile("settings.json", .{}) catch break :blk false;
-        f.close();
-        break :blk true;
-    };
-    const write_cog = if (cog_exists)
-        try tui.confirm(".cog/settings.json already exists. Overwrite?")
-    else
-        true;
-
-    if (write_cog) {
+    {
         // List brains via REST API
         const list_url = try std.fmt.allocPrint(allocator, "https://{s}/api/v1/brains/list", .{host});
         defer allocator.free(list_url);
@@ -1005,53 +1082,11 @@ pub fn init(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         const selected_brain = selection.?.brain_name;
         defer allocator.free(selected_brain);
 
-        // Create .cog/ directory if needed
-        std.fs.cwd().makeDir(".cog") catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => {
-                printErr("error: failed to create .cog directory\n");
-                return error.Explained;
-            },
-        };
+        const brain_url = try std.fmt.allocPrint(allocator, "https://{s}/{s}/{s}", .{ host, account_slug, selected_brain });
+        defer allocator.free(brain_url);
 
-        // Write .cog/settings.json file
-        const cog_content = try std.fmt.allocPrint(allocator,
-            \\{{
-            \\  "brain": {{
-            \\    "url": "https://{s}/{s}/{s}"
-            \\  }}
-            \\}}
-            \\
-        , .{ host, account_slug, selected_brain });
-        defer allocator.free(cog_content);
-
-        const file = std.fs.cwd().createFile(".cog/settings.json", .{}) catch {
-            printErr("error: failed to write .cog/settings.json\n");
-            return error.Explained;
-        };
-        defer file.close();
-        var write_buf: [4096]u8 = undefined;
-        var fw = file.writer(&write_buf);
-        fw.interface.writeAll(cog_content) catch {
-            printErr("error: failed to write .cog/settings.json\n");
-            return error.Explained;
-        };
-        fw.interface.flush() catch {
-            printErr("error: failed to write .cog/settings.json\n");
-            return error.Explained;
-        };
-
-        printErr("  Wrote .cog/settings.json\n");
+        try writeSettingsMerge(allocator, brain_url);
     }
-
-    tui.separator();
-
-    // Set up system prompt
-    try setupSystemPrompt(allocator, host);
-    tui.separator();
-
-    // Install agent skill
-    try installSkill(allocator, host);
 }
 
 pub fn updatePromptAndSkill(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
@@ -1064,12 +1099,30 @@ pub fn updatePromptAndSkill(allocator: std.mem.Allocator, args: []const [:0]cons
 
     tui.header();
 
+    // Detect whether memory is configured by checking for .cog/settings.json with brain.url
+    const has_mem = blk: {
+        const settings = readCwdFile(allocator, ".cog/settings.json") orelse break :blk false;
+        defer allocator.free(settings);
+        const parsed = json.parseFromSlice(json.Value, allocator, settings, .{}) catch break :blk false;
+        defer parsed.deinit();
+        if (parsed.value == .object) {
+            if (parsed.value.object.get("brain")) |brain| {
+                if (brain == .object) {
+                    if (brain.object.get("url")) |url| {
+                        if (url == .string) break :blk true;
+                    }
+                }
+            }
+        }
+        break :blk false;
+    };
+
     // Update system prompt
-    try setupSystemPrompt(allocator, host);
+    try setupSystemPrompt(allocator, host, has_mem);
     tui.separator();
 
     // Update agent skill
-    try installSkill(allocator, host);
+    try installSkill(allocator, host, has_mem);
 }
 
 fn buildAccountLabel(allocator: std.mem.Allocator, account: json.Value) ![]const u8 {
@@ -1314,6 +1367,92 @@ fn printServerError(allocator: std.mem.Allocator, body: []const u8) void {
     printErr("error: server returned an error\n");
 }
 
+fn writeSettingsMerge(allocator: std.mem.Allocator, brain_url: []const u8) !void {
+    // Ensure .cog/ directory exists
+    std.fs.cwd().makeDir(".cog") catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => {
+            printErr("  error: failed to create .cog directory\n");
+            return error.Explained;
+        },
+    };
+
+    const existing = readCwdFile(allocator, ".cog/settings.json");
+    defer if (existing) |e| allocator.free(e);
+
+    var aw: Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    var s: Stringify = .{ .writer = &aw.writer };
+
+    try s.beginObject();
+
+    if (existing) |content| {
+        if (json.parseFromSlice(json.Value, allocator, content, .{})) |parsed| {
+            defer parsed.deinit();
+
+            if (parsed.value == .object) {
+                // Copy all non-brain top-level keys
+                var top_iter = parsed.value.object.iterator();
+                while (top_iter.next()) |entry| {
+                    if (std.mem.eql(u8, entry.key_ptr.*, "brain")) continue;
+                    try s.objectField(entry.key_ptr.*);
+                    try s.write(entry.value_ptr.*);
+                }
+
+                // Write brain object, preserving non-url keys from existing brain
+                try s.objectField("brain");
+                try s.beginObject();
+
+                if (parsed.value.object.get("brain")) |brain| {
+                    if (brain == .object) {
+                        var brain_iter = brain.object.iterator();
+                        while (brain_iter.next()) |entry| {
+                            if (std.mem.eql(u8, entry.key_ptr.*, "url")) continue;
+                            try s.objectField(entry.key_ptr.*);
+                            try s.write(entry.value_ptr.*);
+                        }
+                    }
+                }
+
+                try s.objectField("url");
+                try s.write(brain_url);
+                try s.endObject();
+            } else {
+                // Root isn't an object, write fresh brain
+                try s.objectField("brain");
+                try s.beginObject();
+                try s.objectField("url");
+                try s.write(brain_url);
+                try s.endObject();
+            }
+        } else |_| {
+            // Parse failed, write fresh brain
+            try s.objectField("brain");
+            try s.beginObject();
+            try s.objectField("url");
+            try s.write(brain_url);
+            try s.endObject();
+        }
+    } else {
+        // No existing file, write fresh
+        try s.objectField("brain");
+        try s.beginObject();
+        try s.objectField("url");
+        try s.write(brain_url);
+        try s.endObject();
+    }
+
+    try s.endObject();
+
+    const new_content = try aw.toOwnedSlice();
+    defer allocator.free(new_content);
+
+    printErr("  Writing settings... ");
+    try writeCwdFile(".cog/settings.json", new_content);
+    tui.checkmark();
+    printErr(" .cog/settings.json\n\n");
+}
+
 // ── System Prompt Setup ─────────────────────────────────────────────────
 
 fn fileExistsInCwd(filename: []const u8) bool {
@@ -1384,15 +1523,18 @@ fn updateFileWithPrompt(allocator: std.mem.Allocator, filename: []const u8, prom
     try writeCwdFile(filename, new_content);
 }
 
-fn setupSystemPrompt(allocator: std.mem.Allocator, host: []const u8) !void {
+fn setupSystemPrompt(allocator: std.mem.Allocator, host: []const u8, setup_mem: bool) !void {
     printErr("  Fetching system prompt... ");
     const prompt_url = try std.fmt.allocPrint(allocator, "https://{s}/PROMPT.md", .{host});
     defer allocator.free(prompt_url);
 
-    const prompt_content = client.httpGetPublic(allocator, prompt_url) catch {
+    const raw_content = client.httpGetPublic(allocator, prompt_url) catch {
         printErr("\n  error: failed to fetch system prompt\n");
         return error.Explained;
     };
+    defer allocator.free(raw_content);
+
+    const prompt_content = try processCogMemTags(allocator, raw_content, setup_mem);
     defer allocator.free(prompt_content);
     tui.checkmark();
     printErr("\n");
@@ -1439,7 +1581,64 @@ fn setupSystemPrompt(allocator: std.mem.Allocator, host: []const u8) !void {
 
 // ── Skill Installation ──────────────────────────────────────────────────
 
-fn installSkill(allocator: std.mem.Allocator, host: []const u8) !void {
+fn signForDebug(allocator: std.mem.Allocator) void {
+    printErr("  Signing for debug server... ");
+
+    // Get path to our own executable
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe_path = std.fs.selfExePath(&buf) catch {
+        printErr("skipped (could not find executable path)\n");
+        return;
+    };
+
+    // Write temporary entitlements plist
+    const tmp_path = "/tmp/cog-debug-entitlements.plist";
+    const plist =
+        \\<?xml version="1.0" encoding="UTF-8"?>
+        \\<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        \\<plist version="1.0">
+        \\<dict>
+        \\    <key>com.apple.security.cs.debugger</key>
+        \\    <true/>
+        \\</dict>
+        \\</plist>
+        \\
+    ;
+    const tmp_file = std.fs.cwd().createFile(tmp_path, .{}) catch {
+        printErr("skipped (could not write entitlements)\n");
+        return;
+    };
+    tmp_file.writeAll(plist) catch {
+        tmp_file.close();
+        printErr("skipped (could not write entitlements)\n");
+        return;
+    };
+    tmp_file.close();
+    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+
+    // Run codesign
+    const result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "codesign", "--entitlements", tmp_path, "-fs", "-", exe_path },
+    }) catch {
+        printErr("skipped (codesign not available)\n");
+        return;
+    };
+    allocator.free(result.stdout);
+    allocator.free(result.stderr);
+
+    switch (result.term) {
+        .Exited => |code| if (code == 0) {
+            tui.checkmark();
+            printErr("\n");
+            return;
+        },
+        else => {},
+    }
+    printErr("skipped (codesign failed)\n");
+}
+
+fn installSkill(allocator: std.mem.Allocator, host: []const u8, setup_mem: bool) !void {
     const home = std.posix.getenv("HOME") orelse {
         printErr("error: HOME not set\n");
         return error.Explained;
@@ -1491,10 +1690,13 @@ fn installSkill(allocator: std.mem.Allocator, host: []const u8) !void {
     const skill_url = try std.fmt.allocPrint(allocator, "https://{s}/SKILL.md", .{host});
     defer allocator.free(skill_url);
 
-    const skill_content = client.httpGetPublic(allocator, skill_url) catch {
+    const raw_skill = client.httpGetPublic(allocator, skill_url) catch {
         printErr("\n  error: failed to fetch SKILL.md\n");
         return error.Explained;
     };
+    defer allocator.free(raw_skill);
+
+    const skill_content = try processCogMemTags(allocator, raw_skill, setup_mem);
     defer allocator.free(skill_content);
     tui.checkmark();
     printErr("\n");

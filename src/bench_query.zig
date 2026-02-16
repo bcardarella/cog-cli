@@ -735,6 +735,12 @@ fn runAgent(
     kind: AgentKind,
     question: []const u8,
 ) !Metrics {
+    // Use an arena for all per-turn allocations (messages, tool results,
+    // parsed responses). Everything is freed in bulk when the agent finishes.
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
     const system_prompt = switch (kind) {
         .cog => "You are a code intelligence assistant. You have access to a cog_query tool that queries a pre-built SCIP code index for a React v19.0.0 codebase. Use it to answer questions about code locations, symbols, and references. Be concise and precise in your answers — give file paths and line numbers when asked.",
         .traditional => "You are a code intelligence assistant. You have access to grep, read_file, and list_files tools to explore a React v19.0.0 codebase. Use them to answer questions about code locations, symbols, and references. Be concise and precise in your answers — give file paths and line numbers when asked.",
@@ -746,18 +752,16 @@ fn runAgent(
     };
 
     var messages: std.ArrayListUnmanaged(MessageEntry) = .empty;
-    defer messages.deinit(allocator);
 
     // System + user messages
-    try messages.append(allocator, .{ .role = "system", .content = system_prompt });
-    try messages.append(allocator, .{ .role = "user", .content = question });
+    try messages.append(a, .{ .role = "system", .content = system_prompt });
+    try messages.append(a, .{ .role = "user", .content = question });
 
     var total_tokens: i64 = 0;
     var prompt_tokens: i64 = 0;
     var completion_tokens: i64 = 0;
     var tool_call_count: i64 = 0;
     var rounds: i64 = 0;
-    var answer: []const u8 = "";
 
     const start_time = std.time.milliTimestamp();
 
@@ -765,12 +769,18 @@ fn runAgent(
     while (turn < MAX_AGENT_TURNS) : (turn += 1) {
         rounds += 1;
 
+        // Show round progress
+        var round_buf: [16]u8 = undefined;
+        const round_str = std.fmt.bufPrint(&round_buf, " r{d}", .{rounds}) catch "";
+        printErr(dim);
+        printErr(round_str);
+        printErr(reset);
+
         // Build request
-        const body = try buildRequestBody(allocator, model, messages.items, tools_json);
-        defer allocator.free(body);
+        const body = try buildRequestBody(a, model, messages.items, tools_json);
 
         // POST to OpenRouter
-        const response_body = openrouterPost(allocator, api_key, body) catch {
+        const response_body = openrouterPost(a, api_key, body) catch {
             return .{
                 .wall_time_ms = std.time.milliTimestamp() - start_time,
                 .total_tokens = total_tokens,
@@ -782,10 +792,9 @@ fn runAgent(
                 .failed = true,
             };
         };
-        defer allocator.free(response_body);
 
         // Parse response
-        const resp = parseOpenRouterResponse(allocator, response_body) catch {
+        const resp = parseOpenRouterResponse(a, response_body) catch {
             return .{
                 .wall_time_ms = std.time.milliTimestamp() - start_time,
                 .total_tokens = total_tokens,
@@ -807,26 +816,26 @@ fn runAgent(
             // Append the assistant message with tool calls
             var tc_entries: std.ArrayListUnmanaged(ToolCallEntry) = .empty;
             for (resp.tool_calls) |tc| {
-                try tc_entries.append(allocator, .{
+                try tc_entries.append(a, .{
                     .id = tc.id,
                     .function_name = tc.function_name,
                     .arguments = tc.arguments,
                 });
             }
-            try messages.append(allocator, .{
+            try messages.append(a, .{
                 .role = "assistant",
                 .content = resp.content,
-                .tool_calls = try tc_entries.toOwnedSlice(allocator),
+                .tool_calls = try tc_entries.toOwnedSlice(a),
             });
 
             // Execute each tool call and append results
             for (resp.tool_calls) |tc| {
                 tool_call_count += 1;
-                const tool_result = executeToolCall(allocator, tc.function_name, tc.arguments) catch |err| blk: {
-                    break :blk try std.fmt.allocPrint(allocator, "error: tool execution failed: {s}", .{@errorName(err)});
+                const tool_result = executeToolCall(a, tc.function_name, tc.arguments) catch |err| blk: {
+                    break :blk try std.fmt.allocPrint(a, "error: tool execution failed: {s}", .{@errorName(err)});
                 };
 
-                try messages.append(allocator, .{
+                try messages.append(a, .{
                     .role = "tool",
                     .content = tool_result,
                     .tool_call_id = tc.id,
@@ -836,9 +845,6 @@ fn runAgent(
         }
 
         // No tool calls — this is the final answer
-        if (resp.content) |content| {
-            answer = content;
-        }
         break;
     }
 
@@ -851,7 +857,7 @@ fn runAgent(
         .completion_tokens = completion_tokens,
         .tool_calls = tool_call_count,
         .rounds = rounds,
-        .answer = answer,
+        .answer = "",
         .failed = false,
     };
 }
@@ -861,29 +867,33 @@ fn runAgent(
 fn ensureReactRepo(allocator: std.mem.Allocator) !void {
     // Check if already cloned
     std.fs.cwd().access(REACT_DIR ++ "/package.json", .{}) catch {
-        printErr("  Cloning React v19.0.0 (shallow)...\n");
+        printErr("  Cloning React " ++ REACT_TAG ++ " (shallow)...\n");
 
-        const result = std.process.Child.run(.{
-            .allocator = allocator,
-            .argv = &.{
-                "git", "clone", "--depth", "1", "--branch", REACT_TAG, REACT_REPO_URL, REACT_DIR,
-            },
-            .max_output_bytes = 64 * 1024,
-        }) catch {
+        // Spawn with inherited stderr so git progress is visible
+        const argv: []const []const u8 = &.{
+            "git", "clone", "--depth", "1", "--branch", REACT_TAG,
+            "--progress", REACT_REPO_URL, REACT_DIR,
+        };
+        var child = std.process.Child.init(argv, allocator);
+        // stdin/stdout/stderr default to .Inherit — git progress shows through
+        child.spawn() catch {
             printErr("  error: failed to clone React repo\n");
             return error.SetupFailed;
         };
-        defer allocator.free(result.stdout);
-        defer allocator.free(result.stderr);
-
-        if (result.term.Exited != 0) {
-            printErr("  error: git clone failed\n");
-            if (result.stderr.len > 0) {
-                printErr("  ");
-                printErr(result.stderr);
-                printErr("\n");
-            }
+        const term = child.wait() catch {
+            printErr("  error: failed to wait for git clone\n");
             return error.SetupFailed;
+        };
+
+        switch (term) {
+            .Exited => |code| if (code != 0) {
+                printErr("  error: git clone failed\n");
+                return error.SetupFailed;
+            },
+            else => {
+                printErr("  error: git clone failed\n");
+                return error.SetupFailed;
+            },
         }
 
         return;
@@ -893,7 +903,7 @@ fn ensureReactRepo(allocator: std.mem.Allocator) !void {
 fn ensureCogIndex(allocator: std.mem.Allocator) !void {
     // Check if index exists
     std.fs.cwd().access(REACT_DIR ++ "/.cog/index.scip", .{}) catch {
-        printErr("  Building code index...\n");
+        printErr("  Building code index...\n\n");
 
         // Need absolute path to cog binary since cwd will be different
         const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
@@ -902,28 +912,32 @@ fn ensureCogIndex(allocator: std.mem.Allocator) !void {
         const cog_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd, COG_BINARY });
         defer allocator.free(cog_path);
 
-        const result = std.process.Child.run(.{
-            .allocator = allocator,
-            .argv = &.{ cog_path, "code/index" },
-            .cwd = REACT_DIR,
-            .max_output_bytes = 256 * 1024,
-        }) catch {
+        // Spawn with inherited stderr so the cog progress bar is visible
+        const argv: []const []const u8 = &.{ cog_path, "code/index" };
+        var child = std.process.Child.init(argv, allocator);
+        child.cwd = REACT_DIR;
+        // stdin/stdout/stderr default to .Inherit — progress bar shows through
+        child.spawn() catch {
             printErr("  error: failed to run cog code/index\n");
             return error.SetupFailed;
         };
-        defer allocator.free(result.stdout);
-        defer allocator.free(result.stderr);
-
-        if (result.term.Exited != 0) {
-            printErr("  error: cog code/index failed\n");
-            if (result.stderr.len > 0) {
-                printErr("  ");
-                printErr(result.stderr);
-                printErr("\n");
-            }
+        const term = child.wait() catch {
+            printErr("  error: failed to wait for cog code/index\n");
             return error.SetupFailed;
+        };
+
+        switch (term) {
+            .Exited => |code| if (code != 0) {
+                printErr("  error: cog code/index failed\n");
+                return error.SetupFailed;
+            },
+            else => {
+                printErr("  error: cog code/index failed\n");
+                return error.SetupFailed;
+            },
         }
 
+        printErr("\n");
         return;
     };
 }
@@ -1069,6 +1083,22 @@ fn printPad(n: usize) void {
     }
 }
 
+fn printAgentDone(m: Metrics) void {
+    if (m.failed) {
+        printErr(" " ++ bold ++ "\xE2\x9C\x97" ++ reset ++ dim ++ " failed" ++ reset ++ "\n");
+    } else {
+        var buf: [64]u8 = undefined;
+        const time_str = if (m.wall_time_ms < 1000)
+            std.fmt.bufPrint(&buf, " {d}ms", .{m.wall_time_ms}) catch ""
+        else
+            std.fmt.bufPrint(&buf, " {d:.1}s", .{@as(f64, @floatFromInt(m.wall_time_ms)) / 1000.0}) catch "";
+        printErr(" " ++ cyan ++ "\xE2\x9C\x93" ++ reset);
+        printErr(dim);
+        printErr(time_str);
+        printErr(reset ++ "\n");
+    }
+}
+
 fn printFmtErr(comptime fmt: []const u8, args: anytype) void {
     var buf: [256]u8 = undefined;
     const s = std.fmt.bufPrint(&buf, fmt, args) catch return;
@@ -1120,8 +1150,13 @@ fn mainInner() !void {
     const allocator = gpa.allocator();
 
     // Read config from env, falling back to .env file
+    var api_key_allocated: ?[]const u8 = null;
+    defer if (api_key_allocated) |k| allocator.free(k);
+
     const api_key = std.posix.getenv("OPENROUTER_API_KEY") orelse blk: {
-        break :blk loadDotEnv(allocator) catch null;
+        const from_env = loadDotEnv(allocator) catch null;
+        api_key_allocated = from_env;
+        break :blk from_env;
     } orelse {
         printErr("\n  " ++ bold ++ "error:" ++ reset ++ " OPENROUTER_API_KEY not found.\n");
         printErr("  Set it as an environment variable or in a .env file.\n\n");
@@ -1154,12 +1189,12 @@ fn mainInner() !void {
         // Run Cog agent
         printErr("    " ++ dim ++ "Cog agent..." ++ reset);
         const cog_metrics = try runAgent(allocator, api_key, model, .cog, tc.question);
-        printErr(" " ++ cyan ++ "\xE2\x9C\x93" ++ reset ++ "\n");
+        printAgentDone(cog_metrics);
 
         // Run Traditional agent
         printErr("    " ++ dim ++ "Traditional agent..." ++ reset);
         const trad_metrics = try runAgent(allocator, api_key, model, .traditional, tc.question);
-        printErr(" " ++ cyan ++ "\xE2\x9C\x93" ++ reset ++ "\n");
+        printAgentDone(trad_metrics);
 
         results[i] = .{
             .name = tc.name,
@@ -1170,6 +1205,9 @@ fn mainInner() !void {
 
     // Display results
     printResults(model, &results);
+
+    // Write JSON to stdout for dashboard consumption
+    writeResultsJson(model, &results);
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -1179,4 +1217,62 @@ fn printErr(msg: []const u8) void {
     var w = std.fs.File.stderr().writer(&buf);
     w.interface.writeAll(msg) catch {};
     w.interface.flush() catch {};
+}
+
+const RESULTS_PATH = "bench/results.js";
+
+fn writeResultsJson(model: []const u8, results: []const ResultEntry) void {
+    const file = std.fs.cwd().createFile(RESULTS_PATH, .{}) catch {
+        printErr("  warning: could not write " ++ RESULTS_PATH ++ "\n");
+        return;
+    };
+    defer file.close();
+
+    var buf: [16384]u8 = undefined;
+    var w = file.writer(&buf);
+    w.interface.writeAll("const BENCH_DATA = ") catch return;
+    writeResultsJsonInner(&w.interface, model, results) catch return;
+    w.interface.writeAll(";\n") catch return;
+    w.interface.flush() catch {};
+
+    printErr("  " ++ cyan ++ "\xE2\x9C\x93" ++ reset ++ " Results written to " ++ RESULTS_PATH ++ "\n");
+    printErr("  " ++ dim ++ "Open bench/dashboard.html to view" ++ reset ++ "\n\n");
+}
+
+fn writeResultsJsonInner(w: anytype, model: []const u8, results: []const ResultEntry) !void {
+    try w.writeAll("{\"model\":\"");
+    try w.writeAll(model);
+    try w.writeAll("\",\"results\":[");
+
+    for (results, 0..) |r, i| {
+        if (i > 0) try w.writeByte(',');
+        try w.writeAll("{\"name\":\"");
+        try w.writeAll(r.name);
+        try w.writeAll("\",\"cog\":");
+        try writeMetricsJson(w, r.cog);
+        try w.writeAll(",\"traditional\":");
+        try writeMetricsJson(w, r.trad);
+        try w.writeByte('}');
+    }
+
+    try w.writeAll("]}");
+}
+
+fn writeMetricsJson(w: anytype, m: Metrics) !void {
+    var num_buf: [32]u8 = undefined;
+    try w.writeAll("{\"wall_time_ms\":");
+    try w.writeAll(std.fmt.bufPrint(&num_buf, "{d}", .{m.wall_time_ms}) catch "0");
+    try w.writeAll(",\"total_tokens\":");
+    try w.writeAll(std.fmt.bufPrint(&num_buf, "{d}", .{m.total_tokens}) catch "0");
+    try w.writeAll(",\"prompt_tokens\":");
+    try w.writeAll(std.fmt.bufPrint(&num_buf, "{d}", .{m.prompt_tokens}) catch "0");
+    try w.writeAll(",\"completion_tokens\":");
+    try w.writeAll(std.fmt.bufPrint(&num_buf, "{d}", .{m.completion_tokens}) catch "0");
+    try w.writeAll(",\"tool_calls\":");
+    try w.writeAll(std.fmt.bufPrint(&num_buf, "{d}", .{m.tool_calls}) catch "0");
+    try w.writeAll(",\"rounds\":");
+    try w.writeAll(std.fmt.bufPrint(&num_buf, "{d}", .{m.rounds}) catch "0");
+    try w.writeAll(",\"failed\":");
+    try w.writeAll(if (m.failed) "true" else "false");
+    try w.writeByte('}');
 }

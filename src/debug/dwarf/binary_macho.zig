@@ -74,6 +74,7 @@ pub const MachoBinary = struct {
     data: []const u8,
     owned: bool,
     sections: DebugSections,
+    text_vmaddr: u64 = 0,
 
     pub fn loadFile(allocator: std.mem.Allocator, path: []const u8) !MachoBinary {
         const file = try std.fs.cwd().openFile(path, .{});
@@ -119,6 +120,7 @@ fn parseMachO(data: []const u8) !MachoBinary {
     if (header.magic != MH_MAGIC_64) return error.InvalidMagic;
 
     var sections = DebugSections{};
+    var text_vmaddr: u64 = 0;
     var offset: usize = @sizeOf(MachHeader64);
 
     for (0..header.ncmds) |_| {
@@ -131,6 +133,12 @@ fn parseMachO(data: []const u8) !MachoBinary {
 
         if (cmd == LC_SEGMENT_64 and offset + @sizeOf(SegmentCommand64) <= data.len) {
             const seg = readStruct(SegmentCommand64, data, offset) catch break;
+
+            // Capture __TEXT segment vmaddr for ASLR slide computation
+            const segname = parseName(&seg.segname);
+            if (std.mem.eql(u8, segname, "__TEXT")) {
+                text_vmaddr = seg.vmaddr;
+            }
 
             var sect_offset = offset + @sizeOf(SegmentCommand64);
             for (0..seg.nsects) |_| {
@@ -177,6 +185,7 @@ fn parseMachO(data: []const u8) !MachoBinary {
         .data = data,
         .owned = false,
         .sections = sections,
+        .text_vmaddr = text_vmaddr,
     };
 }
 
