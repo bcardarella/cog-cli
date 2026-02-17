@@ -18,6 +18,17 @@ Persistent memory, code intelligence, and debugging for developers and AI agents
 
 ## Getting Started
 
+### Homebrew
+
+Install from this repository as a tap:
+
+```sh
+brew tap bcardarella/cog-cli https://github.com/bcardarella/cog-cli
+brew install bcardarella/cog-cli/cog-cli
+```
+
+This currently installs the latest `main` branch (HEAD formula).
+
 ### Prerequisites
 
 - [Zig 0.15.2+](https://ziglang.org/download/)

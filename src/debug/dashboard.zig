@@ -210,7 +210,7 @@ pub const Dashboard = struct {
         // Update session status
         for (self.sessions[0..self.session_count]) |*s| {
             if (std.mem.eql(u8, s.idSlice(), session_id)) {
-                s.status = if (state.stop_reason == .exit) .terminated else .stopped;
+                s.status = if (state.exit_code != null) .terminated else .stopped;
                 break;
             }
         }
@@ -792,14 +792,14 @@ test "Dashboard onRun updates session status and last_stop" {
     dash.onLaunch("session-1", "/tmp/test", "native");
 
     const state = types.StopState{
-        .stop_reason = .exit,
+        .stop_reason = .exception,
         .exit_code = 0,
     };
     dash.onRun("session-1", "continue", state);
 
     try std.testing.expectEqual(session_mod.Session.Status.terminated, dash.sessions[0].status);
     try std.testing.expect(dash.last_stop != null);
-    try std.testing.expectEqualStrings("exit", dash.last_stop.?.reason[0..dash.last_stop.?.reason_len]);
+    try std.testing.expectEqualStrings("exception", dash.last_stop.?.reason[0..dash.last_stop.?.reason_len]);
     try std.testing.expectEqual(@as(i32, 0), dash.last_stop.?.exit_code.?);
 }
 
@@ -859,7 +859,7 @@ test "Dashboard full lifecycle" {
 
     dash.onLaunch("session-1", "/tmp/debug_test", "native");
     dash.onBreakpoint("set", .{ .id = 1, .verified = true, .file = "/tmp/debug_test.c", .line = 4 });
-    dash.onRun("session-1", "continue", .{ .stop_reason = .exit, .exit_code = 0 });
+    dash.onRun("session-1", "continue", .{ .stop_reason = .exception, .exit_code = 0 });
     dash.onInspect("session-1", "a + b", "");
     dash.onStop("session-1");
 

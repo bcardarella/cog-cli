@@ -177,15 +177,15 @@ fn parseMachO(data: []const u8) !MachoBinary {
                     sections.debug_ranges = info;
                 } else if (std.mem.eql(u8, name, "__debug_aranges")) {
                     sections.debug_aranges = info;
-                } else if (std.mem.eql(u8, name, "__debug_line_st")) {
+                } else if (std.mem.eql(u8, name, "__debug_line_str")) {
                     sections.debug_line_str = info;
                 } else if (std.mem.eql(u8, name, "__debug_frame")) {
                     sections.debug_frame = info;
                 } else if (std.mem.eql(u8, name, "__debug_loc")) {
                     sections.debug_loc = info;
-                } else if (std.mem.eql(u8, name, "__debug_loclist")) {
+                } else if (std.mem.eql(u8, name, "__debug_loclists")) {
                     sections.debug_loclists = info;
-                } else if (std.mem.eql(u8, name, "__debug_rnglist")) {
+                } else if (std.mem.eql(u8, name, "__debug_rnglists")) {
                     sections.debug_rnglists = info;
                 } else if (std.mem.eql(u8, name, "__eh_frame")) {
                     sections.eh_frame = info;
@@ -195,9 +195,9 @@ fn parseMachO(data: []const u8) !MachoBinary {
                     sections.debug_names = info;
                 } else if (std.mem.eql(u8, name, "__debug_types")) {
                     sections.debug_types = info;
-                } else if (std.mem.eql(u8, name, "__debug_pubname")) {
+                } else if (std.mem.eql(u8, name, "__debug_pubnames")) {
                     sections.debug_pubnames = info;
-                } else if (std.mem.eql(u8, name, "__debug_pubtype")) {
+                } else if (std.mem.eql(u8, name, "__debug_pubtypes")) {
                     sections.debug_pubtypes = info;
                 }
 
@@ -414,7 +414,7 @@ test "parseMachO matches new debug section names" {
 
     // Helper to write a section entry
     const sect_base = seg_off + seg_size;
-    const section_names = [_][]const u8{ "__debug_macro", "__debug_names", "__debug_types", "__debug_pubname", "__debug_pubtype" };
+    const section_names = [_][]const u8{ "__debug_macro", "__debug_names", "__debug_types", "__debug_pubnames", "__debug_pubtypes" };
 
     for (0..num_sections) |i| {
         const s_off = sect_base + i * sect_size;

@@ -126,6 +126,8 @@ pub const LocationContext = struct {
     tls_base: ?u64 = null,
     /// .debug_addr section data for DW_OP_addrx/constx
     debug_addr: ?[]const u8 = null,
+    /// Base offset into .debug_addr for this compilation unit (from DW_AT_addr_base)
+    addr_base: u64 = 0,
     /// Address size in bytes (4 for 32-bit targets, 8 for 64-bit)
     address_size: u8 = 8,
     /// Whether the compilation unit uses DWARF-64 format (affects DW_OP_call_ref, DW_OP_implicit_pointer)
@@ -230,6 +232,7 @@ pub fn evalLocationListDwarf5(
     if (loc_offset >= loclists_data.len) return null;
     var pos: usize = @intCast(loc_offset);
     var base = base_address;
+    var default_expr: ?[]const u8 = null;
 
     while (pos < loclists_data.len) {
         const kind = loclists_data[pos];
@@ -289,10 +292,9 @@ pub fn evalLocationListDwarf5(
                 const expr_len = parser.readULEB128(loclists_data, &pos) catch return null;
                 const expr_end = pos + @as(usize, @intCast(expr_len));
                 if (expr_end > loclists_data.len) return null;
-                // Default location — applies if no other range matches
-                // For simplicity, return it immediately (proper implementation would
-                // save it and return only if no other range matches)
-                return loclists_data[pos..expr_end];
+                // Save default and continue — only use if no range matches
+                default_expr = loclists_data[pos..expr_end];
+                pos = expr_end;
             },
             DW_LLE_base_addressx => {
                 const index = parser.readULEB128(loclists_data, &pos) catch return null;
@@ -345,7 +347,7 @@ pub fn evalLocationListDwarf5(
         }
     }
 
-    return null;
+    return default_expr;
 }
 
 /// Evaluate a DWARF location expression with optional memory reader for DW_OP_deref.
@@ -804,26 +806,26 @@ fn evalLocationImpl(
             },
             DW_OP_nop => {}, // no-op
             DW_OP_xderef => {
-                // Cross-address-space deref — treat like normal deref
+                // Cross-address-space deref: top = address, second = address space ID
                 if (sp < 2) return .empty;
-                sp -= 1; // drop address space id
+                sp -= 1; // pop address (now at stack[sp])
                 if (mem_reader) |reader| {
-                    const val = reader.read(stack[sp - 1], 8) orelse return .{ .address = stack[sp - 1] };
+                    const val = reader.read(stack[sp], 8) orelse return .{ .address = stack[sp] };
                     stack[sp - 1] = val;
                 } else {
-                    return .{ .address = stack[sp - 1] };
+                    return .{ .address = stack[sp] };
                 }
             },
             DW_OP_xderef_size => {
                 if (sp < 2 or pos >= expr.len) return .empty;
                 const size = expr[pos];
                 pos += 1;
-                sp -= 1; // drop address space id
+                sp -= 1; // pop address (now at stack[sp])
                 if (mem_reader) |reader| {
-                    const val = reader.read(stack[sp - 1], size) orelse return .{ .address = stack[sp - 1] };
+                    const val = reader.read(stack[sp], size) orelse return .{ .address = stack[sp] };
                     stack[sp - 1] = val;
                 } else {
-                    return .{ .address = stack[sp - 1] };
+                    return .{ .address = stack[sp] };
                 }
             },
             DW_OP_push_object_address => {
@@ -992,7 +994,7 @@ fn evalLocationImpl(
                 const index = parser.readULEB128(expr, &pos) catch return .empty;
                 const addr_data = context.debug_addr orelse return .empty;
                 const addr_size: usize = context.address_size;
-                const offset = index * addr_size;
+                const offset = @as(usize, @intCast(context.addr_base)) + index * addr_size;
                 if (offset + addr_size > addr_data.len) return .empty;
                 if (sp >= stack.len) return .empty;
                 stack[sp] = switch (addr_size) {
@@ -1134,25 +1136,26 @@ fn extractLocationFromDie(debug_info: []const u8, debug_abbrev: []const u8, die_
 /// Extract a location expression from a DWARF form at a given position.
 fn extractExprFromForm(data: []const u8, pos: usize, form: u8) ?[]const u8 {
     switch (form) {
-        0x09 => { // DW_FORM_block — 1-byte length
+        0x09 => { // DW_FORM_block — ULEB128 length
+            var p = pos;
+            const len = parser.readULEB128(data, &p) catch return null;
+            const end = p + @as(usize, @intCast(len));
+            if (end > data.len) return null;
+            return data[p..end];
+        },
+        0x0a => { // DW_FORM_block1 — 1-byte length
             if (pos >= data.len) return null;
             const len = data[pos];
             if (pos + 1 + len > data.len) return null;
             return data[pos + 1 .. pos + 1 + len];
         },
-        0x0a => { // DW_FORM_block1
-            if (pos >= data.len) return null;
-            const len = data[pos];
-            if (pos + 1 + len > data.len) return null;
-            return data[pos + 1 .. pos + 1 + len];
-        },
-        0x0d => { // DW_FORM_block2
+        0x03 => { // DW_FORM_block2 — 2-byte length
             if (pos + 2 > data.len) return null;
             const len = std.mem.readInt(u16, data[pos..][0..2], .little);
             if (pos + 2 + len > data.len) return null;
             return data[pos + 2 .. pos + 2 + len];
         },
-        0x0e => { // DW_FORM_block4
+        0x04 => { // DW_FORM_block4 — 4-byte length
             if (pos + 4 > data.len) return null;
             const len = std.mem.readInt(u32, data[pos..][0..4], .little);
             if (pos + 4 + len > data.len) return null;
@@ -1172,48 +1175,57 @@ fn extractExprFromForm(data: []const u8, pos: usize, form: u8) ?[]const u8 {
 /// Skip a DWARF form value in debug_info data.
 fn skipFormValue(data: []const u8, pos: *usize, form: u8) !void {
     switch (form) {
-        0x01 => pos.* += 1, // DW_FORM_addr (assuming 8 bytes for 64-bit) — actually variable
-        0x03, 0x0e, 0x01 + 0x80 => pos.* += 1, // placeholder — skip 1
+        0x01 => pos.* += 8, // DW_FORM_addr (64-bit)
+        0x03 => { // DW_FORM_block2 (2-byte length)
+            if (pos.* + 2 > data.len) return error.EndOfData;
+            const len = std.mem.readInt(u16, data[pos.*..][0..2], .little);
+            pos.* += 2 + len;
+        },
+        0x04 => { // DW_FORM_block4 (4-byte length)
+            if (pos.* + 4 > data.len) return error.EndOfData;
+            const len = std.mem.readInt(u32, data[pos.*..][0..4], .little);
+            pos.* += 4 + @as(usize, @intCast(len));
+        },
         0x05 => pos.* += 2, // DW_FORM_data2
         0x06 => pos.* += 4, // DW_FORM_data4
         0x07 => pos.* += 8, // DW_FORM_data8
         0x08 => { // DW_FORM_string (null-terminated)
             while (pos.* < data.len and data[pos.*] != 0) pos.* += 1;
-            if (pos.* < data.len) pos.* += 1; // skip null
+            if (pos.* < data.len) pos.* += 1;
         },
-        0x09, 0x0a => { // DW_FORM_block, DW_FORM_block1 (1-byte len)
+        0x09 => { // DW_FORM_block (ULEB128 length)
+            const len = parser.readULEB128(data, pos) catch return error.EndOfData;
+            pos.* += @intCast(len);
+        },
+        0x0a => { // DW_FORM_block1 (1-byte length)
             if (pos.* >= data.len) return error.EndOfData;
             const len = data[pos.*];
             pos.* += 1 + len;
         },
         0x0b => pos.* += 1, // DW_FORM_data1
         0x0c => pos.* += 1, // DW_FORM_flag
-        0x0d => { // DW_FORM_block2
-            if (pos.* + 2 > data.len) return error.EndOfData;
-            const len = std.mem.readInt(u16, data[pos.*..][0..2], .little);
-            pos.* += 2 + len;
+        0x0d => { // DW_FORM_sdata (SLEB128)
+            _ = parser.readSLEB128(data, pos) catch return error.EndOfData;
         },
-        0x0f => { // DW_FORM_udata
+        0x0e => pos.* += 4, // DW_FORM_strp (32-bit DWARF)
+        0x0f => { // DW_FORM_udata (ULEB128)
             _ = parser.readULEB128(data, pos) catch return error.EndOfData;
         },
-        0x10 => { // DW_FORM_ref_addr
-            pos.* += 8; // 8 for DWARF-64
-        },
+        0x10 => pos.* += 4, // DW_FORM_ref_addr (32-bit DWARF)
         0x11 => pos.* += 1, // DW_FORM_ref1
         0x12 => pos.* += 2, // DW_FORM_ref2
         0x13 => pos.* += 4, // DW_FORM_ref4
         0x14 => pos.* += 8, // DW_FORM_ref8
-        0x15 => { // DW_FORM_ref_udata
+        0x15 => { // DW_FORM_ref_udata (ULEB128)
             _ = parser.readULEB128(data, pos) catch return error.EndOfData;
         },
-        0x17 => pos.* += 4, // DW_FORM_strp
-        0x18 => { // DW_FORM_exprloc
+        0x17 => pos.* += 4, // DW_FORM_sec_offset (32-bit DWARF)
+        0x18 => { // DW_FORM_exprloc (ULEB128 length)
             const len = parser.readULEB128(data, pos) catch return error.EndOfData;
             pos.* += @intCast(len);
         },
-        0x19 => {}, // DW_FORM_flag_present — zero size
+        0x19 => {}, // DW_FORM_flag_present (zero size)
         0x20 => pos.* += 8, // DW_FORM_ref_sig8
-        0x23 => pos.* += 4, // DW_FORM_sec_offset
         else => return error.UnknownForm,
     }
 }

@@ -16,6 +16,10 @@ pub const stack_merge = @import("debug/stack_merge.zig");
 pub const dwarf_breakpoints = @import("debug/dwarf/breakpoints.zig");
 pub const dwarf_unwind = @import("debug/dwarf/unwind.zig");
 pub const dwarf_location = @import("debug/dwarf/location.zig");
+pub const dashboard_tui = @import("debug/dashboard_tui.zig");
+pub const client = @import("debug/client.zig");
+pub const cli = @import("debug/cli.zig");
+pub const daemon = @import("debug/daemon.zig");
 
 const std = @import("std");
 const help = @import("help_text.zig");
@@ -45,7 +49,14 @@ fn printCommandHelp(comptime help_text: []const u8) void {
 /// Dispatch debug subcommands.
 pub fn dispatch(allocator: std.mem.Allocator, subcmd: []const u8, args: []const [:0]const u8) !void {
     if (std.mem.eql(u8, subcmd, "debug/serve")) return debugServe(allocator, args);
+    if (std.mem.eql(u8, subcmd, "debug/client")) return debugClient(allocator, args);
     if (std.mem.eql(u8, subcmd, "debug/sign")) return debugSign(allocator, args);
+    if (std.mem.eql(u8, subcmd, "debug/dashboard")) return debugDashboard(allocator, args);
+    if (std.mem.eql(u8, subcmd, "debug/status")) return debugStatus(allocator, args);
+    if (std.mem.eql(u8, subcmd, "debug/kill")) return debugKill(args);
+
+    // Route debug/send_* commands to CLI dispatch
+    if (cli.isCliCommand(subcmd)) return cli.dispatch(allocator, subcmd, args);
 
     printErr("error: unknown command '");
     printErr(subcmd);
@@ -171,10 +182,57 @@ fn debugServe(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         }
     }
 
-    var mcp_server = server.McpServer.init(allocator);
-    defer mcp_server.deinit();
+    if (hasFlag(args, "--daemon")) {
+        var d = daemon.DaemonServer.init(allocator);
+        defer d.deinit();
+        try d.run();
+    } else {
+        var mcp_server = server.McpServer.init(allocator);
+        defer mcp_server.deinit();
+        try mcp_server.runStdio();
+    }
+}
 
-    try mcp_server.runStdio();
+fn debugClient(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
+    if (hasFlag(args, "--help") or hasFlag(args, "-h")) {
+        printCommandHelp(help.debug_client);
+        return;
+    }
+
+    var mcp_client = client.McpClient.init(allocator);
+    defer mcp_client.deinit();
+
+    try mcp_client.runStdio();
+}
+
+fn debugStatus(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
+    if (hasFlag(args, "--help") or hasFlag(args, "-h")) {
+        printCommandHelp(help.debug_status);
+        return;
+    }
+
+    try cli.statusCommand(allocator);
+}
+
+fn debugKill(args: []const [:0]const u8) !void {
+    if (hasFlag(args, "--help") or hasFlag(args, "-h")) {
+        printCommandHelp(help.debug_kill);
+        return;
+    }
+
+    try cli.killCommand();
+}
+
+fn debugDashboard(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
+    if (hasFlag(args, "--help") or hasFlag(args, "-h")) {
+        printCommandHelp(help.debug_dashboard);
+        return;
+    }
+
+    var tui_instance = dashboard_tui.DashboardTui.init(allocator);
+    defer tui_instance.deinit();
+
+    try tui_instance.run();
 }
 
 test {
@@ -196,6 +254,10 @@ test {
     _ = dwarf_breakpoints;
     _ = dwarf_unwind;
     _ = dwarf_location;
+    _ = dashboard_tui;
+    _ = client;
+    _ = cli;
+    _ = daemon;
 }
 
 test "cog debug routes to debug dispatch" {

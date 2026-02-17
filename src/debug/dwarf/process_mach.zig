@@ -107,6 +107,7 @@ pub const MachProcessControl = struct {
     is_running: bool = false,
     stdout_pipe_read: ?posix.fd_t = null,
     stderr_pipe_read: ?posix.fd_t = null,
+    cached_task: ?std.c.mach_port_name_t = null,
 
     /// Read available data from the captured stdout pipe.
     /// Returns null if no stdout pipe is configured.
@@ -156,15 +157,35 @@ pub const MachProcessControl = struct {
         }
         try argv.append(allocator, null);
 
+        // Create pipes for capturing debuggee stdout/stderr
+        const stdout_pipe = posix.pipe() catch null;
+        const stderr_pipe = posix.pipe() catch null;
+
         const pid = try posix.fork();
         if (pid == 0) {
-            // Child: redirect stdout/stderr so debuggee output doesn't
-            // pollute the MCP JSON-RPC stream on the parent's stdout.
-            const devnull = posix.open("/dev/null", .{ .ACCMODE = .WRONLY }, 0) catch null;
-            if (devnull) |fd| {
-                _ = posix.dup2(fd, 1) catch {}; // stdout
-                _ = posix.dup2(fd, 2) catch {}; // stderr
-                posix.close(fd);
+            // Child: redirect stdout/stderr to pipes so parent can read output
+            if (stdout_pipe) |p| {
+                posix.close(p[0]); // close read end in child
+                _ = posix.dup2(p[1], 1) catch {}; // stdout -> write end
+                posix.close(p[1]);
+            } else {
+                // Fallback to /dev/null if pipe creation failed
+                const devnull = posix.open("/dev/null", .{ .ACCMODE = .WRONLY }, 0) catch null;
+                if (devnull) |fd| {
+                    _ = posix.dup2(fd, 1) catch {};
+                    posix.close(fd);
+                }
+            }
+            if (stderr_pipe) |p| {
+                posix.close(p[0]); // close read end in child
+                _ = posix.dup2(p[1], 2) catch {}; // stderr -> write end
+                posix.close(p[1]);
+            } else {
+                const devnull = posix.open("/dev/null", .{ .ACCMODE = .WRONLY }, 0) catch null;
+                if (devnull) |fd| {
+                    _ = posix.dup2(fd, 2) catch {};
+                    posix.close(fd);
+                }
             }
             // Child: request trace and exec
             if (builtin.os.tag == .macos) {
@@ -178,6 +199,21 @@ pub const MachProcessControl = struct {
 
         self.pid = pid;
         self.is_running = false;
+
+        // Parent: close write ends, keep read ends, set non-blocking
+        if (stdout_pipe) |p| {
+            posix.close(p[1]); // close write end in parent
+            // Set read end to non-blocking
+            const flags = std.c.fcntl(p[0], std.posix.F.GETFL);
+            _ = std.c.fcntl(p[0], std.posix.F.SETFL, @as(c_int, flags) | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true })));
+            self.stdout_pipe_read = p[0];
+        }
+        if (stderr_pipe) |p| {
+            posix.close(p[1]); // close write end in parent
+            const flags = std.c.fcntl(p[0], std.posix.F.GETFL);
+            _ = std.c.fcntl(p[0], std.posix.F.SETFL, @as(c_int, flags) | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true })));
+            self.stderr_pipe_read = p[0];
+        }
 
         // Wait for the child to stop (from PT_TRACE_ME + exec)
         _ = posix.waitpid(pid, WUNTRACED);
@@ -234,6 +270,10 @@ pub const MachProcessControl = struct {
         var thread_count: std.c.mach_msg_type_number_t = undefined;
         var kr = std.c.task_threads(task, &threads, &thread_count);
         if (kr != 0) return error.TaskThreadsFailed;
+        defer {
+            const size = @sizeOf(std.c.mach_port_t) * thread_count;
+            _ = std.c.vm_deallocate(std.c.mach_task_self(), @intFromPtr(threads), size);
+        }
 
         if (thread_count == 0) return error.NoThreads;
         const thread = threads[0];
@@ -303,6 +343,10 @@ pub const MachProcessControl = struct {
         var thread_count: std.c.mach_msg_type_number_t = undefined;
         var kr = std.c.task_threads(task, &threads, &thread_count);
         if (kr != 0) return error.TaskThreadsFailed;
+        defer {
+            const size = @sizeOf(std.c.mach_port_t) * thread_count;
+            _ = std.c.vm_deallocate(std.c.mach_task_self(), @intFromPtr(threads), size);
+        }
 
         if (thread_count == 0) return error.NoThreads;
         const thread = threads[0];
@@ -349,6 +393,10 @@ pub const MachProcessControl = struct {
         var thread_count: std.c.mach_msg_type_number_t = undefined;
         var kr = std.c.task_threads(task, &threads, &thread_count);
         if (kr != 0) return error.TaskThreadsFailed;
+        defer {
+            const size = @sizeOf(std.c.mach_port_t) * thread_count;
+            _ = std.c.vm_deallocate(std.c.mach_task_self(), @intFromPtr(threads), size);
+        }
 
         if (thread_count == 0) return error.NoThreads;
         const thread = threads[0];
@@ -374,14 +422,14 @@ pub const MachProcessControl = struct {
             kr = std.c.thread_get_state(thread, x86_THREAD_STATE64, @ptrCast(&state), &count);
             if (kr != 0) return error.ThreadGetStateFailed;
             state.rip = regs.pc;
-            state.rsp = regs.sp;
-            state.rbp = regs.fp;
             state.rax = regs.gprs[0];
             state.rdx = regs.gprs[1];
             state.rcx = regs.gprs[2];
             state.rbx = regs.gprs[3];
             state.rsi = regs.gprs[4];
             state.rdi = regs.gprs[5];
+            state.rbp = regs.gprs[6];
+            state.rsp = regs.gprs[7];
             state.r8 = regs.gprs[8];
             state.r9 = regs.gprs[9];
             state.r10 = regs.gprs[10];
@@ -430,7 +478,7 @@ pub const MachProcessControl = struct {
         const VM_PROT_WRITE: std.c.vm_prot_t = 0x02;
         const VM_PROT_EXECUTE: std.c.vm_prot_t = 0x04;
         const VM_PROT_COPY: std.c.vm_prot_t = 0x10;
-        const page_size: u64 = 0x4000; // 16KB on arm64
+        const page_size: u64 = if (comptime @import("builtin").cpu.arch == .aarch64) 0x4000 else 0x1000;
         const page_addr = address & ~(page_size - 1);
         _ = std.c.mach_vm_protect(task, page_addr, page_size, 0, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
 
@@ -444,10 +492,12 @@ pub const MachProcessControl = struct {
 
     /// Get the Mach task port for the traced process.
     pub fn getTask(self: *MachProcessControl) !std.c.mach_port_name_t {
+        if (self.cached_task) |task| return task;
         const pid = self.pid orelse return error.NoProcess;
         var task: std.c.mach_port_name_t = undefined;
         const kr = std.c.task_for_pid(std.c.mach_task_self(), pid, &task);
         if (kr != 0) return error.TaskForPidFailed;
+        self.cached_task = task;
         return task;
     }
 
@@ -503,6 +553,16 @@ pub const MachProcessControl = struct {
             _ = posix.waitpid(pid, 0);
             self.pid = null;
             self.is_running = false;
+            self.cached_task = null;
+            // Close captured output pipes
+            if (self.stdout_pipe_read) |fd| {
+                posix.close(fd);
+                self.stdout_pipe_read = null;
+            }
+            if (self.stderr_pipe_read) |fd| {
+                posix.close(fd);
+                self.stderr_pipe_read = null;
+            }
         }
     }
 

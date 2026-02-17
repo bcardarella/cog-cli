@@ -203,6 +203,17 @@ pub const BreakpointManager = struct {
         file: []const u8,
         line: u32,
     ) !u32 {
+        return self.setAtAddressEx(address, file, line, null);
+    }
+
+    /// Set a breakpoint at a raw address with optional condition.
+    pub fn setAtAddressEx(
+        self: *BreakpointManager,
+        address: u64,
+        file: []const u8,
+        line: u32,
+        condition: ?[]const u8,
+    ) !u32 {
         const id = self.next_id;
         self.next_id += 1;
 
@@ -217,7 +228,7 @@ pub const BreakpointManager = struct {
             .original_bytes = std.mem.zeroes([bp_size]u8),
             .enabled = true,
             .hit_count = 0,
-            .condition = null,
+            .condition = condition,
         });
 
         return id;

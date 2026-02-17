@@ -191,6 +191,12 @@ pub fn initializeRequest(allocator: std.mem.Allocator, seq: i64) ![]const u8 {
     try s.write("cog-debug");
     try s.objectField("adapterID");
     try s.write("cog");
+    try s.objectField("clientName");
+    try s.write("Cog Debug");
+    try s.objectField("locale");
+    try s.write("en-US");
+    try s.objectField("pathFormat");
+    try s.write("path");
     try s.objectField("linesStartAt1");
     try s.write(true);
     try s.objectField("columnsStartAt1");
@@ -213,6 +219,8 @@ pub fn initializeRequest(allocator: std.mem.Allocator, seq: i64) ![]const u8 {
     try s.objectField("supportsStartDebuggingRequest");
     try s.write(true);
     try s.objectField("supportsANSIStyling");
+    try s.write(true);
+    try s.objectField("supportsArgsCanBeInterpretedByShell");
     try s.write(true);
     try s.endObject();
     try s.endObject();
@@ -491,10 +499,10 @@ pub fn variablesRequestEx(allocator: std.mem.Allocator, seq: i64, variables_ref:
 }
 
 pub fn evaluateRequest(allocator: std.mem.Allocator, seq: i64, expression: []const u8, frame_id: ?i64) ![]const u8 {
-    return evaluateRequestEx(allocator, seq, expression, frame_id, null);
+    return evaluateRequestEx(allocator, seq, expression, frame_id, null, null, null, null);
 }
 
-pub fn evaluateRequestEx(allocator: std.mem.Allocator, seq: i64, expression: []const u8, frame_id: ?i64, context: ?types.EvaluateContext) ![]const u8 {
+pub fn evaluateRequestEx(allocator: std.mem.Allocator, seq: i64, expression: []const u8, frame_id: ?i64, context: ?types.EvaluateContext, format: ?types.ValueFormat, line: ?i64, column: ?i64) ![]const u8 {
     var aw: Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
     var s: Stringify = .{ .writer = &aw.writer };
@@ -510,15 +518,25 @@ pub fn evaluateRequestEx(allocator: std.mem.Allocator, seq: i64, expression: []c
     try s.beginObject();
     try s.objectField("expression");
     try s.write(expression);
-    try s.objectField("context");
     if (context) |ctx| {
+        try s.objectField("context");
         try s.write(@tagName(ctx));
-    } else {
-        try s.write("repl");
     }
     if (frame_id) |fid| {
         try s.objectField("frameId");
         try s.write(fid);
+    }
+    if (format) |f| {
+        try s.objectField("format");
+        try f.jsonStringify(&s);
+    }
+    if (line) |l| {
+        try s.objectField("line");
+        try s.write(l);
+    }
+    if (column) |c| {
+        try s.objectField("column");
+        try s.write(c);
     }
     try s.endObject();
     try s.endObject();
@@ -573,7 +591,7 @@ pub fn readMemoryRequest(allocator: std.mem.Allocator, seq: i64, memory_ref: []c
     return try aw.toOwnedSlice();
 }
 
-pub fn writeMemoryRequest(allocator: std.mem.Allocator, seq: i64, memory_ref: []const u8, offset: i64, data_b64: []const u8) ![]const u8 {
+pub fn writeMemoryRequest(allocator: std.mem.Allocator, seq: i64, memory_ref: []const u8, offset: i64, data_b64: []const u8, allow_partial: ?bool) ![]const u8 {
     var aw: Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
     var s: Stringify = .{ .writer = &aw.writer };
@@ -593,6 +611,10 @@ pub fn writeMemoryRequest(allocator: std.mem.Allocator, seq: i64, memory_ref: []
     try s.write(offset);
     try s.objectField("data");
     try s.write(data_b64);
+    if (allow_partial) |ap| {
+        try s.objectField("allowPartial");
+        try s.write(ap);
+    }
     try s.endObject();
     try s.endObject();
 
@@ -602,6 +624,7 @@ pub fn writeMemoryRequest(allocator: std.mem.Allocator, seq: i64, memory_ref: []
 pub const DisassembleOptions = struct {
     instruction_offset: ?i64 = null,
     resolve_symbols: ?bool = null,
+    offset: ?i64 = null,
 };
 
 pub fn disassembleRequest(allocator: std.mem.Allocator, seq: i64, memory_ref: []const u8, instruction_count: i64) ![]const u8 {
@@ -624,6 +647,10 @@ pub fn disassembleRequestEx(allocator: std.mem.Allocator, seq: i64, memory_ref: 
     try s.beginObject();
     try s.objectField("memoryReference");
     try s.write(memory_ref);
+    if (opts.offset) |off| {
+        try s.objectField("offset");
+        try s.write(off);
+    }
     if (opts.instruction_offset) |offset| {
         try s.objectField("instructionOffset");
         try s.write(offset);
@@ -662,7 +689,7 @@ pub fn attachRequest(allocator: std.mem.Allocator, seq: i64, pid: i64) ![]const 
     return try aw.toOwnedSlice();
 }
 
-pub fn setFunctionBreakpointsRequest(allocator: std.mem.Allocator, seq: i64, names: []const []const u8, conditions: []const ?[]const u8) ![]const u8 {
+pub fn setFunctionBreakpointsRequest(allocator: std.mem.Allocator, seq: i64, names: []const []const u8, conditions: []const ?[]const u8, hit_conditions: []const ?[]const u8) ![]const u8 {
     var aw: Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
     var s: Stringify = .{ .writer = &aw.writer };
@@ -686,6 +713,12 @@ pub fn setFunctionBreakpointsRequest(allocator: std.mem.Allocator, seq: i64, nam
             if (conditions[i]) |cond| {
                 try s.objectField("condition");
                 try s.write(cond);
+            }
+        }
+        if (i < hit_conditions.len) {
+            if (hit_conditions[i]) |hc| {
+                try s.objectField("hitCondition");
+                try s.write(hc);
             }
         }
         try s.endObject();
@@ -771,7 +804,7 @@ pub fn setExceptionBreakpointsRequest(allocator: std.mem.Allocator, seq: i64, fi
     return try aw.toOwnedSlice();
 }
 
-pub fn setVariableRequest(allocator: std.mem.Allocator, seq: i64, variables_ref: i64, name: []const u8, value: []const u8) ![]const u8 {
+pub fn setVariableRequest(allocator: std.mem.Allocator, seq: i64, variables_ref: i64, name: []const u8, value: []const u8, format: ?types.ValueFormat) ![]const u8 {
     var aw: Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
     var s: Stringify = .{ .writer = &aw.writer };
@@ -791,13 +824,17 @@ pub fn setVariableRequest(allocator: std.mem.Allocator, seq: i64, variables_ref:
     try s.write(name);
     try s.objectField("value");
     try s.write(value);
+    if (format) |f| {
+        try s.objectField("format");
+        try f.jsonStringify(&s);
+    }
     try s.endObject();
     try s.endObject();
 
     return try aw.toOwnedSlice();
 }
 
-pub fn gotoTargetsRequest(allocator: std.mem.Allocator, seq: i64, source_path: []const u8, line: i64) ![]const u8 {
+pub fn gotoTargetsRequest(allocator: std.mem.Allocator, seq: i64, source_path: []const u8, line: i64, column: ?i64) ![]const u8 {
     var aw: Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
     var s: Stringify = .{ .writer = &aw.writer };
@@ -818,6 +855,10 @@ pub fn gotoTargetsRequest(allocator: std.mem.Allocator, seq: i64, source_path: [
     try s.endObject();
     try s.objectField("line");
     try s.write(line);
+    if (column) |col| {
+        try s.objectField("column");
+        try s.write(col);
+    }
     try s.endObject();
     try s.endObject();
 
@@ -866,10 +907,10 @@ pub fn configurationDoneRequest(allocator: std.mem.Allocator, seq: i64) ![]const
 }
 
 pub fn disconnectRequest(allocator: std.mem.Allocator, seq: i64) ![]const u8 {
-    return disconnectRequestEx(allocator, seq, true, false);
+    return disconnectRequestEx(allocator, seq, true, false, null);
 }
 
-pub fn disconnectRequestEx(allocator: std.mem.Allocator, seq: i64, terminate_debuggee: bool, suspend_debuggee: bool) ![]const u8 {
+pub fn disconnectRequestEx(allocator: std.mem.Allocator, seq: i64, terminate_debuggee: bool, suspend_debuggee: bool, restart: ?bool) ![]const u8 {
     var aw: Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
     var s: Stringify = .{ .writer = &aw.writer };
@@ -888,6 +929,10 @@ pub fn disconnectRequestEx(allocator: std.mem.Allocator, seq: i64, terminate_deb
     if (suspend_debuggee) {
         try s.objectField("suspendDebuggee");
         try s.write(true);
+    }
+    if (restart) |r| {
+        try s.objectField("restart");
+        try s.write(r);
     }
     try s.endObject();
     try s.endObject();
@@ -1011,7 +1056,7 @@ fn writeValueFormat(s: *Stringify, fmt: types.ValueFormat) !void {
     try s.endObject();
 }
 
-pub fn dataBreakpointInfoRequest(allocator: std.mem.Allocator, seq: i64, name: []const u8, variables_ref: ?i64) ![]const u8 {
+pub fn dataBreakpointInfoRequest(allocator: std.mem.Allocator, seq: i64, name: []const u8, variables_ref: ?i64, frame_id: ?i64, bytes: ?i64, as_address: ?bool) ![]const u8 {
     var aw: Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
     var s: Stringify = .{ .writer = &aw.writer };
@@ -1031,13 +1076,32 @@ pub fn dataBreakpointInfoRequest(allocator: std.mem.Allocator, seq: i64, name: [
         try s.objectField("variablesReference");
         try s.write(vr);
     }
+    if (frame_id) |fid| {
+        try s.objectField("frameId");
+        try s.write(fid);
+    }
+    if (bytes) |b| {
+        try s.objectField("bytes");
+        try s.write(b);
+    }
+    if (as_address) |a| {
+        try s.objectField("asAddress");
+        try s.write(a);
+    }
     try s.endObject();
     try s.endObject();
 
     return try aw.toOwnedSlice();
 }
 
-pub fn setDataBreakpointsRequest(allocator: std.mem.Allocator, seq: i64, data_id: []const u8, access_type: []const u8) ![]const u8 {
+pub const DataBreakpointSpec = struct {
+    data_id: []const u8,
+    access_type: []const u8,
+    condition: ?[]const u8 = null,
+    hit_condition: ?[]const u8 = null,
+};
+
+pub fn setDataBreakpointsRequest(allocator: std.mem.Allocator, seq: i64, breakpoints: []const DataBreakpointSpec) ![]const u8 {
     var aw: Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
     var s: Stringify = .{ .writer = &aw.writer };
@@ -1053,12 +1117,22 @@ pub fn setDataBreakpointsRequest(allocator: std.mem.Allocator, seq: i64, data_id
     try s.beginObject();
     try s.objectField("breakpoints");
     try s.beginArray();
-    try s.beginObject();
-    try s.objectField("dataId");
-    try s.write(data_id);
-    try s.objectField("accessType");
-    try s.write(access_type);
-    try s.endObject();
+    for (breakpoints) |bp| {
+        try s.beginObject();
+        try s.objectField("dataId");
+        try s.write(bp.data_id);
+        try s.objectField("accessType");
+        try s.write(bp.access_type);
+        if (bp.condition) |cond| {
+            try s.objectField("condition");
+            try s.write(cond);
+        }
+        if (bp.hit_condition) |hc| {
+            try s.objectField("hitCondition");
+            try s.write(hc);
+        }
+        try s.endObject();
+    }
     try s.endArray();
     try s.endObject();
     try s.endObject();
@@ -1070,7 +1144,7 @@ pub fn exceptionInfoRequest(allocator: std.mem.Allocator, seq: i64, thread_id: i
     return threadCommand(allocator, seq, "exceptionInfo", thread_id);
 }
 
-pub fn terminateRequest(allocator: std.mem.Allocator, seq: i64) ![]const u8 {
+pub fn terminateRequest(allocator: std.mem.Allocator, seq: i64, restart: ?bool) ![]const u8 {
     var aw: Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
     var s: Stringify = .{ .writer = &aw.writer };
@@ -1082,6 +1156,13 @@ pub fn terminateRequest(allocator: std.mem.Allocator, seq: i64) ![]const u8 {
     try s.write("request");
     try s.objectField("command");
     try s.write("terminate");
+    if (restart) |r| {
+        try s.objectField("arguments");
+        try s.beginObject();
+        try s.objectField("restart");
+        try s.write(r);
+        try s.endObject();
+    }
     try s.endObject();
 
     return try aw.toOwnedSlice();
@@ -1089,7 +1170,7 @@ pub fn terminateRequest(allocator: std.mem.Allocator, seq: i64) ![]const u8 {
 
 // ── Phase 5 Protocol Builders ───────────────────────────────────────────
 
-pub fn completionsRequest(allocator: std.mem.Allocator, seq: i64, text: []const u8, column: i64, frame_id: ?i64) ![]const u8 {
+pub fn completionsRequest(allocator: std.mem.Allocator, seq: i64, text: []const u8, column: i64, frame_id: ?i64, line: ?i64) ![]const u8 {
     var aw: Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
     var s: Stringify = .{ .writer = &aw.writer };
@@ -1110,6 +1191,10 @@ pub fn completionsRequest(allocator: std.mem.Allocator, seq: i64, text: []const 
     if (frame_id) |fid| {
         try s.objectField("frameId");
         try s.write(fid);
+    }
+    if (line) |l| {
+        try s.objectField("line");
+        try s.write(l);
     }
     try s.endObject();
     try s.endObject();
@@ -1176,18 +1261,15 @@ pub fn sourceRequest(allocator: std.mem.Allocator, seq: i64, source_reference: i
     try s.write("source");
     try s.objectField("arguments");
     try s.beginObject();
-    try s.objectField("source");
-    try s.beginObject();
     try s.objectField("sourceReference");
     try s.write(source_reference);
-    try s.endObject();
     try s.endObject();
     try s.endObject();
 
     return try aw.toOwnedSlice();
 }
 
-pub fn setExpressionRequest(allocator: std.mem.Allocator, seq: i64, expression: []const u8, value: []const u8, frame_id: i64) ![]const u8 {
+pub fn setExpressionRequest(allocator: std.mem.Allocator, seq: i64, expression: []const u8, value: []const u8, frame_id: ?i64, format: ?types.ValueFormat) ![]const u8 {
     var aw: Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
     var s: Stringify = .{ .writer = &aw.writer };
@@ -1205,8 +1287,14 @@ pub fn setExpressionRequest(allocator: std.mem.Allocator, seq: i64, expression: 
     try s.write(expression);
     try s.objectField("value");
     try s.write(value);
-    try s.objectField("frameId");
-    try s.write(frame_id);
+    if (frame_id) |fid| {
+        try s.objectField("frameId");
+        try s.write(fid);
+    }
+    if (format) |f| {
+        try s.objectField("format");
+        try f.jsonStringify(&s);
+    }
     try s.endObject();
     try s.endObject();
 
@@ -1221,6 +1309,62 @@ pub fn reverseContinueRequest(allocator: std.mem.Allocator, seq: i64, thread_id:
 
 pub fn stepBackRequest(allocator: std.mem.Allocator, seq: i64, thread_id: i64) ![]const u8 {
     return threadCommand(allocator, seq, "stepBack", thread_id);
+}
+
+pub fn stepBackRequestEx(allocator: std.mem.Allocator, seq: i64, thread_id: i64, single_thread: ?bool, granularity: ?types.SteppingGranularity) ![]const u8 {
+    var aw: Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    var s: Stringify = .{ .writer = &aw.writer };
+
+    try s.beginObject();
+    try s.objectField("seq");
+    try s.write(seq);
+    try s.objectField("type");
+    try s.write("request");
+    try s.objectField("command");
+    try s.write("stepBack");
+    try s.objectField("arguments");
+    try s.beginObject();
+    try s.objectField("threadId");
+    try s.write(thread_id);
+    if (single_thread) |st| {
+        try s.objectField("singleThread");
+        try s.write(st);
+    }
+    if (granularity) |g| {
+        try s.objectField("granularity");
+        try s.write(@tagName(g));
+    }
+    try s.endObject();
+    try s.endObject();
+
+    return try aw.toOwnedSlice();
+}
+
+pub fn reverseContinueRequestEx(allocator: std.mem.Allocator, seq: i64, thread_id: i64, single_thread: ?bool) ![]const u8 {
+    var aw: Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    var s: Stringify = .{ .writer = &aw.writer };
+
+    try s.beginObject();
+    try s.objectField("seq");
+    try s.write(seq);
+    try s.objectField("type");
+    try s.write("request");
+    try s.objectField("command");
+    try s.write("reverseContinue");
+    try s.objectField("arguments");
+    try s.beginObject();
+    try s.objectField("threadId");
+    try s.write(thread_id);
+    if (single_thread) |st| {
+        try s.objectField("singleThread");
+        try s.write(st);
+    }
+    try s.endObject();
+    try s.endObject();
+
+    return try aw.toOwnedSlice();
 }
 
 pub fn restartFrameRequest(allocator: std.mem.Allocator, seq: i64, frame_id: i64) ![]const u8 {
@@ -1310,7 +1454,7 @@ pub fn stepInTargetsRequest(allocator: std.mem.Allocator, seq: i64, frame_id: i6
     return try aw.toOwnedSlice();
 }
 
-pub fn breakpointLocationsRequest(allocator: std.mem.Allocator, seq: i64, source_path: []const u8, line: i64, end_line: ?i64) ![]const u8 {
+pub fn breakpointLocationsRequest(allocator: std.mem.Allocator, seq: i64, source_path: []const u8, line: i64, end_line: ?i64, column: ?i64, end_column: ?i64) ![]const u8 {
     var aw: Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
     var s: Stringify = .{ .writer = &aw.writer };
@@ -1331,9 +1475,17 @@ pub fn breakpointLocationsRequest(allocator: std.mem.Allocator, seq: i64, source
     try s.endObject();
     try s.objectField("line");
     try s.write(line);
+    if (column) |col| {
+        try s.objectField("column");
+        try s.write(col);
+    }
     if (end_line) |el| {
         try s.objectField("endLine");
         try s.write(el);
+    }
+    if (end_column) |ec| {
+        try s.objectField("endColumn");
+        try s.write(ec);
     }
     try s.endObject();
     try s.endObject();
@@ -1417,7 +1569,7 @@ pub fn locationsRequest(allocator: std.mem.Allocator, seq: i64, location_referen
     return try aw.toOwnedSlice();
 }
 
-pub fn restartRequest(allocator: std.mem.Allocator, seq: i64) ![]const u8 {
+pub fn restartRequest(allocator: std.mem.Allocator, seq: i64, arguments: ?[]const u8) ![]const u8 {
     var aw: Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
     var s: Stringify = .{ .writer = &aw.writer };
@@ -1429,6 +1581,10 @@ pub fn restartRequest(allocator: std.mem.Allocator, seq: i64) ![]const u8 {
     try s.write("request");
     try s.objectField("command");
     try s.write("restart");
+    if (arguments) |args| {
+        try s.objectField("arguments");
+        try aw.writer.writeAll(args);
+    }
     try s.endObject();
 
     return try aw.toOwnedSlice();
@@ -1622,7 +1778,8 @@ test "SetFunctionBreakpointsRequest serializes with breakpoint names" {
     const allocator = std.testing.allocator;
     const names = [_][]const u8{ "main", "compute" };
     const conditions = [_]?[]const u8{ null, "x > 0" };
-    const data = try setFunctionBreakpointsRequest(allocator, 12, &names, &conditions);
+    const hit_conds = [_]?[]const u8{ null, null };
+    const data = try setFunctionBreakpointsRequest(allocator, 12, &names, &conditions, &hit_conds);
     defer allocator.free(data);
 
     const parsed = try json.parseFromSlice(json.Value, allocator, data, .{});
@@ -1660,7 +1817,7 @@ test "ConfigurationDoneRequest serializes correctly" {
 
 test "GotoTargetsRequest serializes with source and line" {
     const allocator = std.testing.allocator;
-    const data = try gotoTargetsRequest(allocator, 15, "/test/main.py", 25);
+    const data = try gotoTargetsRequest(allocator, 15, "/test/main.py", 25, null);
     defer allocator.free(data);
 
     const parsed = try json.parseFromSlice(json.Value, allocator, data, .{});
@@ -1673,7 +1830,7 @@ test "GotoTargetsRequest serializes with source and line" {
 
 test "SetVariableRequest serializes with variablesReference, name, and value" {
     const allocator = std.testing.allocator;
-    const data = try setVariableRequest(allocator, 16, 42, "x", "100");
+    const data = try setVariableRequest(allocator, 16, 42, "x", "100", null);
     defer allocator.free(data);
 
     const parsed = try json.parseFromSlice(json.Value, allocator, data, .{});
@@ -1777,7 +1934,7 @@ test "StepOutRequestEx serializes with singleThread" {
 
 test "EvaluateRequestEx serializes with explicit context" {
     const allocator = std.testing.allocator;
-    const data = try evaluateRequestEx(allocator, 9, "x.value", 3, .hover);
+    const data = try evaluateRequestEx(allocator, 9, "x.value", 3, .hover, null, null, null);
     defer allocator.free(data);
 
     const parsed = try json.parseFromSlice(json.Value, allocator, data, .{});
@@ -1788,16 +1945,16 @@ test "EvaluateRequestEx serializes with explicit context" {
     try std.testing.expectEqualStrings("x.value", args.get("expression").?.string);
 }
 
-test "EvaluateRequestEx defaults to repl when context is null" {
+test "EvaluateRequestEx omits context when null" {
     const allocator = std.testing.allocator;
-    const data = try evaluateRequestEx(allocator, 9, "x + y", null, null);
+    const data = try evaluateRequestEx(allocator, 9, "x + y", null, null, null, null, null);
     defer allocator.free(data);
 
     const parsed = try json.parseFromSlice(json.Value, allocator, data, .{});
     defer parsed.deinit();
     const args = parsed.value.object.get("arguments").?.object;
 
-    try std.testing.expectEqualStrings("repl", args.get("context").?.string);
+    try std.testing.expect(args.get("context") == null);
     try std.testing.expect(args.get("frameId") == null);
 }
 
@@ -1915,7 +2072,7 @@ test "StepInTargetsRequest serializes with frameId" {
 
 test "BreakpointLocationsRequest serializes with source, line, and endLine" {
     const allocator = std.testing.allocator;
-    const data = try breakpointLocationsRequest(allocator, 16, "/src/main.zig", 10, 20);
+    const data = try breakpointLocationsRequest(allocator, 16, "/src/main.zig", 10, 20, null, null);
     defer allocator.free(data);
 
     const parsed = try json.parseFromSlice(json.Value, allocator, data, .{});
@@ -1931,7 +2088,7 @@ test "BreakpointLocationsRequest serializes with source, line, and endLine" {
 
 test "BreakpointLocationsRequest omits endLine when null" {
     const allocator = std.testing.allocator;
-    const data = try breakpointLocationsRequest(allocator, 16, "/src/main.zig", 10, null);
+    const data = try breakpointLocationsRequest(allocator, 16, "/src/main.zig", 10, null, null, null);
     defer allocator.free(data);
 
     const parsed = try json.parseFromSlice(json.Value, allocator, data, .{});
@@ -2002,7 +2159,7 @@ test "LocationsRequest serializes with locationReference" {
 
 test "RestartRequest serializes without arguments" {
     const allocator = std.testing.allocator;
-    const data = try restartRequest(allocator, 20);
+    const data = try restartRequest(allocator, 20, null);
     defer allocator.free(data);
 
     const parsed = try json.parseFromSlice(json.Value, allocator, data, .{});

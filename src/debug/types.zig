@@ -19,6 +19,7 @@ pub const StackFrame = struct {
     column: u32 = 0,
     language: []const u8 = "",
     is_boundary: bool = false,
+    address: u64 = 0,
 
     pub fn jsonStringify(self: *const StackFrame, jw: anytype) !void {
         try jw.beginObject();
@@ -32,14 +33,6 @@ pub const StackFrame = struct {
         try jw.write(self.line);
         try jw.objectField("column");
         try jw.write(self.column);
-        if (self.language.len > 0) {
-            try jw.objectField("language");
-            try jw.write(self.language);
-        }
-        if (self.is_boundary) {
-            try jw.objectField("is_boundary");
-            try jw.write(true);
-        }
         try jw.endObject();
     }
 };
@@ -66,32 +59,26 @@ pub const Variable = struct {
             try jw.objectField("type");
             try jw.write(self.@"type");
         }
-        if (self.children_count > 0) {
-            try jw.objectField("children_count");
-            try jw.write(self.children_count);
-        }
-        if (self.variables_reference > 0) {
-            try jw.objectField("variables_reference");
-            try jw.write(self.variables_reference);
-        }
+        try jw.objectField("variablesReference");
+        try jw.write(self.variables_reference);
         if (self.named_variables) |nv| {
-            try jw.objectField("named_variables");
+            try jw.objectField("namedVariables");
             try jw.write(nv);
         }
         if (self.indexed_variables) |iv| {
-            try jw.objectField("indexed_variables");
+            try jw.objectField("indexedVariables");
             try jw.write(iv);
         }
         if (self.evaluate_name.len > 0) {
-            try jw.objectField("evaluate_name");
+            try jw.objectField("evaluateName");
             try jw.write(self.evaluate_name);
         }
         if (self.memory_reference.len > 0) {
-            try jw.objectField("memory_reference");
+            try jw.objectField("memoryReference");
             try jw.write(self.memory_reference);
         }
         if (self.presentation_hint) |*ph| {
-            try jw.objectField("presentation_hint");
+            try jw.objectField("presentationHint");
             try ph.jsonStringify(jw);
         }
         try jw.endObject();
@@ -102,9 +89,22 @@ pub const StopReason = enum {
     breakpoint,
     step,
     exception,
-    exit,
     entry,
     pause,
+    goto,
+    function_breakpoint,
+    data_breakpoint,
+    instruction_breakpoint,
+    exited,
+
+    pub fn jsonStringify(self: *const StopReason, jw: anytype) !void {
+        try jw.write(switch (self.*) {
+            .function_breakpoint => "function breakpoint",
+            .data_breakpoint => "data breakpoint",
+            .instruction_breakpoint => "instruction breakpoint",
+            else => @tagName(self.*),
+        });
+    }
 };
 
 pub const OutputEntry = struct {
@@ -121,30 +121,49 @@ pub const OutputEntry = struct {
     }
 };
 
+pub const ExceptionDetails = struct {
+    message: []const u8 = "",
+    type_name: []const u8 = "",
+    stack_trace: []const u8 = "",
+
+    pub fn jsonStringify(self: *const ExceptionDetails, jw: anytype) !void {
+        try jw.beginObject();
+        if (self.message.len > 0) {
+            try jw.objectField("message");
+            try jw.write(self.message);
+        }
+        if (self.type_name.len > 0) {
+            try jw.objectField("typeName");
+            try jw.write(self.type_name);
+        }
+        if (self.stack_trace.len > 0) {
+            try jw.objectField("stackTrace");
+            try jw.write(self.stack_trace);
+        }
+        try jw.endObject();
+    }
+};
+
 pub const ExceptionInfo = struct {
     @"type": []const u8,
     message: []const u8,
     id: ?[]const u8 = null,
-    break_mode: ?[]const u8 = null,
-    details: ?[]const u8 = null,
+    break_mode: []const u8 = "unhandled",
+    details: ?ExceptionDetails = null,
 
     pub fn jsonStringify(self: *const ExceptionInfo, jw: anytype) !void {
         try jw.beginObject();
-        try jw.objectField("type");
+        try jw.objectField("exceptionId");
         try jw.write(self.@"type");
-        try jw.objectField("message");
-        try jw.write(self.message);
-        if (self.id) |id| {
-            try jw.objectField("id");
-            try jw.write(id);
+        if (self.message.len > 0) {
+            try jw.objectField("description");
+            try jw.write(self.message);
         }
-        if (self.break_mode) |bm| {
-            try jw.objectField("break_mode");
-            try jw.write(bm);
-        }
-        if (self.details) |d| {
+        try jw.objectField("breakMode");
+        try jw.write(self.break_mode);
+        if (self.details) |*d| {
             try jw.objectField("details");
-            try jw.write(d);
+            try d.jsonStringify(jw);
         }
         try jw.endObject();
     }
@@ -176,12 +195,10 @@ pub const Scope = struct {
         try jw.beginObject();
         try jw.objectField("name");
         try jw.write(self.name);
-        try jw.objectField("variables_reference");
+        try jw.objectField("variablesReference");
         try jw.write(self.variables_reference);
-        if (self.expensive) {
-            try jw.objectField("expensive");
-            try jw.write(true);
-        }
+        try jw.objectField("expensive");
+        try jw.write(self.expensive);
         try jw.endObject();
     }
 };
@@ -208,13 +225,13 @@ pub const DataBreakpointInfo = struct {
     pub fn jsonStringify(self: *const DataBreakpointInfo, jw: anytype) !void {
         try jw.beginObject();
         if (self.data_id) |id| {
-            try jw.objectField("data_id");
+            try jw.objectField("dataId");
             try jw.write(id);
         }
         try jw.objectField("description");
         try jw.write(self.description);
         if (self.access_types.len > 0) {
-            try jw.objectField("access_types");
+            try jw.objectField("accessTypes");
             try jw.beginArray();
             for (self.access_types) |at| {
                 try jw.write(@tagName(at));
@@ -324,7 +341,6 @@ pub const DebugCapabilities = struct {
     supports_log_points: bool = false,
     supports_function_breakpoints: bool = false,
     supports_data_breakpoints: bool = false,
-    supports_exception_breakpoints: bool = false,
     supports_step_back: bool = false,
     supports_restart_frame: bool = false,
     supports_goto_targets: bool = false,
@@ -336,7 +352,6 @@ pub const DebugCapabilities = struct {
     supports_read_memory: bool = false,
     supports_write_memory: bool = false,
     supports_disassemble: bool = false,
-    supports_exception_info: bool = false,
     supports_instruction_breakpoints: bool = false,
     supports_stepping_granularity: bool = false,
     supports_cancel_request: bool = false,
@@ -355,12 +370,71 @@ pub const DebugCapabilities = struct {
     support_suspend_debuggee: bool = false,
     supports_delayed_stack_trace_loading: bool = false,
     supports_clipboard_context: bool = false,
+    supports_configuration_done_request: bool = false,
+    supports_data_breakpoint_bytes: bool = false,
+    supports_ansi_styling: bool = false,
+    supports_locations_request: bool = false,
+    supports_breakpoint_modes: bool = false,
+
+    fn snakeToCamelCase(comptime snake: []const u8) []const u8 {
+        const len = comptime len: {
+            var count: usize = 0;
+            for (snake) |c| {
+                if (c != '_') count += 1;
+            }
+            break :len count;
+        };
+        const buf = comptime buf: {
+            var result: [len]u8 = undefined;
+            var j: usize = 0;
+            var capitalize_next = false;
+            for (snake) |c| {
+                if (c == '_') {
+                    capitalize_next = true;
+                } else if (capitalize_next) {
+                    result[j] = c - 32; // uppercase
+                    j += 1;
+                    capitalize_next = false;
+                } else {
+                    result[j] = c;
+                    j += 1;
+                }
+            }
+            break :buf result;
+        };
+        return &buf;
+    }
+
+    fn dapCapabilityName(comptime field_name: []const u8) []const u8 {
+        // Map specific fields to their DAP-spec names (with "Request"/"Options" suffix)
+        const overrides = .{
+            .{ "supports_read_memory", "supportsReadMemoryRequest" },
+            .{ "supports_write_memory", "supportsWriteMemoryRequest" },
+            .{ "supports_disassemble", "supportsDisassembleRequest" },
+            .{ "supports_modules", "supportsModulesRequest" },
+            .{ "supports_loaded_sources", "supportsLoadedSourcesRequest" },
+            .{ "supports_completions", "supportsCompletionsRequest" },
+            .{ "supports_terminate", "supportsTerminateRequest" },
+            .{ "supports_cancel_request", "supportsCancelRequest" },
+            .{ "supports_terminate_threads", "supportsTerminateThreadsRequest" },
+            .{ "supports_breakpoint_locations", "supportsBreakpointLocationsRequest" },
+            .{ "supports_step_in_targets", "supportsStepInTargetsRequest" },
+            .{ "supports_restart_request", "supportsRestartRequest" },
+            .{ "supports_configuration_done_request", "supportsConfigurationDoneRequest" },
+            .{ "supports_value_formatting", "supportsValueFormattingOptions" },
+        };
+        inline for (overrides) |entry| {
+            if (std.mem.eql(u8, field_name, entry[0])) return entry[1];
+        }
+        return snakeToCamelCase(field_name);
+    }
 
     pub fn jsonStringify(self: *const DebugCapabilities, jw: anytype) !void {
+        @setEvalBranchQuota(10000);
         try jw.beginObject();
         inline for (std.meta.fields(DebugCapabilities)) |field| {
             if (@field(self, field.name)) {
-                try jw.objectField(field.name);
+                try jw.objectField(comptime dapCapabilityName(field.name));
                 try jw.write(true);
             }
         }
@@ -501,25 +575,21 @@ pub const BreakpointInfo = struct {
         try jw.write(self.id);
         try jw.objectField("verified");
         try jw.write(self.verified);
-        try jw.objectField("file");
+        try jw.objectField("source");
+        try jw.beginObject();
+        try jw.objectField("path");
         try jw.write(self.file);
-        try jw.objectField("line");
-        try jw.write(self.line);
+        try jw.endObject();
         if (self.actual_line) |al| {
-            try jw.objectField("actual_line");
+            try jw.objectField("line");
             try jw.write(al);
+        } else {
+            try jw.objectField("line");
+            try jw.write(self.line);
         }
         if (self.condition) |c| {
             try jw.objectField("condition");
             try jw.write(c);
-        }
-        if (self.hit_condition) |h| {
-            try jw.objectField("hit_condition");
-            try jw.write(h);
-        }
-        if (self.log_message) |lm| {
-            try jw.objectField("log_message");
-            try jw.write(lm);
         }
         try jw.endObject();
     }
@@ -590,7 +660,7 @@ pub const LaunchConfig = struct {
 pub const ThreadInfo = struct {
     id: u32,
     name: []const u8,
-    is_stopped: bool,
+    is_stopped: bool = false,
 
     pub fn jsonStringify(self: *const ThreadInfo, jw: anytype) !void {
         try jw.beginObject();
@@ -598,8 +668,6 @@ pub const ThreadInfo = struct {
         try jw.write(self.id);
         try jw.objectField("name");
         try jw.write(self.name);
-        try jw.objectField("is_stopped");
-        try jw.write(self.is_stopped);
         try jw.endObject();
     }
 };
@@ -607,7 +675,7 @@ pub const ThreadInfo = struct {
 pub const DisassembledInstruction = struct {
     address: []const u8,
     instruction: []const u8,
-    bytes: []const u8,
+    instruction_bytes: []const u8 = "",
 
     pub fn jsonStringify(self: *const DisassembledInstruction, jw: anytype) !void {
         try jw.beginObject();
@@ -615,8 +683,10 @@ pub const DisassembledInstruction = struct {
         try jw.write(self.address);
         try jw.objectField("instruction");
         try jw.write(self.instruction);
-        try jw.objectField("bytes");
-        try jw.write(self.bytes);
+        if (self.instruction_bytes.len > 0) {
+            try jw.objectField("instructionBytes");
+            try jw.write(self.instruction_bytes);
+        }
         try jw.endObject();
     }
 };
@@ -673,6 +743,7 @@ pub const InspectResult = struct {
                 if (child.memory_reference.len > 0) allocator.free(child.memory_reference);
                 if (child.presentation_hint) |ph| {
                     if (ph.kind.len > 0) allocator.free(ph.kind);
+                    for (ph.attributes) |attr| allocator.free(attr);
                     if (ph.attributes.len > 0) allocator.free(ph.attributes);
                     if (ph.visibility.len > 0) allocator.free(ph.visibility);
                 }
@@ -723,12 +794,14 @@ pub const EvaluateContext = enum {
     repl,
     hover,
     clipboard,
+    variables,
 
     pub fn parse(s: []const u8) ?EvaluateContext {
         if (std.mem.eql(u8, s, "watch")) return .watch;
         if (std.mem.eql(u8, s, "repl")) return .repl;
         if (std.mem.eql(u8, s, "hover")) return .hover;
         if (std.mem.eql(u8, s, "clipboard")) return .clipboard;
+        if (std.mem.eql(u8, s, "variables")) return .variables;
         return null;
     }
 };
@@ -741,7 +814,7 @@ pub const InstructionBreakpoint = struct {
 
     pub fn jsonStringify(self: *const InstructionBreakpoint, jw: anytype) !void {
         try jw.beginObject();
-        try jw.objectField("instruction_reference");
+        try jw.objectField("instructionReference");
         try jw.write(self.instruction_reference);
         if (self.offset) |o| {
             try jw.objectField("offset");
@@ -752,7 +825,7 @@ pub const InstructionBreakpoint = struct {
             try jw.write(c);
         }
         if (self.hit_condition) |h| {
-            try jw.objectField("hit_condition");
+            try jw.objectField("hitCondition");
             try jw.write(h);
         }
         try jw.endObject();
@@ -774,11 +847,11 @@ pub const BreakpointLocation = struct {
             try jw.write(c);
         }
         if (self.end_line) |el| {
-            try jw.objectField("end_line");
+            try jw.objectField("endLine");
             try jw.write(el);
         }
         if (self.end_column) |ec| {
-            try jw.objectField("end_column");
+            try jw.objectField("endColumn");
             try jw.write(ec);
         }
         try jw.endObject();
@@ -808,11 +881,11 @@ pub const StepInTarget = struct {
             try jw.write(c);
         }
         if (self.end_line) |el| {
-            try jw.objectField("end_line");
+            try jw.objectField("endLine");
             try jw.write(el);
         }
         if (self.end_column) |ec| {
-            try jw.objectField("end_column");
+            try jw.objectField("endColumn");
             try jw.write(ec);
         }
         try jw.endObject();
@@ -835,15 +908,15 @@ pub const StackFrameFormat = struct {
             try jw.write(v);
         }
         if (self.parameter_types) |v| {
-            try jw.objectField("parameter_types");
+            try jw.objectField("parameterTypes");
             try jw.write(v);
         }
         if (self.parameter_names) |v| {
-            try jw.objectField("parameter_names");
+            try jw.objectField("parameterNames");
             try jw.write(v);
         }
         if (self.parameter_values) |v| {
-            try jw.objectField("parameter_values");
+            try jw.objectField("parameterValues");
             try jw.write(v);
         }
         if (self.line) |v| {
@@ -855,7 +928,7 @@ pub const StackFrameFormat = struct {
             try jw.write(v);
         }
         if (self.include_all) |v| {
-            try jw.objectField("include_all");
+            try jw.objectField("includeAll");
             try jw.write(v);
         }
         try jw.endObject();
@@ -877,7 +950,7 @@ pub const ValueFormat = struct {
 
 pub const VariablePresentationHint = struct {
     kind: []const u8 = "",
-    attributes: []const u8 = "",
+    attributes: []const []const u8 = &.{},
     visibility: []const u8 = "",
 
     pub fn jsonStringify(self: *const VariablePresentationHint, jw: anytype) !void {
@@ -888,7 +961,11 @@ pub const VariablePresentationHint = struct {
         }
         if (self.attributes.len > 0) {
             try jw.objectField("attributes");
-            try jw.write(self.attributes);
+            try jw.beginArray();
+            for (self.attributes) |attr| {
+                try jw.write(attr);
+            }
+            try jw.endArray();
         }
         if (self.visibility.len > 0) {
             try jw.objectField("visibility");
@@ -931,11 +1008,11 @@ pub const GotoTarget = struct {
             try jw.write(c);
         }
         if (self.end_line) |el| {
-            try jw.objectField("end_line");
+            try jw.objectField("endLine");
             try jw.write(el);
         }
         if (self.end_column) |ec| {
-            try jw.objectField("end_column");
+            try jw.objectField("endColumn");
             try jw.write(ec);
         }
         try jw.endObject();
@@ -968,53 +1045,6 @@ pub const SymbolInfo = struct {
         if (self.container.len > 0) {
             try jw.objectField("container");
             try jw.write(self.container);
-        }
-        try jw.endObject();
-    }
-};
-
-pub const VariableDelta = struct {
-    name: []const u8,
-    old_value: []const u8 = "",
-    new_value: []const u8 = "",
-    change_type: []const u8 = "changed",
-
-    pub fn jsonStringify(self: *const VariableDelta, jw: anytype) !void {
-        try jw.beginObject();
-        try jw.objectField("name");
-        try jw.write(self.name);
-        try jw.objectField("change_type");
-        try jw.write(self.change_type);
-        if (self.old_value.len > 0) {
-            try jw.objectField("old_value");
-            try jw.write(self.old_value);
-        }
-        if (self.new_value.len > 0) {
-            try jw.objectField("new_value");
-            try jw.write(self.new_value);
-        }
-        try jw.endObject();
-    }
-};
-
-pub const StateDelta = struct {
-    variables: []const VariableDelta = &.{},
-    stack_depth_change: i32 = 0,
-    stop_reason: StopReason = .step,
-
-    pub fn jsonStringify(self: *const StateDelta, jw: anytype) !void {
-        try jw.beginObject();
-        try jw.objectField("stop_reason");
-        try jw.write(@tagName(self.stop_reason));
-        try jw.objectField("stack_depth_change");
-        try jw.write(self.stack_depth_change);
-        if (self.variables.len > 0) {
-            try jw.objectField("variables");
-            try jw.beginArray();
-            for (self.variables) |*v| {
-                try v.jsonStringify(jw);
-            }
-            try jw.endArray();
         }
         try jw.endObject();
     }
@@ -1055,105 +1085,6 @@ pub const VariableLocationInfo = struct {
         try jw.endObject();
     }
 };
-
-pub const BreakpointSuggestion = struct {
-    file: []const u8 = "",
-    line: u32 = 0,
-    name: []const u8 = "",
-    kind: []const u8 = "", // "function_entry", "return", "loop_header", "branch"
-    description: []const u8 = "",
-
-    pub fn jsonStringify(self: *const BreakpointSuggestion, jw: anytype) !void {
-        try jw.beginObject();
-        if (self.file.len > 0) {
-            try jw.objectField("file");
-            try jw.write(self.file);
-        }
-        if (self.line > 0) {
-            try jw.objectField("line");
-            try jw.write(self.line);
-        }
-        if (self.name.len > 0) {
-            try jw.objectField("name");
-            try jw.write(self.name);
-        }
-        if (self.kind.len > 0) {
-            try jw.objectField("kind");
-            try jw.write(self.kind);
-        }
-        if (self.description.len > 0) {
-            try jw.objectField("description");
-            try jw.write(self.description);
-        }
-        try jw.endObject();
-    }
-};
-
-pub const MacroExpansion = struct {
-    name: []const u8 = "",
-    definition: []const u8 = "",
-    expansion: []const u8 = "",
-    file: []const u8 = "",
-    line: ?u32 = null,
-
-    pub fn jsonStringify(self: *const MacroExpansion, jw: anytype) !void {
-        try jw.beginObject();
-        try jw.objectField("name");
-        try jw.write(self.name);
-        if (self.definition.len > 0) {
-            try jw.objectField("definition");
-            try jw.write(self.definition);
-        }
-        if (self.expansion.len > 0) {
-            try jw.objectField("expansion");
-            try jw.write(self.expansion);
-        }
-        if (self.file.len > 0) {
-            try jw.objectField("file");
-            try jw.write(self.file);
-        }
-        if (self.line) |l| {
-            try jw.objectField("line");
-            try jw.write(l);
-        }
-        try jw.endObject();
-    }
-};
-
-
-pub const StateDiffResult = struct {
-    stack_diff: []const u8 = "",
-    locals_diff: []const u8 = "",
-    registers_diff: []const u8 = "",
-    stop_reason_a: []const u8 = "",
-    stop_reason_b: []const u8 = "",
-
-    pub fn jsonStringify(self: *const StateDiffResult, jw: anytype) !void {
-        try jw.beginObject();
-        if (self.stop_reason_a.len > 0) {
-            try jw.objectField("stop_reason_a");
-            try jw.write(self.stop_reason_a);
-        }
-        if (self.stop_reason_b.len > 0) {
-            try jw.objectField("stop_reason_b");
-            try jw.write(self.stop_reason_b);
-        }
-        if (self.stack_diff.len > 0) {
-            try jw.objectField("stack_diff");
-            try jw.write(self.stack_diff);
-        }
-        if (self.locals_diff.len > 0) {
-            try jw.objectField("locals_diff");
-            try jw.write(self.locals_diff);
-        }
-        if (self.registers_diff.len > 0) {
-            try jw.objectField("registers_diff");
-            try jw.write(self.registers_diff);
-        }
-        try jw.endObject();
-    }
-};
-
 
 pub const DebugNotification = struct {
     method: []const u8,
@@ -1201,7 +1132,7 @@ test "StackFrame serializes to JSON correctly" {
     try std.testing.expectEqual(@as(i64, 42), parsed.value.object.get("line").?.integer);
 }
 
-test "Variable serializes with children count" {
+test "Variable serializes with variablesReference" {
     const allocator = std.testing.allocator;
     const v = Variable{
         .name = "data",
@@ -1217,8 +1148,8 @@ test "Variable serializes with children count" {
     defer parsed.deinit();
 
     try std.testing.expectEqualStrings("data", parsed.value.object.get("name").?.string);
-    try std.testing.expectEqual(@as(i64, 3), parsed.value.object.get("children_count").?.integer);
-    try std.testing.expectEqual(@as(i64, 7), parsed.value.object.get("variables_reference").?.integer);
+    try std.testing.expect(parsed.value.object.get("children_count") == null);
+    try std.testing.expectEqual(@as(i64, 7), parsed.value.object.get("variablesReference").?.integer);
 }
 
 test "StopState includes location and locals" {
@@ -1239,6 +1170,7 @@ test "StopState includes location and locals" {
     const obj = parsed.value.object;
 
     try std.testing.expectEqualStrings("breakpoint", obj.get("stop_reason").?.string);
+    // Note: stop_reason is a StopState field, not StopReason's own serialization
     const loc = obj.get("location").?.object;
     try std.testing.expectEqualStrings("main.py", loc.get("file").?.string);
     try std.testing.expectEqual(@as(i64, 42), loc.get("line").?.integer);
@@ -1287,6 +1219,7 @@ test "EvaluateContext.parse parses all variants" {
     try std.testing.expectEqual(EvaluateContext.repl, EvaluateContext.parse("repl").?);
     try std.testing.expectEqual(EvaluateContext.hover, EvaluateContext.parse("hover").?);
     try std.testing.expectEqual(EvaluateContext.clipboard, EvaluateContext.parse("clipboard").?);
+    try std.testing.expectEqual(EvaluateContext.variables, EvaluateContext.parse("variables").?);
     try std.testing.expect(EvaluateContext.parse("invalid") == null);
 }
 
@@ -1296,14 +1229,14 @@ test "VariableFilter.parse parses all variants" {
     try std.testing.expect(VariableFilter.parse("invalid") == null);
 }
 
-test "BreakpointInfo serializes with log_message" {
+test "BreakpointInfo serializes with DAP source object" {
     const allocator = std.testing.allocator;
     const bp = BreakpointInfo{
         .id = 1,
         .verified = true,
         .file = "main.zig",
         .line = 10,
-        .log_message = "x = {x}",
+        .actual_line = 12,
     };
     const result = try stringifyToString(allocator, bp);
     defer allocator.free(result);
@@ -1314,9 +1247,9 @@ test "BreakpointInfo serializes with log_message" {
 
     try std.testing.expectEqual(@as(i64, 1), obj.get("id").?.integer);
     try std.testing.expect(obj.get("verified").?.bool);
-    try std.testing.expectEqualStrings("main.zig", obj.get("file").?.string);
-    try std.testing.expectEqual(@as(i64, 10), obj.get("line").?.integer);
-    try std.testing.expectEqualStrings("x = {x}", obj.get("log_message").?.string);
+    const source = obj.get("source").?.object;
+    try std.testing.expectEqualStrings("main.zig", source.get("path").?.string);
+    try std.testing.expectEqual(@as(i64, 12), obj.get("line").?.integer);
 }
 
 test "DebugCapabilities serializes new flags when true" {
@@ -1341,15 +1274,15 @@ test "DebugCapabilities serializes new flags when true" {
     defer parsed.deinit();
     const obj = parsed.value.object;
 
-    try std.testing.expect(obj.get("supports_instruction_breakpoints").?.bool);
-    try std.testing.expect(obj.get("supports_stepping_granularity").?.bool);
-    try std.testing.expect(obj.get("supports_cancel_request").?.bool);
-    try std.testing.expect(obj.get("supports_terminate_threads").?.bool);
-    try std.testing.expect(obj.get("supports_breakpoint_locations").?.bool);
-    try std.testing.expect(obj.get("supports_step_in_targets").?.bool);
-    try std.testing.expect(obj.get("supports_evaluate_for_hovers").?.bool);
-    try std.testing.expect(obj.get("supports_value_formatting").?.bool);
-    try std.testing.expect(obj.get("supports_loaded_sources").?.bool);
-    try std.testing.expect(obj.get("supports_restart_request").?.bool);
-    try std.testing.expect(obj.get("supports_single_thread_execution_requests").?.bool);
+    try std.testing.expect(obj.get("supportsInstructionBreakpoints").?.bool);
+    try std.testing.expect(obj.get("supportsSteppingGranularity").?.bool);
+    try std.testing.expect(obj.get("supportsCancelRequest").?.bool);
+    try std.testing.expect(obj.get("supportsTerminateThreadsRequest").?.bool);
+    try std.testing.expect(obj.get("supportsBreakpointLocationsRequest").?.bool);
+    try std.testing.expect(obj.get("supportsStepInTargetsRequest").?.bool);
+    try std.testing.expect(obj.get("supportsEvaluateForHovers").?.bool);
+    try std.testing.expect(obj.get("supportsValueFormattingOptions").?.bool);
+    try std.testing.expect(obj.get("supportsLoadedSourcesRequest").?.bool);
+    try std.testing.expect(obj.get("supportsRestartRequest").?.bool);
+    try std.testing.expect(obj.get("supportsSingleThreadExecutionRequests").?.bool);
 }

@@ -93,12 +93,11 @@ const DW_AT_rnglists_base: u64 = 0x74;
 const DW_AT_alignment: u64 = 0x88;
 const DW_AT_loclists_base: u64 = 0x8c;
 const DW_AT_discr: u64 = 0x15;
-const DW_AT_discr_value: u64 = 0x66;
-const DW_AT_discr_list: u64 = 0x6c;
+const DW_AT_discr_value: u64 = 0x16;
+const DW_AT_discr_list: u64 = 0x3d;
 // Split DWARF / debug fission attributes
 const DW_AT_dwo_name: u64 = 0x76;
 const DW_AT_GNU_dwo_name: u64 = 0x2130;
-const DW_AT_dwo_id: u64 = 0x42;
 const DW_AT_GNU_dwo_id: u64 = 0x2131;
 const DW_AT_comp_dir: u64 = 0x1b;
 // DWARF unit type constants
@@ -138,10 +137,12 @@ const DW_FORM_strx: u64 = 0x1a;
 const DW_FORM_addrx: u64 = 0x1b;
 const DW_FORM_strx1: u64 = 0x25;
 const DW_FORM_strx2: u64 = 0x26;
-const DW_FORM_strx4: u64 = 0x27;
+const DW_FORM_strx3: u64 = 0x27;
+const DW_FORM_strx4: u64 = 0x28;
 const DW_FORM_addrx1: u64 = 0x29;
 const DW_FORM_addrx2: u64 = 0x2a;
-const DW_FORM_addrx4: u64 = 0x2b;
+const DW_FORM_addrx3: u64 = 0x2b;
+const DW_FORM_addrx4: u64 = 0x2c;
 const DW_FORM_data16: u64 = 0x1e;
 const DW_FORM_line_strp: u64 = 0x1f;
 const DW_FORM_implicit_const: u64 = 0x21;
@@ -171,6 +172,7 @@ pub const LineEntry = struct {
     column: u32,
     is_stmt: bool,
     end_sequence: bool,
+    prologue_end: bool = false,
 };
 
 pub const AbbrevEntry = struct {
@@ -425,265 +427,342 @@ pub fn parseLineProgram(data: []const u8, allocator: std.mem.Allocator) ![]LineE
 fn parseLineProgramImpl(data: []const u8, allocator: std.mem.Allocator, keep_files: bool, debug_line_str: ?[]const u8) !LineProgramResult {
 
     var pos: usize = 0;
-
-    // Unit length
-    const unit_length_32 = readU32(data, &pos) catch return error.TooSmall;
-    var is_64bit = false;
-    var unit_length: u64 = unit_length_32;
-    if (unit_length_32 == 0xFFFFFFFF) {
-        unit_length = readU64(data, &pos) catch return error.TooSmall;
-        is_64bit = true;
-    }
-    const unit_end = pos + @as(usize, @intCast(unit_length));
-
-    // Version
-    const version = readU16(data, &pos) catch return error.TooSmall;
-
-    // Address size and segment selector size (DWARF 5+)
-    if (version >= 5) {
-        if (pos >= data.len) return error.TooSmall;
-        // address_size
-        pos += 1;
-        // segment_selector_size
-        pos += 1;
-    }
-
-    // Header length
-    var header_length: u64 = undefined;
-    if (is_64bit) {
-        header_length = readU64(data, &pos) catch return error.TooSmall;
-    } else {
-        header_length = readU32(data, &pos) catch return error.TooSmall;
-    }
-    const header_end = pos + @as(usize, @intCast(header_length));
-
-    if (pos >= data.len) return error.TooSmall;
-    const min_instruction_length = data[pos];
-    pos += 1;
-
-    if (version >= 4) {
-        if (pos >= data.len) return error.TooSmall;
-        // max_operations_per_instruction (not used in state machine yet)
-        pos += 1;
-    }
-
-    if (pos >= data.len) return error.TooSmall;
-    const default_is_stmt = data[pos] != 0;
-    pos += 1;
-
-    if (pos >= data.len) return error.TooSmall;
-    const line_base: i8 = @bitCast(data[pos]);
-    pos += 1;
-
-    if (pos >= data.len) return error.TooSmall;
-    const line_range = data[pos];
-    pos += 1;
-
-    if (pos >= data.len) return error.TooSmall;
-    const opcode_base = data[pos];
-    pos += 1;
-
-    // Standard opcode lengths (opcode_base - 1 entries)
-    if (opcode_base > 1) {
-        const count = @as(usize, opcode_base) - 1;
-        if (pos + count > data.len) return error.TooSmall;
-        pos += count; // Skip standard opcode lengths
-    }
-
-    // Directories and files (DWARF 5 uses a different format)
-    var dirs: std.ArrayListUnmanaged([]const u8) = .empty;
-    defer dirs.deinit(allocator);
+    var entries: std.ArrayListUnmanaged(LineEntry) = .empty;
+    errdefer entries.deinit(allocator);
     var files: std.ArrayListUnmanaged(FileEntry) = .empty;
     defer files.deinit(allocator);
 
-    if (version >= 5) {
-        // DWARF 5 directory/file entry format
-        // directory_entry_format_count
-        if (pos >= data.len) return error.TooSmall;
-        const dir_format_count = data[pos];
-        pos += 1;
-
-        // Read directory entry format pairs
-        var dir_forms: std.ArrayListUnmanaged([2]u64) = .empty;
-        defer dir_forms.deinit(allocator);
-        for (0..dir_format_count) |_| {
-            const content_type = try readULEB128(data, &pos);
-            const form = try readULEB128(data, &pos);
-            try dir_forms.append(allocator, .{ content_type, form });
+    while (pos < data.len) {
+        // Unit length
+        const unit_length_32 = readU32(data, &pos) catch break;
+        var is_64bit = false;
+        var unit_length: u64 = unit_length_32;
+        if (unit_length_32 == 0xFFFFFFFF) {
+            unit_length = readU64(data, &pos) catch break;
+            is_64bit = true;
         }
+        const unit_end = pos + @as(usize, @intCast(unit_length));
 
-        // directories_count
-        const dir_count = try readULEB128(data, &pos);
-        for (0..@intCast(dir_count)) |_| {
-            var dir_name: []const u8 = "";
-            for (dir_forms.items) |pair| {
-                const form = pair[1];
-                if (pair[0] == 1) { // DW_LNCT_path
-                    if (form == DW_FORM_string) {
-                        dir_name = readNullTermString(data, &pos);
-                    } else if (form == DW_FORM_line_strp) {
-                        const offset: u64 = if (is_64bit)
-                            readU64(data, &pos) catch 0
-                        else
-                            readU32(data, &pos) catch 0;
-                        if (debug_line_str) |lstr| {
-                            dir_name = readStringAt(lstr, @intCast(offset)) orelse "";
-                        }
-                    } else if (form == DW_FORM_strp) {
-                        if (is_64bit) {
-                            pos += 8;
-                        } else {
-                            pos += 4;
-                        }
-                    } else {
-                        try skipForm(data, &pos, form, is_64bit);
-                    }
-                } else {
-                    try skipForm(data, &pos, form, is_64bit);
-                }
-            }
-            try dirs.append(allocator, dir_name);
-        }
+        // Version
+        const version = readU16(data, &pos) catch break;
 
-        // file_name_entry_format_count
-        if (pos >= data.len) return error.TooSmall;
-        const file_format_count = data[pos];
-        pos += 1;
-
-        var file_forms: std.ArrayListUnmanaged([2]u64) = .empty;
-        defer file_forms.deinit(allocator);
-        for (0..file_format_count) |_| {
-            const content_type = try readULEB128(data, &pos);
-            const form = try readULEB128(data, &pos);
-            try file_forms.append(allocator, .{ content_type, form });
-        }
-
-        // file_names_count
-        const file_count = try readULEB128(data, &pos);
-        for (0..@intCast(file_count)) |_| {
-            var file_name: []const u8 = "";
-            var dir_index: u64 = 0;
-            for (file_forms.items) |pair| {
-                const form = pair[1];
-                if (pair[0] == 1) { // DW_LNCT_path
-                    if (form == DW_FORM_string) {
-                        file_name = readNullTermString(data, &pos);
-                    } else if (form == DW_FORM_line_strp) {
-                        const offset: u64 = if (is_64bit)
-                            readU64(data, &pos) catch 0
-                        else
-                            readU32(data, &pos) catch 0;
-                        if (debug_line_str) |lstr| {
-                            file_name = readStringAt(lstr, @intCast(offset)) orelse "";
-                        }
-                    } else if (form == DW_FORM_strp) {
-                        if (is_64bit) {
-                            pos += 8;
-                        } else {
-                            pos += 4;
-                        }
-                    } else {
-                        try skipForm(data, &pos, form, is_64bit);
-                    }
-                } else if (pair[0] == 2) { // DW_LNCT_directory_index
-                    if (form == DW_FORM_data1 and pos < data.len) {
-                        dir_index = data[pos];
-                        pos += 1;
-                    } else if (form == DW_FORM_data2) {
-                        dir_index = readU16(data, &pos) catch 0;
-                    } else if (form == DW_FORM_udata) {
-                        dir_index = readULEB128(data, &pos) catch 0;
-                    } else {
-                        try skipForm(data, &pos, form, is_64bit);
-                    }
-                } else {
-                    try skipForm(data, &pos, form, is_64bit);
-                }
-            }
-            try files.append(allocator, .{ .name = file_name, .dir_index = dir_index });
-        }
-    } else {
-        // DWARF 4 directory and file tables
-        // Directories (null-terminated strings, terminated by empty string)
-        while (pos < data.len and data[pos] != 0) {
-            const dir = readNullTermString(data, &pos);
-            try dirs.append(allocator, dir);
-        }
-        if (pos < data.len) pos += 1; // Skip terminating 0
-
-        // Files
-        while (pos < data.len and data[pos] != 0) {
-            const name = readNullTermString(data, &pos);
-            const dir_index = try readULEB128(data, &pos);
-            _ = try readULEB128(data, &pos); // mod time
-            _ = try readULEB128(data, &pos); // file size
-            try files.append(allocator, .{ .name = name, .dir_index = dir_index });
-        }
-        if (pos < data.len) pos += 1; // Skip terminating 0
-    }
-
-    // Execute line program
-    pos = header_end;
-    var entries: std.ArrayListUnmanaged(LineEntry) = .empty;
-    errdefer entries.deinit(allocator);
-
-    // State machine
-    var address: u64 = 0;
-    var file_index: u32 = 1;
-    var line: u32 = 1;
-    var column: u32 = 0;
-    var is_stmt: bool = default_is_stmt;
-    var end_sequence: bool = false;
-
-    while (pos < unit_end and pos < data.len) {
-        const opcode = data[pos];
-        pos += 1;
-
-        if (opcode == 0) {
-            // Extended opcode
-            const ext_len = try readULEB128(data, &pos);
-            const ext_end = pos + @as(usize, @intCast(ext_len));
+        // Address size and segment selector size (DWARF 5+)
+        var line_address_size: u8 = 8;
+        if (version >= 5) {
             if (pos >= data.len) break;
-            const ext_opcode = data[pos];
+            line_address_size = data[pos];
+            pos += 1;
+            // segment_selector_size
+            pos += 1;
+        }
+
+        // Header length
+        var header_length: u64 = undefined;
+        if (is_64bit) {
+            header_length = readU64(data, &pos) catch break;
+        } else {
+            header_length = readU32(data, &pos) catch break;
+        }
+        const header_end = pos + @as(usize, @intCast(header_length));
+
+        if (pos >= data.len) break;
+        const min_instruction_length = data[pos];
+        pos += 1;
+
+        if (version >= 4) {
+            if (pos >= data.len) break;
+            // max_operations_per_instruction (not used in state machine yet)
+            pos += 1;
+        }
+
+        if (pos >= data.len) break;
+        const default_is_stmt = data[pos] != 0;
+        pos += 1;
+
+        if (pos >= data.len) break;
+        const line_base: i8 = @bitCast(data[pos]);
+        pos += 1;
+
+        if (pos >= data.len) break;
+        const line_range = data[pos];
+        pos += 1;
+
+        if (pos >= data.len) break;
+        const opcode_base = data[pos];
+        pos += 1;
+
+        // Standard opcode lengths (opcode_base - 1 entries)
+        if (opcode_base > 1) {
+            const count = @as(usize, opcode_base) - 1;
+            if (pos + count > data.len) break;
+            pos += count; // Skip standard opcode lengths
+        }
+
+        // Directories and files (DWARF 5 uses a different format)
+        var dirs: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer dirs.deinit(allocator);
+        files.clearRetainingCapacity();
+
+        if (version >= 5) {
+            // DWARF 5 directory/file entry format
+            // directory_entry_format_count
+            if (pos >= data.len) break;
+            const dir_format_count = data[pos];
             pos += 1;
 
-            switch (ext_opcode) {
-                DW_LNE_end_sequence => {
-                    end_sequence = true;
-                    try entries.append(allocator, .{
-                        .address = address,
-                        .file_index = file_index,
-                        .line = line,
-                        .column = column,
-                        .is_stmt = is_stmt,
-                        .end_sequence = true,
-                    });
-                    // Reset state
-                    address = 0;
-                    file_index = 1;
-                    line = 1;
-                    column = 0;
-                    is_stmt = default_is_stmt;
-                    end_sequence = false;
-                },
-                DW_LNE_set_address => {
-                    if (pos + 8 <= data.len) {
-                        address = std.mem.readInt(u64, data[pos..][0..8], .little);
-                    }
-                    pos = ext_end;
-                },
-                DW_LNE_set_discriminator => {
-                    _ = readULEB128(data, &pos) catch {};
-                },
-                else => {
-                    pos = ext_end;
-                },
+            // Read directory entry format pairs
+            var dir_forms: std.ArrayListUnmanaged([2]u64) = .empty;
+            defer dir_forms.deinit(allocator);
+            for (0..dir_format_count) |_| {
+                const content_type = try readULEB128(data, &pos);
+                const form = try readULEB128(data, &pos);
+                try dir_forms.append(allocator, .{ content_type, form });
             }
-            if (pos < ext_end) pos = ext_end;
-        } else if (opcode < opcode_base) {
-            // Standard opcode
-            switch (opcode) {
-                DW_LNS_copy => {
+
+            // directories_count
+            const dir_count = try readULEB128(data, &pos);
+            for (0..@intCast(dir_count)) |_| {
+                var dir_name: []const u8 = "";
+                for (dir_forms.items) |pair| {
+                    const form = pair[1];
+                    if (pair[0] == 1) { // DW_LNCT_path
+                        if (form == DW_FORM_string) {
+                            dir_name = readNullTermString(data, &pos);
+                        } else if (form == DW_FORM_line_strp) {
+                            const offset: u64 = if (is_64bit)
+                                readU64(data, &pos) catch 0
+                            else
+                                readU32(data, &pos) catch 0;
+                            if (debug_line_str) |lstr| {
+                                dir_name = readStringAt(lstr, @intCast(offset)) orelse "";
+                            }
+                        } else if (form == DW_FORM_strp) {
+                            if (is_64bit) {
+                                pos += 8;
+                            } else {
+                                pos += 4;
+                            }
+                        } else {
+                            try skipForm(data, &pos, form, is_64bit, 8);
+                        }
+                    } else {
+                        try skipForm(data, &pos, form, is_64bit, 8);
+                    }
+                }
+                try dirs.append(allocator, dir_name);
+            }
+
+            // file_name_entry_format_count
+            if (pos >= data.len) break;
+            const file_format_count = data[pos];
+            pos += 1;
+
+            var file_forms: std.ArrayListUnmanaged([2]u64) = .empty;
+            defer file_forms.deinit(allocator);
+            for (0..file_format_count) |_| {
+                const content_type = try readULEB128(data, &pos);
+                const form = try readULEB128(data, &pos);
+                try file_forms.append(allocator, .{ content_type, form });
+            }
+
+            // file_names_count
+            const file_count = try readULEB128(data, &pos);
+            for (0..@intCast(file_count)) |_| {
+                var file_name: []const u8 = "";
+                var dir_index: u64 = 0;
+                for (file_forms.items) |pair| {
+                    const form = pair[1];
+                    if (pair[0] == 1) { // DW_LNCT_path
+                        if (form == DW_FORM_string) {
+                            file_name = readNullTermString(data, &pos);
+                        } else if (form == DW_FORM_line_strp) {
+                            const offset: u64 = if (is_64bit)
+                                readU64(data, &pos) catch 0
+                            else
+                                readU32(data, &pos) catch 0;
+                            if (debug_line_str) |lstr| {
+                                file_name = readStringAt(lstr, @intCast(offset)) orelse "";
+                            }
+                        } else if (form == DW_FORM_strp) {
+                            if (is_64bit) {
+                                pos += 8;
+                            } else {
+                                pos += 4;
+                            }
+                        } else {
+                            try skipForm(data, &pos, form, is_64bit, 8);
+                        }
+                    } else if (pair[0] == 2) { // DW_LNCT_directory_index
+                        if (form == DW_FORM_data1 and pos < data.len) {
+                            dir_index = data[pos];
+                            pos += 1;
+                        } else if (form == DW_FORM_data2) {
+                            dir_index = readU16(data, &pos) catch 0;
+                        } else if (form == DW_FORM_udata) {
+                            dir_index = readULEB128(data, &pos) catch 0;
+                        } else {
+                            try skipForm(data, &pos, form, is_64bit, 8);
+                        }
+                    } else {
+                        try skipForm(data, &pos, form, is_64bit, 8);
+                    }
+                }
+                try files.append(allocator, .{ .name = file_name, .dir_index = dir_index });
+            }
+        } else {
+            // DWARF 4 directory and file tables
+            // Directories (null-terminated strings, terminated by empty string)
+            while (pos < data.len and data[pos] != 0) {
+                const dir = readNullTermString(data, &pos);
+                try dirs.append(allocator, dir);
+            }
+            if (pos < data.len) pos += 1; // Skip terminating 0
+
+            // Files
+            while (pos < data.len and data[pos] != 0) {
+                const name = readNullTermString(data, &pos);
+                const dir_index = try readULEB128(data, &pos);
+                _ = try readULEB128(data, &pos); // mod time
+                _ = try readULEB128(data, &pos); // file size
+                try files.append(allocator, .{ .name = name, .dir_index = dir_index });
+            }
+            if (pos < data.len) pos += 1; // Skip terminating 0
+        }
+
+        // Execute line program
+        pos = header_end;
+
+        // State machine
+        var address: u64 = 0;
+        var file_index: u32 = 1;
+        var line: u32 = 1;
+        var column: u32 = 0;
+        var is_stmt: bool = default_is_stmt;
+        var end_sequence: bool = false;
+        var prologue_end: bool = false;
+
+        while (pos < unit_end and pos < data.len) {
+            const opcode = data[pos];
+            pos += 1;
+
+            if (opcode == 0) {
+                // Extended opcode
+                const ext_len = try readULEB128(data, &pos);
+                const ext_end = pos + @as(usize, @intCast(ext_len));
+                if (pos >= data.len) break;
+                const ext_opcode = data[pos];
+                pos += 1;
+
+                switch (ext_opcode) {
+                    DW_LNE_end_sequence => {
+                        end_sequence = true;
+                        try entries.append(allocator, .{
+                            .address = address,
+                            .file_index = file_index,
+                            .line = line,
+                            .column = column,
+                            .is_stmt = is_stmt,
+                            .end_sequence = true,
+                            .prologue_end = prologue_end,
+                        });
+                        // Reset state
+                        address = 0;
+                        file_index = 1;
+                        line = 1;
+                        column = 0;
+                        is_stmt = default_is_stmt;
+                        end_sequence = false;
+                        prologue_end = false;
+                    },
+                    DW_LNE_set_address => {
+                        const addr_sz: usize = line_address_size;
+                        if (pos + addr_sz <= data.len) {
+                            address = switch (addr_sz) {
+                                4 => @as(u64, std.mem.readInt(u32, data[pos..][0..4], .little)),
+                                8 => std.mem.readInt(u64, data[pos..][0..8], .little),
+                                else => 0,
+                            };
+                        }
+                        pos = ext_end;
+                    },
+                    DW_LNE_set_discriminator => {
+                        _ = readULEB128(data, &pos) catch {};
+                    },
+                    else => {
+                        pos = ext_end;
+                    },
+                }
+                if (pos < ext_end) pos = ext_end;
+            } else if (opcode < opcode_base) {
+                // Standard opcode
+                switch (opcode) {
+                    DW_LNS_copy => {
+                        try entries.append(allocator, .{
+                            .address = address,
+                            .file_index = file_index,
+                            .line = line,
+                            .column = column,
+                            .is_stmt = is_stmt,
+                            .end_sequence = false,
+                            .prologue_end = prologue_end,
+                        });
+                        prologue_end = false;
+                    },
+                    DW_LNS_advance_pc => {
+                        const advance = try readULEB128(data, &pos);
+                        address += advance * min_instruction_length;
+                    },
+                    DW_LNS_advance_line => {
+                        const advance = try readSLEB128(data, &pos);
+                        const new_line = @as(i64, line) + advance;
+                        if (new_line > 0) {
+                            line = @intCast(new_line);
+                        }
+                    },
+                    DW_LNS_set_file => {
+                        file_index = @intCast(try readULEB128(data, &pos));
+                    },
+                    DW_LNS_set_column => {
+                        column = @intCast(try readULEB128(data, &pos));
+                    },
+                    DW_LNS_negate_stmt => {
+                        is_stmt = !is_stmt;
+                    },
+                    DW_LNS_set_basic_block => {},
+                    DW_LNS_const_add_pc => {
+                        if (line_range > 0) {
+                            const adjust = (255 - opcode_base) / line_range;
+                            address += @as(u64, adjust) * min_instruction_length;
+                        }
+                    },
+                    DW_LNS_fixed_advance_pc => {
+                        if (pos + 2 <= data.len) {
+                            address += std.mem.readInt(u16, data[pos..][0..2], .little);
+                            pos += 2;
+                        }
+                    },
+                    DW_LNS_set_prologue_end => {
+                        prologue_end = true;
+                    },
+                    DW_LNS_set_epilogue_begin => {},
+                    DW_LNS_set_isa => {
+                        _ = try readULEB128(data, &pos);
+                    },
+                    else => {
+                        // Unknown standard opcode: skip its operands
+                    },
+                }
+            } else {
+                // Special opcode
+                if (line_range > 0) {
+                    const adjusted = @as(u32, opcode) - @as(u32, opcode_base);
+                    const line_inc = @as(i32, line_base) + @as(i32, @intCast(adjusted % line_range));
+                    const addr_inc = (adjusted / line_range) * min_instruction_length;
+                    address += addr_inc;
+                    const new_line = @as(i64, line) + line_inc;
+                    if (new_line > 0) {
+                        line = @intCast(new_line);
+                    }
                     try entries.append(allocator, .{
                         .address = address,
                         .file_index = file_index,
@@ -691,70 +770,15 @@ fn parseLineProgramImpl(data: []const u8, allocator: std.mem.Allocator, keep_fil
                         .column = column,
                         .is_stmt = is_stmt,
                         .end_sequence = false,
+                        .prologue_end = prologue_end,
                     });
-                },
-                DW_LNS_advance_pc => {
-                    const advance = try readULEB128(data, &pos);
-                    address += advance * min_instruction_length;
-                },
-                DW_LNS_advance_line => {
-                    const advance = try readSLEB128(data, &pos);
-                    const new_line = @as(i64, line) + advance;
-                    if (new_line > 0) {
-                        line = @intCast(new_line);
-                    }
-                },
-                DW_LNS_set_file => {
-                    file_index = @intCast(try readULEB128(data, &pos));
-                },
-                DW_LNS_set_column => {
-                    column = @intCast(try readULEB128(data, &pos));
-                },
-                DW_LNS_negate_stmt => {
-                    is_stmt = !is_stmt;
-                },
-                DW_LNS_set_basic_block => {},
-                DW_LNS_const_add_pc => {
-                    if (line_range > 0) {
-                        const adjust = (255 - opcode_base) / line_range;
-                        address += @as(u64, adjust) * min_instruction_length;
-                    }
-                },
-                DW_LNS_fixed_advance_pc => {
-                    if (pos + 2 <= data.len) {
-                        address += std.mem.readInt(u16, data[pos..][0..2], .little);
-                        pos += 2;
-                    }
-                },
-                DW_LNS_set_prologue_end, DW_LNS_set_epilogue_begin => {},
-                DW_LNS_set_isa => {
-                    _ = try readULEB128(data, &pos);
-                },
-                else => {
-                    // Unknown standard opcode: skip its operands
-                },
-            }
-        } else {
-            // Special opcode
-            if (line_range > 0) {
-                const adjusted = @as(u32, opcode) - @as(u32, opcode_base);
-                const line_inc = @as(i32, line_base) + @as(i32, @intCast(adjusted % line_range));
-                const addr_inc = (adjusted / line_range) * min_instruction_length;
-                address += addr_inc;
-                const new_line = @as(i64, line) + line_inc;
-                if (new_line > 0) {
-                    line = @intCast(new_line);
+                    prologue_end = false;
                 }
-                try entries.append(allocator, .{
-                    .address = address,
-                    .file_index = file_index,
-                    .line = line,
-                    .column = column,
-                    .is_stmt = is_stmt,
-                    .end_sequence = false,
-                });
             }
         }
+
+        // Ensure pos advances to unit_end for next CU
+        pos = unit_end;
     }
 
     const line_result = try entries.toOwnedSlice(allocator);
@@ -922,7 +946,7 @@ pub fn parseCompilationUnitEx(
                                 else
                                     readU32(debug_info, &first_pos) catch 0;
                             } else {
-                                skipForm(debug_info, &first_pos, attr.form, is_64bit) catch break;
+                                skipForm(debug_info, &first_pos, attr.form, is_64bit, 8) catch break;
                             }
                         } else if (attr.name == DW_AT_addr_base_c) {
                             if (attr.form == DW_FORM_sec_offset) {
@@ -931,10 +955,10 @@ pub fn parseCompilationUnitEx(
                                 else
                                     readU32(debug_info, &first_pos) catch 0;
                             } else {
-                                skipForm(debug_info, &first_pos, attr.form, is_64bit) catch break;
+                                skipForm(debug_info, &first_pos, attr.form, is_64bit, 8) catch break;
                             }
                         } else {
-                            skipForm(debug_info, &first_pos, attr.form, is_64bit) catch break;
+                            skipForm(debug_info, &first_pos, attr.form, is_64bit, 8) catch break;
                         }
                     }
                 }
@@ -980,7 +1004,7 @@ pub fn parseCompilationUnitEx(
                             const index = readFormIndex(debug_info, &pos, attr.form) catch break;
                             name = resolveStrx(debug_str, extra.debug_str_offsets, str_offsets_base, index, is_64bit);
                         } else {
-                            skipForm(debug_info, &pos, attr.form, is_64bit) catch break;
+                            skipForm(debug_info, &pos, attr.form, is_64bit, 8) catch break;
                         }
                     },
                     DW_AT_linkage_name => {
@@ -1000,7 +1024,7 @@ pub fn parseCompilationUnitEx(
                             const index = readFormIndex(debug_info, &pos, attr.form) catch break;
                             linkage_name = resolveStrx(debug_str, extra.debug_str_offsets, str_offsets_base, index, is_64bit);
                         } else {
-                            skipForm(debug_info, &pos, attr.form, is_64bit) catch break;
+                            skipForm(debug_info, &pos, attr.form, is_64bit, 8) catch break;
                         }
                     },
                     DW_AT_low_pc => {
@@ -1016,7 +1040,7 @@ pub fn parseCompilationUnitEx(
                             const index = readFormIndex(debug_info, &pos, attr.form) catch break;
                             low_pc = resolveAddrx(extra.debug_addr, addr_base, index, address_size);
                         } else {
-                            skipForm(debug_info, &pos, attr.form, is_64bit) catch break;
+                            skipForm(debug_info, &pos, attr.form, is_64bit, 8) catch break;
                         }
                     },
                     DW_AT_high_pc => {
@@ -1047,11 +1071,11 @@ pub fn parseCompilationUnitEx(
                                 high_pc = @intCast(s);
                             }
                         } else {
-                            skipForm(debug_info, &pos, attr.form, is_64bit) catch break;
+                            skipForm(debug_info, &pos, attr.form, is_64bit, 8) catch break;
                         }
                     },
                     else => {
-                        skipForm(debug_info, &pos, attr.form, is_64bit) catch break;
+                        skipForm(debug_info, &pos, attr.form, is_64bit, 8) catch break;
                     },
                 }
             }
@@ -1161,7 +1185,7 @@ pub fn parseInlinedSubroutines(
                                 else
                                     readU32(debug_info, &first_pos) catch 0;
                             } else {
-                                skipForm(debug_info, &first_pos, attr.form, is_64bit) catch break;
+                                skipForm(debug_info, &first_pos, attr.form, is_64bit, 8) catch break;
                             }
                         } else if (attr.name == DW_AT_addr_base_c) {
                             if (attr.form == DW_FORM_sec_offset) {
@@ -1170,10 +1194,10 @@ pub fn parseInlinedSubroutines(
                                 else
                                     readU32(debug_info, &first_pos) catch 0;
                             } else {
-                                skipForm(debug_info, &first_pos, attr.form, is_64bit) catch break;
+                                skipForm(debug_info, &first_pos, attr.form, is_64bit, 8) catch break;
                             }
                         } else {
-                            skipForm(debug_info, &first_pos, attr.form, is_64bit) catch break;
+                            skipForm(debug_info, &first_pos, attr.form, is_64bit, 8) catch break;
                         }
                     }
                 }
@@ -1236,7 +1260,7 @@ pub fn parseInlinedSubroutines(
                             const index = readFormIndex(debug_info, &pos, attr.form) catch break;
                             name = resolveStrx(debug_str, extra.debug_str_offsets, str_offsets_base, index, is_64bit);
                         } else {
-                            skipForm(debug_info, &pos, attr.form, is_64bit) catch break;
+                            skipForm(debug_info, &pos, attr.form, is_64bit, 8) catch break;
                         }
                     },
                     DW_AT_linkage_name => {
@@ -1256,7 +1280,7 @@ pub fn parseInlinedSubroutines(
                             const index = readFormIndex(debug_info, &pos, attr.form) catch break;
                             linkage_name = resolveStrx(debug_str, extra.debug_str_offsets, str_offsets_base, index, is_64bit);
                         } else {
-                            skipForm(debug_info, &pos, attr.form, is_64bit) catch break;
+                            skipForm(debug_info, &pos, attr.form, is_64bit, 8) catch break;
                         }
                     },
                     DW_AT_low_pc => {
@@ -1272,7 +1296,7 @@ pub fn parseInlinedSubroutines(
                             const index = readFormIndex(debug_info, &pos, attr.form) catch break;
                             low_pc = resolveAddrx(extra.debug_addr, addr_base, index, address_size);
                         } else {
-                            skipForm(debug_info, &pos, attr.form, is_64bit) catch break;
+                            skipForm(debug_info, &pos, attr.form, is_64bit, 8) catch break;
                         }
                     },
                     DW_AT_high_pc => {
@@ -1303,7 +1327,7 @@ pub fn parseInlinedSubroutines(
                                 high_pc = @intCast(s);
                             }
                         } else {
-                            skipForm(debug_info, &pos, attr.form, is_64bit) catch break;
+                            skipForm(debug_info, &pos, attr.form, is_64bit, 8) catch break;
                         }
                     },
                     DW_AT_abstract_origin => {
@@ -1325,7 +1349,7 @@ pub fn parseInlinedSubroutines(
                                 abstract_origin = readU32(debug_info, &pos) catch break;
                             }
                         } else {
-                            skipForm(debug_info, &pos, attr.form, is_64bit) catch break;
+                            skipForm(debug_info, &pos, attr.form, is_64bit, 8) catch break;
                         }
                     },
                     DW_AT_call_file => {
@@ -1342,7 +1366,7 @@ pub fn parseInlinedSubroutines(
                             const s = readSLEB128(debug_info, &pos) catch break;
                             call_file = @intCast(@as(u64, @bitCast(s)));
                         } else {
-                            skipForm(debug_info, &pos, attr.form, is_64bit) catch break;
+                            skipForm(debug_info, &pos, attr.form, is_64bit, 8) catch break;
                         }
                     },
                     DW_AT_call_line => {
@@ -1359,7 +1383,7 @@ pub fn parseInlinedSubroutines(
                             const s = readSLEB128(debug_info, &pos) catch break;
                             call_line = @intCast(@as(u64, @bitCast(s)));
                         } else {
-                            skipForm(debug_info, &pos, attr.form, is_64bit) catch break;
+                            skipForm(debug_info, &pos, attr.form, is_64bit, 8) catch break;
                         }
                     },
                     DW_AT_call_column => {
@@ -1376,11 +1400,11 @@ pub fn parseInlinedSubroutines(
                             const s = readSLEB128(debug_info, &pos) catch break;
                             call_column = @intCast(@as(u64, @bitCast(s)));
                         } else {
-                            skipForm(debug_info, &pos, attr.form, is_64bit) catch break;
+                            skipForm(debug_info, &pos, attr.form, is_64bit, 8) catch break;
                         }
                     },
                     else => {
-                        skipForm(debug_info, &pos, attr.form, is_64bit) catch break;
+                        skipForm(debug_info, &pos, attr.form, is_64bit, 8) catch break;
                     },
                 }
             }
@@ -1517,9 +1541,9 @@ const DW_RLE_base_addressx: u8 = 0x01;
 const DW_RLE_startx_endx: u8 = 0x02;
 const DW_RLE_startx_length: u8 = 0x03;
 const DW_RLE_offset_pair: u8 = 0x04;
-const DW_RLE_base_address: u8 = 0x06;
-const DW_RLE_start_end: u8 = 0x07;
-const DW_RLE_start_length: u8 = 0x08;
+const DW_RLE_base_address: u8 = 0x05;
+const DW_RLE_start_end: u8 = 0x06;
+const DW_RLE_start_length: u8 = 0x07;
 
 pub const AddressRangeEntry = struct {
     begin: u64,
@@ -1924,7 +1948,7 @@ fn collectTypeDies(
                         const index = readFormIndex(debug_info, &scan_pos, attr.form) catch break;
                         die.name = resolveStrx(debug_str, extra.debug_str_offsets, str_offsets_base, index, is_64bit);
                     } else {
-                        skipForm(debug_info, &scan_pos, attr.form, is_64bit) catch break;
+                        skipForm(debug_info, &scan_pos, attr.form, is_64bit, 8) catch break;
                     }
                 },
                 DW_AT_encoding => {
@@ -1932,7 +1956,7 @@ fn collectTypeDies(
                         die.encoding = debug_info[scan_pos];
                         scan_pos += 1;
                     } else {
-                        skipForm(debug_info, &scan_pos, attr.form, is_64bit) catch break;
+                        skipForm(debug_info, &scan_pos, attr.form, is_64bit, 8) catch break;
                     }
                 },
                 DW_AT_byte_size => {
@@ -1946,7 +1970,7 @@ fn collectTypeDies(
                         const v = readULEB128(debug_info, &scan_pos) catch break;
                         die.byte_size = if (v <= 255) @intCast(v) else 0;
                     } else {
-                        skipForm(debug_info, &scan_pos, attr.form, is_64bit) catch break;
+                        skipForm(debug_info, &scan_pos, attr.form, is_64bit, 8) catch break;
                     }
                 },
                 DW_AT_type => {
@@ -1967,7 +1991,7 @@ fn collectTypeDies(
                         } else if (attr.form == DW_FORM_ref_udata) {
                             die.type_ref = readULEB128(debug_info, &scan_pos) catch break;
                         } else {
-                            skipForm(debug_info, &scan_pos, attr.form, is_64bit) catch break;
+                            skipForm(debug_info, &scan_pos, attr.form, is_64bit, 8) catch break;
                         }
                     }
                 },
@@ -1984,7 +2008,7 @@ fn collectTypeDies(
                         const v = readSLEB128(debug_info, &scan_pos) catch break;
                         die.member_location = if (v >= 0 and v <= 0xFFFF) @intCast(v) else 0;
                     } else {
-                        skipForm(debug_info, &scan_pos, attr.form, is_64bit) catch break;
+                        skipForm(debug_info, &scan_pos, attr.form, is_64bit, 8) catch break;
                     }
                 },
                 DW_AT_upper_bound => {
@@ -2004,7 +2028,7 @@ fn collectTypeDies(
                         const v = readSLEB128(debug_info, &scan_pos) catch break;
                         if (v >= 0) die.array_count = @as(u32, @intCast(v)) + 1;
                     } else {
-                        skipForm(debug_info, &scan_pos, attr.form, is_64bit) catch break;
+                        skipForm(debug_info, &scan_pos, attr.form, is_64bit, 8) catch break;
                     }
                 },
                 DW_AT_count => {
@@ -2015,7 +2039,7 @@ fn collectTypeDies(
                         const v = readULEB128(debug_info, &scan_pos) catch break;
                         die.array_count = @intCast(v);
                     } else {
-                        skipForm(debug_info, &scan_pos, attr.form, is_64bit) catch break;
+                        skipForm(debug_info, &scan_pos, attr.form, is_64bit, 8) catch break;
                     }
                 },
                 DW_AT_const_value => {
@@ -2033,7 +2057,7 @@ fn collectTypeDies(
                     } else if (attr.form == DW_FORM_udata) {
                         die.const_value = @intCast(readULEB128(debug_info, &scan_pos) catch break);
                     } else {
-                        skipForm(debug_info, &scan_pos, attr.form, is_64bit) catch break;
+                        skipForm(debug_info, &scan_pos, attr.form, is_64bit, 8) catch break;
                     }
                 },
                 DW_AT_bit_offset => {
@@ -2044,7 +2068,7 @@ fn collectTypeDies(
                         const v = readULEB128(debug_info, &scan_pos) catch break;
                         die.bit_offset = if (v <= 255) @intCast(v) else 0;
                     } else {
-                        skipForm(debug_info, &scan_pos, attr.form, is_64bit) catch break;
+                        skipForm(debug_info, &scan_pos, attr.form, is_64bit, 8) catch break;
                     }
                 },
                 DW_AT_bit_size => {
@@ -2055,7 +2079,7 @@ fn collectTypeDies(
                         const v = readULEB128(debug_info, &scan_pos) catch break;
                         die.bit_size = if (v <= 255) @intCast(v) else 0;
                     } else {
-                        skipForm(debug_info, &scan_pos, attr.form, is_64bit) catch break;
+                        skipForm(debug_info, &scan_pos, attr.form, is_64bit, 8) catch break;
                     }
                 },
                 DW_AT_discr => {
@@ -2073,7 +2097,7 @@ fn collectTypeDies(
                     } else if (attr.form == DW_FORM_ref_udata) {
                         die.discr_ref = readULEB128(debug_info, &scan_pos) catch break;
                     } else {
-                        skipForm(debug_info, &scan_pos, attr.form, is_64bit) catch break;
+                        skipForm(debug_info, &scan_pos, attr.form, is_64bit, 8) catch break;
                     }
                 },
                 DW_AT_discr_value => {
@@ -2092,11 +2116,11 @@ fn collectTypeDies(
                     } else if (attr.form == DW_FORM_udata) {
                         die.discr_value = @intCast(readULEB128(debug_info, &scan_pos) catch break);
                     } else {
-                        skipForm(debug_info, &scan_pos, attr.form, is_64bit) catch break;
+                        skipForm(debug_info, &scan_pos, attr.form, is_64bit, 8) catch break;
                     }
                 },
                 else => {
-                    skipForm(debug_info, &scan_pos, attr.form, is_64bit) catch break;
+                    skipForm(debug_info, &scan_pos, attr.form, is_64bit, 8) catch break;
                 },
             }
         }
@@ -2542,7 +2566,7 @@ pub fn parseVariablesEx(
                             const index = readFormIndex(debug_info, &scan_pos, attr.form) catch break;
                             t_name = resolveStrx(debug_str, extra.debug_str_offsets, 0, index, is_64bit);
                         } else {
-                            skipForm(debug_info, &scan_pos, attr.form, is_64bit) catch break;
+                            skipForm(debug_info, &scan_pos, attr.form, is_64bit, 8) catch break;
                         }
                     },
                     DW_AT_encoding => {
@@ -2550,7 +2574,7 @@ pub fn parseVariablesEx(
                             t_encoding = debug_info[scan_pos];
                             scan_pos += 1;
                         } else {
-                            skipForm(debug_info, &scan_pos, attr.form, is_64bit) catch break;
+                            skipForm(debug_info, &scan_pos, attr.form, is_64bit, 8) catch break;
                         }
                     },
                     DW_AT_byte_size => {
@@ -2558,11 +2582,11 @@ pub fn parseVariablesEx(
                             t_byte_size = debug_info[scan_pos];
                             scan_pos += 1;
                         } else {
-                            skipForm(debug_info, &scan_pos, attr.form, is_64bit) catch break;
+                            skipForm(debug_info, &scan_pos, attr.form, is_64bit, 8) catch break;
                         }
                     },
                     else => {
-                        skipForm(debug_info, &scan_pos, attr.form, is_64bit) catch break;
+                        skipForm(debug_info, &scan_pos, attr.form, is_64bit, 8) catch break;
                     },
                 }
             }
@@ -2605,7 +2629,7 @@ pub fn parseVariablesEx(
                         const index = readFormIndex(debug_info, &pos, attr.form) catch break;
                         v_name = resolveStrx(debug_str, extra.debug_str_offsets, 0, index, is_64bit);
                     } else {
-                        skipForm(debug_info, &pos, attr.form, is_64bit) catch break;
+                        skipForm(debug_info, &pos, attr.form, is_64bit, 8) catch break;
                     }
                 },
                 DW_AT_location => {
@@ -2617,7 +2641,7 @@ pub fn parseVariablesEx(
                         }
                         pos = loc_end;
                     } else {
-                        skipForm(debug_info, &pos, attr.form, is_64bit) catch break;
+                        skipForm(debug_info, &pos, attr.form, is_64bit, 8) catch break;
                     }
                 },
                 DW_AT_type => {
@@ -2636,11 +2660,11 @@ pub fn parseVariablesEx(
                     } else if (attr.form == DW_FORM_ref_udata) {
                         v_type_ref = readULEB128(debug_info, &pos) catch break;
                     } else {
-                        skipForm(debug_info, &pos, attr.form, is_64bit) catch break;
+                        skipForm(debug_info, &pos, attr.form, is_64bit, 8) catch break;
                     }
                 },
                 else => {
-                    skipForm(debug_info, &pos, attr.form, is_64bit) catch break;
+                    skipForm(debug_info, &pos, attr.form, is_64bit, 8) catch break;
                 },
             }
         }
@@ -2799,7 +2823,7 @@ pub fn parseScopedVariables(
                                 else
                                     readU32(debug_info, &base_pos) catch 0;
                             } else {
-                                skipForm(debug_info, &base_pos, attr.form, is_64bit) catch break;
+                                skipForm(debug_info, &base_pos, attr.form, is_64bit, 8) catch break;
                             }
                         } else if (attr.name == DW_AT_addr_base_c) {
                             if (attr.form == DW_FORM_sec_offset) {
@@ -2808,7 +2832,7 @@ pub fn parseScopedVariables(
                                 else
                                     readU32(debug_info, &base_pos) catch 0;
                             } else {
-                                skipForm(debug_info, &base_pos, attr.form, is_64bit) catch break;
+                                skipForm(debug_info, &base_pos, attr.form, is_64bit, 8) catch break;
                             }
                         } else if (attr.name == DW_AT_rnglists_base) {
                             if (attr.form == DW_FORM_sec_offset) {
@@ -2817,7 +2841,7 @@ pub fn parseScopedVariables(
                                 else
                                     readU32(debug_info, &base_pos) catch 0;
                             } else {
-                                skipForm(debug_info, &base_pos, attr.form, is_64bit) catch break;
+                                skipForm(debug_info, &base_pos, attr.form, is_64bit, 8) catch break;
                             }
                         } else if (attr.name == DW_AT_loclists_base) {
                             if (attr.form == DW_FORM_sec_offset) {
@@ -2826,7 +2850,7 @@ pub fn parseScopedVariables(
                                 else
                                     readU32(debug_info, &base_pos) catch 0;
                             } else {
-                                skipForm(debug_info, &base_pos, attr.form, is_64bit) catch break;
+                                skipForm(debug_info, &base_pos, attr.form, is_64bit, 8) catch break;
                             }
                         } else if (attr.name == DW_AT_low_pc) {
                             if (attr.form == DW_FORM_addr) {
@@ -2840,10 +2864,10 @@ pub fn parseScopedVariables(
                                 const index = readFormIndex(debug_info, &base_pos, attr.form) catch 0;
                                 cu_low_pc = resolveAddrx(extra.debug_addr, addr_base, index, address_size);
                             } else {
-                                skipForm(debug_info, &base_pos, attr.form, is_64bit) catch break;
+                                skipForm(debug_info, &base_pos, attr.form, is_64bit, 8) catch break;
                             }
                         } else {
-                            skipForm(debug_info, &base_pos, attr.form, is_64bit) catch break;
+                            skipForm(debug_info, &base_pos, attr.form, is_64bit, 8) catch break;
                         }
                     }
                 }
@@ -2874,12 +2898,12 @@ pub fn parseScopedVariables(
             const abbrev_code = readULEB128(debug_info, &pos) catch break;
             if (abbrev_code == 0) {
                 // Null DIE — end of children at this level
+                if (depth > 0) depth -= 1;
                 if (in_target_func and depth <= target_func_depth) {
                     // We've exited the target function scope
                     found = true;
                     break;
                 }
-                if (depth > 0) depth -= 1;
                 continue;
             }
 
@@ -2914,7 +2938,7 @@ pub fn parseScopedVariables(
                             const index = readFormIndex(debug_info, &pos, attr.form) catch break;
                             die_name = resolveStrx(debug_str, extra.debug_str_offsets, str_offsets_base, index, is_64bit);
                         } else {
-                            skipForm(debug_info, &pos, attr.form, is_64bit) catch break;
+                            skipForm(debug_info, &pos, attr.form, is_64bit, 8) catch break;
                         }
                     },
                     DW_AT_location => {
@@ -2964,7 +2988,7 @@ pub fn parseScopedVariables(
                                 }
                             }
                         } else {
-                            skipForm(debug_info, &pos, attr.form, is_64bit) catch break;
+                            skipForm(debug_info, &pos, attr.form, is_64bit, 8) catch break;
                         }
                     },
                     DW_AT_frame_base => {
@@ -2976,7 +3000,7 @@ pub fn parseScopedVariables(
                             }
                             pos = fb_end;
                         } else {
-                            skipForm(debug_info, &pos, attr.form, is_64bit) catch break;
+                            skipForm(debug_info, &pos, attr.form, is_64bit, 8) catch break;
                         }
                     },
                     DW_AT_type => {
@@ -2994,7 +3018,7 @@ pub fn parseScopedVariables(
                         } else if (attr.form == DW_FORM_ref_udata) {
                             die_type_ref = readULEB128(debug_info, &pos) catch break;
                         } else {
-                            skipForm(debug_info, &pos, attr.form, is_64bit) catch break;
+                            skipForm(debug_info, &pos, attr.form, is_64bit, 8) catch break;
                         }
                     },
                     DW_AT_low_pc => {
@@ -3010,7 +3034,7 @@ pub fn parseScopedVariables(
                             const index = readFormIndex(debug_info, &pos, attr.form) catch break;
                             die_low_pc = resolveAddrx(extra.debug_addr, addr_base, index, address_size);
                         } else {
-                            skipForm(debug_info, &pos, attr.form, is_64bit) catch break;
+                            skipForm(debug_info, &pos, attr.form, is_64bit, 8) catch break;
                         }
                     },
                     DW_AT_high_pc => {
@@ -3041,7 +3065,7 @@ pub fn parseScopedVariables(
                                 die_high_pc = @intCast(s);
                             }
                         } else {
-                            skipForm(debug_info, &pos, attr.form, is_64bit) catch break;
+                            skipForm(debug_info, &pos, attr.form, is_64bit, 8) catch break;
                         }
                     },
                     DW_AT_ranges => {
@@ -3058,11 +3082,11 @@ pub fn parseScopedVariables(
                         } else if (attr.form == DW_FORM_data8) {
                             die_ranges_offset = readU64(debug_info, &pos) catch break;
                         } else {
-                            skipForm(debug_info, &pos, attr.form, is_64bit) catch break;
+                            skipForm(debug_info, &pos, attr.form, is_64bit, 8) catch break;
                         }
                     },
                     else => {
-                        skipForm(debug_info, &pos, attr.form, is_64bit) catch break;
+                        skipForm(debug_info, &pos, attr.form, is_64bit, 8) catch break;
                     },
                 }
             }
@@ -3203,11 +3227,12 @@ fn readU64(data: []const u8, pos: *usize) !u64 {
     return result;
 }
 
-fn skipForm(data: []const u8, pos: *usize, form: u64, is_64bit: bool) !void {
+fn skipForm(data: []const u8, pos: *usize, form: u64, is_64bit: bool, address_size: u8) !void {
     switch (form) {
-        DW_FORM_addr => pos.* += 8, // Assuming 64-bit addresses
+        DW_FORM_addr => pos.* += address_size,
         DW_FORM_data1, DW_FORM_ref1, DW_FORM_flag, DW_FORM_strx1, DW_FORM_addrx1 => pos.* += 1,
         DW_FORM_data2, DW_FORM_ref2, DW_FORM_strx2, DW_FORM_addrx2 => pos.* += 2,
+        DW_FORM_strx3, DW_FORM_addrx3 => pos.* += 3,
         DW_FORM_data4, DW_FORM_ref4, DW_FORM_strx4, DW_FORM_addrx4 => pos.* += 4,
         DW_FORM_data8, DW_FORM_ref8, DW_FORM_ref_sig8 => pos.* += 8,
         DW_FORM_data16 => pos.* += 16,
@@ -3250,7 +3275,7 @@ fn skipForm(data: []const u8, pos: *usize, form: u64, is_64bit: bool) !void {
         DW_FORM_indirect => {
             // Read the actual form as a ULEB128, then dispatch
             const actual_form = try readULEB128(data, pos);
-            try skipForm(data, pos, actual_form, is_64bit);
+            try skipForm(data, pos, actual_form, is_64bit, address_size);
         },
         else => {
             // Unknown form - cannot determine size
@@ -3403,7 +3428,7 @@ pub const DebugNamesIndex = struct {
                         },
                         else => {
                             // Unknown form — skip using generic skipForm
-                            skipForm(self.data, &pool_pos, attr.form, false) catch break;
+                            skipForm(self.data, &pool_pos, attr.form, false, 8) catch break;
                         },
                     }
                 }
@@ -3785,7 +3810,7 @@ pub fn detectSplitDwarf(
                             readU32(debug_info, &cu_pos) catch break;
                         if (debug_str) |s| dwo_name = readStringAt(s, @intCast(str_offset));
                     } else {
-                        skipForm(debug_info, &cu_pos, attr.form, is_64bit) catch break;
+                        skipForm(debug_info, &cu_pos, attr.form, is_64bit, 8) catch break;
                     }
                 },
                 DW_AT_comp_dir => {
@@ -3798,19 +3823,19 @@ pub fn detectSplitDwarf(
                             readU32(debug_info, &cu_pos) catch break;
                         if (debug_str) |s| comp_dir = readStringAt(s, @intCast(str_offset)) orelse "";
                     } else {
-                        skipForm(debug_info, &cu_pos, attr.form, is_64bit) catch break;
+                        skipForm(debug_info, &cu_pos, attr.form, is_64bit, 8) catch break;
                     }
                 },
-                DW_AT_dwo_id, DW_AT_GNU_dwo_id => {
+                DW_AT_GNU_dwo_id => {
                     if (attr.form == DW_FORM_data8) {
                         dwo_id = readU64(debug_info, &cu_pos) catch break;
                         has_dwo_id = true;
                     } else {
-                        skipForm(debug_info, &cu_pos, attr.form, is_64bit) catch break;
+                        skipForm(debug_info, &cu_pos, attr.form, is_64bit, 8) catch break;
                     }
                 },
                 else => {
-                    skipForm(debug_info, &cu_pos, attr.form, is_64bit) catch break;
+                    skipForm(debug_info, &cu_pos, attr.form, is_64bit, 8) catch break;
                 },
             }
         }
@@ -4439,7 +4464,7 @@ test "skipForm handles DW_FORM_indirect" {
     // Here: actual form = DW_FORM_data2 (0x05), followed by 2 bytes of data.
     const data = [_]u8{ 0x05, 0xAA, 0xBB };
     var pos: usize = 0;
-    try skipForm(&data, &pos, DW_FORM_indirect, false);
+    try skipForm(&data, &pos, DW_FORM_indirect, false, 8);
     // Should have consumed 1 byte (ULEB128 for form) + 2 bytes (data2) = 3
     try std.testing.expectEqual(@as(usize, 3), pos);
 }
@@ -4448,7 +4473,7 @@ test "skipForm handles DW_FORM_indirect with ULEB128 form" {
     // DW_FORM_indirect pointing to DW_FORM_udata (0x0f), then a ULEB128 value
     const data = [_]u8{ 0x0f, 0x42 };
     var pos: usize = 0;
-    try skipForm(&data, &pos, DW_FORM_indirect, false);
+    try skipForm(&data, &pos, DW_FORM_indirect, false, 8);
     // 1 byte (ULEB128 for form=0x0f) + 1 byte (ULEB128 value 0x42) = 2
     try std.testing.expectEqual(@as(usize, 2), pos);
 }

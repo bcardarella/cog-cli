@@ -196,8 +196,6 @@ pub const PtraceProcessControl = struct {
             kregs.r14 = regs.gprs[14];
             kregs.r15 = regs.gprs[15];
             kregs.rip = regs.pc;
-            kregs.rsp = regs.sp;
-            kregs.rbp = regs.fp;
             kregs.eflags = regs.flags;
 
             rc = std.os.linux.ptrace(.SETREGS, pid, 0, @intFromPtr(&kregs));
@@ -226,8 +224,7 @@ pub const PtraceProcessControl = struct {
                 var remote_iov = [_]std.posix.iovec{
                     .{ .base = @ptrFromInt(address), .len = size },
                 };
-                // process_vm_readv syscall number on x86_64 is 310
-                const SYS_process_vm_readv = 310;
+                const SYS_process_vm_readv = if (builtin.cpu.arch == .aarch64) 270 else 310;
                 const rc = std.os.linux.syscall6(
                     @enumFromInt(SYS_process_vm_readv),
                     @bitCast(@as(isize, @intCast(pid))),

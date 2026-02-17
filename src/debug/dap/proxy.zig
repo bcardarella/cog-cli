@@ -52,6 +52,8 @@ pub const DapProxy = struct {
     loaded_modules: std.ArrayListUnmanaged(LoadedModuleEntry) = .empty,
     // Capabilities parsed from DAP initialize response
     adapter_capabilities: DebugCapabilities = .{},
+    // Exception breakpoint filters from DAP initialize response
+    exception_filters: std.ArrayListUnmanaged(ExceptionFilter) = .empty,
     // Buffered memory events from adapter
     memory_events: std.ArrayListUnmanaged(MemoryEvent) = .empty,
     // Progress tracking from adapter
@@ -78,6 +80,15 @@ pub const DapProxy = struct {
     pub const InvalidatedEvent = struct {
         areas: []const []const u8,
         stack_frame_id: ?u32,
+    };
+
+    pub const ExceptionFilter = struct {
+        filter: []const u8,
+        label: []const u8,
+        description: []const u8 = "",
+        default: bool = false,
+        supports_condition: bool = false,
+        condition_description: []const u8 = "",
     };
 
     const LoadedModuleEntry = struct {
@@ -123,6 +134,14 @@ pub const DapProxy = struct {
             self.allocator.free(entry.name);
         }
         self.loaded_modules.deinit(self.allocator);
+        // Clean up exception filters
+        for (self.exception_filters.items) |entry| {
+            self.allocator.free(entry.filter);
+            self.allocator.free(entry.label);
+            if (entry.description.len > 0) self.allocator.free(entry.description);
+            if (entry.condition_description.len > 0) self.allocator.free(entry.condition_description);
+        }
+        self.exception_filters.deinit(self.allocator);
         // Clean up memory events
         for (self.memory_events.items) |entry| {
             self.allocator.free(entry.memory_reference);
@@ -233,9 +252,11 @@ pub const DapProxy = struct {
         return self.readResponse(allocator);
     }
 
-    /// Read messages from the adapter until we get a response (type == "response").
+    /// Read messages from the adapter until we get a matching response (type == "response").
+    /// Verifies request_seq matches the expected seq to correlate responses.
     /// Events are processed inline (e.g., update thread_id from stopped events).
     fn readResponse(self: *DapProxy, allocator: std.mem.Allocator) ![]const u8 {
+        const expected_seq = self.seq - 1; // seq used by the most recent sendRequest
         const proc = &(self.process orelse return error.NotInitialized);
         const stdout = proc.stdout orelse return error.NotInitialized;
 
@@ -270,7 +291,18 @@ pub const DapProxy = struct {
 
                 if (msg_type) |mt| {
                     if (std.mem.eql(u8, mt, "response")) {
-                        // This is the response we're waiting for
+                        // Verify request_seq matches expected seq
+                        const req_seq = if (parsed.value.object.get("request_seq")) |rs|
+                            (if (rs == .integer) rs.integer else null)
+                        else
+                            null;
+                        if (req_seq) |rs| {
+                            if (rs != expected_seq) {
+                                // Stale response from a previous request — discard and keep reading
+                                allocator.free(decoded.body);
+                                continue;
+                            }
+                        }
                         return decoded.body;
                     } else if (std.mem.eql(u8, mt, "event")) {
                         // Handle events
@@ -535,6 +567,10 @@ pub const DapProxy = struct {
             if (std.mem.eql(u8, r, "exception")) break :blk .exception;
             if (std.mem.eql(u8, r, "entry")) break :blk .entry;
             if (std.mem.eql(u8, r, "pause")) break :blk .pause;
+            if (std.mem.eql(u8, r, "goto")) break :blk .goto;
+            if (std.mem.eql(u8, r, "function breakpoint")) break :blk .function_breakpoint;
+            if (std.mem.eql(u8, r, "data breakpoint")) break :blk .data_breakpoint;
+            if (std.mem.eql(u8, r, "instruction breakpoint")) break :blk .instruction_breakpoint;
             break :blk .step;
         } else .step;
 
@@ -555,7 +591,7 @@ pub const DapProxy = struct {
         defer evt.deinit(allocator);
 
         return .{
-            .stop_reason = .exit,
+            .stop_reason = .exception,
             .exit_code = if (evt.exit_code) |c| @intCast(c) else null,
         };
     }
@@ -679,7 +715,16 @@ pub const DapProxy = struct {
                 if (ph == .object) {
                     break :blk .{
                         .kind = if (ph.object.get("kind")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else "",
-                        .attributes = if (ph.object.get("attributes")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else "",
+                        .attributes = if (ph.object.get("attributes")) |v| attr_blk: {
+                            if (v == .array) {
+                                var attrs = std.ArrayListUnmanaged([]const u8).empty;
+                                for (v.array.items) |attr_item| {
+                                    if (attr_item == .string) try attrs.append(allocator, try allocator.dupe(u8, attr_item.string));
+                                }
+                                break :attr_blk try attrs.toOwnedSlice(allocator);
+                            }
+                            break :attr_blk &.{};
+                        } else &.{},
                         .visibility = if (ph.object.get("visibility")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else "",
                     };
                 }
@@ -741,40 +786,26 @@ pub const DapProxy = struct {
         // 1. Send initialize request and wait for response
         const init_msg = try protocol.initializeRequest(allocator, self.nextSeq());
         defer allocator.free(init_msg);
-        const init_resp = self.sendRequest(allocator, init_msg) catch {
-            // If adapter doesn't respond, still mark as initialized for graceful degradation
-            self.initialized = true;
-            return;
-        };
+        const init_resp = try self.sendRequest(allocator, init_msg);
         defer allocator.free(init_resp);
 
         // Parse capabilities from the initialize response body
         self.parseAdapterCapabilities(allocator, init_resp);
 
         // 2. Wait for the 'initialized' event from the adapter (per DAP spec)
-        const init_event = self.waitForEvent(allocator, "initialized") catch {
-            // Some adapters may not send this event — continue gracefully
-            self.initialized = true;
-            return;
-        };
+        const init_event = try self.waitForEvent(allocator, "initialized");
         allocator.free(init_event);
 
         // 3. Send launch request and wait for response
         const launch_msg = try protocol.launchRequest(allocator, self.nextSeq(), config.program, config.args, config.stop_on_entry);
         defer allocator.free(launch_msg);
-        const launch_resp = self.sendRequest(allocator, launch_msg) catch {
-            self.initialized = true;
-            return;
-        };
+        const launch_resp = try self.sendRequest(allocator, launch_msg);
         allocator.free(launch_resp);
 
         // 4. Send configurationDone to tell the adapter we're ready
         const config_done_msg = try protocol.configurationDoneRequest(allocator, self.nextSeq());
         defer allocator.free(config_done_msg);
-        const config_resp = self.sendRequest(allocator, config_done_msg) catch {
-            self.initialized = true;
-            return;
-        };
+        const config_resp = try self.sendRequest(allocator, config_done_msg);
         allocator.free(config_resp);
 
         self.initialized = true;
@@ -968,7 +999,6 @@ pub const DapProxy = struct {
             .supports_hit_conditional_breakpoints = getBoolCap(b, "supportsHitConditionalBreakpoints"),
             .supports_log_points = getBoolCap(b, "supportsLogPoints"),
             .supports_function_breakpoints = getBoolCap(b, "supportsFunctionBreakpoints"),
-            .supports_exception_breakpoints = true, // Always available in DAP
             .supports_data_breakpoints = getBoolCap(b, "supportsDataBreakpoints"),
             .supports_set_variable = getBoolCap(b, "supportsSetVariable"),
             .supports_goto_targets = getBoolCap(b, "supportsGotoTargetsRequest"),
@@ -999,7 +1029,32 @@ pub const DapProxy = struct {
             .support_suspend_debuggee = getBoolCap(b, "supportSuspendDebuggee"),
             .supports_delayed_stack_trace_loading = getBoolCap(b, "supportsDelayedStackTraceLoading"),
             .supports_clipboard_context = getBoolCap(b, "supportsClipboardContext"),
+            .supports_configuration_done_request = getBoolCap(b, "supportsConfigurationDoneRequest"),
+            .supports_data_breakpoint_bytes = getBoolCap(b, "supportsDataBreakpointBytes"),
+            .supports_ansi_styling = getBoolCap(b, "supportsANSIStyling"),
+            .supports_locations_request = getBoolCap(b, "supportsLocationsRequest"),
+            .supports_breakpoint_modes = getBoolCap(b, "supportsBreakpointModes"),
         };
+
+        // Parse exception breakpoint filters
+        if (b.get("exceptionBreakpointFilters")) |filters_val| {
+            if (filters_val == .array) {
+                for (filters_val.array.items) |item| {
+                    if (item != .object) continue;
+                    const f = item.object;
+                    const filter_id = if (f.get("filter")) |v| (if (v == .string) v.string else continue) else continue;
+                    const label = if (f.get("label")) |v| (if (v == .string) v.string else "") else "";
+                    self.exception_filters.append(self.allocator, .{
+                        .filter = self.allocator.dupe(u8, filter_id) catch continue,
+                        .label = self.allocator.dupe(u8, label) catch continue,
+                        .description = if (f.get("description")) |v| (if (v == .string) (self.allocator.dupe(u8, v.string) catch "") else "") else "",
+                        .default = if (f.get("default")) |v| (v == .bool and v.bool) else false,
+                        .supports_condition = if (f.get("supportsCondition")) |v| (v == .bool and v.bool) else false,
+                        .condition_description = if (f.get("conditionDescription")) |v| (if (v == .string) (self.allocator.dupe(u8, v.string) catch "") else "") else "",
+                    }) catch {};
+                }
+            }
+        }
     }
 
     fn getBoolCap(obj: std.json.ObjectMap, key: []const u8) bool {
@@ -1159,7 +1214,7 @@ pub const DapProxy = struct {
 
         // Send DAP evaluate request with context
         const frame_id: ?i64 = if (request.frame_id) |fid| @intCast(fid) else null;
-        const msg = try protocol.evaluateRequestEx(allocator, self.nextSeq(), expr, frame_id, request.context);
+        const msg = try protocol.evaluateRequestEx(allocator, self.nextSeq(), expr, frame_id, request.context, null, null, null);
         defer allocator.free(msg);
 
         const resp = try self.sendRequest(allocator, msg);
@@ -1228,7 +1283,7 @@ pub const DapProxy = struct {
         const self: *DapProxy = @ptrCast(@alignCast(ctx));
         if (self.process) |*proc| {
             // Send disconnect without killing the debuggee
-            const msg = try protocol.disconnectRequestEx(allocator, self.nextSeq(), false, false);
+            const msg = try protocol.disconnectRequestEx(allocator, self.nextSeq(), false, false, null);
             defer allocator.free(msg);
 
             _ = self.sendRequest(allocator, msg) catch {};
@@ -1241,7 +1296,7 @@ pub const DapProxy = struct {
         if (!self.initialized or self.process == null) {
             // Fallback: return single main thread
             const result = try allocator.alloc(ThreadInfo, 1);
-            result[0] = .{ .id = 1, .name = "main", .is_stopped = true };
+            result[0] = .{ .id = 1, .name = "main" };
             return result;
         }
 
@@ -1249,7 +1304,7 @@ pub const DapProxy = struct {
         defer allocator.free(msg);
         const resp = self.sendRequest(allocator, msg) catch {
             const result = try allocator.alloc(ThreadInfo, 1);
-            result[0] = .{ .id = 1, .name = "main", .is_stopped = true };
+            result[0] = .{ .id = 1, .name = "main" };
             return result;
         };
         defer allocator.free(resp);
@@ -1277,7 +1332,7 @@ pub const DapProxy = struct {
                 else => try allocator.dupe(u8, "thread"),
             } else try allocator.dupe(u8, "thread");
 
-            try threads.append(allocator, .{ .id = id, .name = name, .is_stopped = true });
+            try threads.append(allocator, .{ .id = id, .name = name });
         }
         return try threads.toOwnedSlice(allocator);
     }
@@ -1331,7 +1386,7 @@ pub const DapProxy = struct {
         const base64_data = try base64Encode(allocator, data);
         defer allocator.free(base64_data);
 
-        const msg = try protocol.writeMemoryRequest(allocator, self.nextSeq(), addr_str, 0, base64_data);
+        const msg = try protocol.writeMemoryRequest(allocator, self.nextSeq(), addr_str, 0, base64_data, null);
         defer allocator.free(msg);
         const resp = try self.sendRequest(allocator, msg);
         allocator.free(resp);
@@ -1385,7 +1440,7 @@ pub const DapProxy = struct {
             try instructions.append(allocator, .{
                 .address = inst_addr,
                 .instruction = instruction,
-                .bytes = bytes,
+                .instruction_bytes = bytes,
             });
         }
         return try instructions.toOwnedSlice(allocator);
@@ -1400,7 +1455,14 @@ pub const DapProxy = struct {
             const init_msg = try protocol.initializeRequest(allocator, self.nextSeq());
             defer allocator.free(init_msg);
             const init_resp = try self.sendRequest(allocator, init_msg);
-            allocator.free(init_resp);
+            defer allocator.free(init_resp);
+
+            // Parse capabilities from the initialize response body
+            self.parseAdapterCapabilities(allocator, init_resp);
+
+            // Wait for the 'initialized' event from the adapter (per DAP spec)
+            const init_event = try self.waitForEvent(allocator, "initialized");
+            allocator.free(init_event);
         }
 
         // Send attach request (instead of launch)
@@ -1426,7 +1488,8 @@ pub const DapProxy = struct {
         if (self.initialized and self.process != null) {
             const names = [_][]const u8{name};
             const conditions = [_]?[]const u8{condition};
-            const msg = try protocol.setFunctionBreakpointsRequest(allocator, self.nextSeq(), &names, &conditions);
+            const hit_conditions = [_]?[]const u8{null};
+            const msg = try protocol.setFunctionBreakpointsRequest(allocator, self.nextSeq(), &names, &conditions, &hit_conditions);
             defer allocator.free(msg);
             const resp = self.sendRequest(allocator, msg) catch {
                 return .{ .id = bp_id, .verified = false, .file = "", .line = 0 };
@@ -1481,7 +1544,7 @@ pub const DapProxy = struct {
         if (var_ref == 0) return error.NotSupported;
 
         // Send setVariable request
-        const msg = try protocol.setVariableRequest(allocator, self.nextSeq(), var_ref, name, value);
+        const msg = try protocol.setVariableRequest(allocator, self.nextSeq(), var_ref, name, value, null);
         defer allocator.free(msg);
         const resp = try self.sendRequest(allocator, msg);
         defer allocator.free(resp);
@@ -1506,7 +1569,7 @@ pub const DapProxy = struct {
         if (!self.initialized or self.process == null) return error.NotSupported;
 
         // 1. Get goto targets for the file:line
-        const targets_msg = try protocol.gotoTargetsRequest(allocator, self.nextSeq(), file, @intCast(line));
+        const targets_msg = try protocol.gotoTargetsRequest(allocator, self.nextSeq(), file, @intCast(line), null);
         defer allocator.free(targets_msg);
         const targets_resp = try self.sendRequest(allocator, targets_msg);
         defer allocator.free(targets_resp);
@@ -1592,7 +1655,7 @@ pub const DapProxy = struct {
         if (!self.initialized or self.process == null) return error.NotSupported;
 
         const fid: ?i64 = if (frame_id) |f| @intCast(f) else null;
-        const msg = try protocol.dataBreakpointInfoRequest(allocator, self.nextSeq(), name, fid);
+        const msg = try protocol.dataBreakpointInfoRequest(allocator, self.nextSeq(), name, fid, null, null, null);
         defer allocator.free(msg);
         const resp = try self.sendRequest(allocator, msg);
         defer allocator.free(resp);
@@ -1620,7 +1683,8 @@ pub const DapProxy = struct {
         if (!self.initialized or self.process == null) return error.NotSupported;
 
         const access_str = @tagName(access_type);
-        const msg = try protocol.setDataBreakpointsRequest(allocator, self.nextSeq(), data_id, access_str);
+        const bp_specs = [_]protocol.DataBreakpointSpec{.{ .data_id = data_id, .access_type = access_str }};
+        const msg = try protocol.setDataBreakpointsRequest(allocator, self.nextSeq(), &bp_specs);
         defer allocator.free(msg);
         const resp = try self.sendRequest(allocator, msg);
         defer allocator.free(resp);
@@ -1663,7 +1727,7 @@ pub const DapProxy = struct {
         if (!self.initialized or self.process == null) return error.NotSupported;
 
         const fid: ?i64 = if (frame_id) |f| @intCast(f) else null;
-        const msg = try protocol.completionsRequest(allocator, self.nextSeq(), text, @intCast(column), fid);
+        const msg = try protocol.completionsRequest(allocator, self.nextSeq(), text, @intCast(column), fid, null);
         defer allocator.free(msg);
         const resp = try self.sendRequest(allocator, msg);
         defer allocator.free(resp);
@@ -1812,7 +1876,7 @@ pub const DapProxy = struct {
         const self: *DapProxy = @ptrCast(@alignCast(ctx));
         if (!self.initialized or self.process == null) return error.NotSupported;
 
-        const msg = try protocol.setExpressionRequest(allocator, self.nextSeq(), expression, value, @intCast(frame_id));
+        const msg = try protocol.setExpressionRequest(allocator, self.nextSeq(), expression, value, @as(?i64, @intCast(frame_id)), null);
         defer allocator.free(msg);
         const resp = try self.sendRequest(allocator, msg);
         defer allocator.free(resp);
@@ -1857,7 +1921,7 @@ pub const DapProxy = struct {
 
         const exc_id = if (body.object.get("exceptionId")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else null) else null;
         const description = if (body.object.get("description")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else null) else null;
-        const break_mode = if (body.object.get("breakMode")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else null) else null;
+        const break_mode = if (body.object.get("breakMode")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "unhandled") else "unhandled";
 
         return .{
             .@"type" = exc_id orelse "",
@@ -1871,7 +1935,7 @@ pub const DapProxy = struct {
         const self: *DapProxy = @ptrCast(@alignCast(ctx));
         if (self.process == null) return;
 
-        const msg = try protocol.terminateRequest(allocator, self.nextSeq());
+        const msg = try protocol.terminateRequest(allocator, self.nextSeq(), null);
         defer allocator.free(msg);
         _ = self.sendRequest(allocator, msg) catch {};
     }
@@ -1908,6 +1972,16 @@ pub const DapProxy = struct {
         if (getBoolCapOpt(caps_obj, "supportSuspendDebuggee")) |v| self.adapter_capabilities.support_suspend_debuggee = v;
         if (getBoolCapOpt(caps_obj, "supportsDelayedStackTraceLoading")) |v| self.adapter_capabilities.supports_delayed_stack_trace_loading = v;
         if (getBoolCapOpt(caps_obj, "supportsClipboardContext")) |v| self.adapter_capabilities.supports_clipboard_context = v;
+        if (getBoolCapOpt(caps_obj, "supportsSetExpression")) |v| self.adapter_capabilities.supports_set_expression = v;
+        if (getBoolCapOpt(caps_obj, "supportsEvaluateForHovers")) |v| self.adapter_capabilities.supports_evaluate_for_hovers = v;
+        if (getBoolCapOpt(caps_obj, "supportsValueFormattingOptions")) |v| self.adapter_capabilities.supports_value_formatting = v;
+        if (getBoolCapOpt(caps_obj, "supportsLoadedSourcesRequest")) |v| self.adapter_capabilities.supports_loaded_sources = v;
+        if (getBoolCapOpt(caps_obj, "supportsSingleThreadExecutionRequests")) |v| self.adapter_capabilities.supports_single_thread_execution_requests = v;
+        if (getBoolCapOpt(caps_obj, "supportsConfigurationDoneRequest")) |v| self.adapter_capabilities.supports_configuration_done_request = v;
+        if (getBoolCapOpt(caps_obj, "supportsDataBreakpointBytes")) |v| self.adapter_capabilities.supports_data_breakpoint_bytes = v;
+        if (getBoolCapOpt(caps_obj, "supportsANSIStyling")) |v| self.adapter_capabilities.supports_ansi_styling = v;
+        if (getBoolCapOpt(caps_obj, "supportsLocationsRequest")) |v| self.adapter_capabilities.supports_locations_request = v;
+        if (getBoolCapOpt(caps_obj, "supportsBreakpointModes")) |v| self.adapter_capabilities.supports_breakpoint_modes = v;
     }
 
     fn getBoolCapOpt(obj: std.json.ObjectMap, key: []const u8) ?bool {
@@ -2009,7 +2083,7 @@ pub const DapProxy = struct {
         if (!self.initialized or self.process == null) return error.NotSupported;
 
         const el: ?i64 = if (end_line) |e| @intCast(e) else null;
-        const msg = try protocol.breakpointLocationsRequest(allocator, self.nextSeq(), file, @intCast(line), el);
+        const msg = try protocol.breakpointLocationsRequest(allocator, self.nextSeq(), file, @intCast(line), el, null, null);
         defer allocator.free(msg);
         const resp = try self.sendRequest(allocator, msg);
         defer allocator.free(resp);
@@ -2078,7 +2152,7 @@ pub const DapProxy = struct {
         const self: *DapProxy = @ptrCast(@alignCast(ctx));
         if (!self.initialized or self.process == null) return error.NotSupported;
 
-        const msg = try protocol.restartRequest(allocator, self.nextSeq());
+        const msg = try protocol.restartRequest(allocator, self.nextSeq(), null);
         defer allocator.free(msg);
         const resp = self.sendRequest(allocator, msg) catch return;
         allocator.free(resp);
@@ -2088,7 +2162,7 @@ pub const DapProxy = struct {
         const self: *DapProxy = @ptrCast(@alignCast(ctx));
         if (!self.initialized or self.process == null) return error.NotSupported;
 
-        const msg = try protocol.gotoTargetsRequest(allocator, self.nextSeq(), file, @intCast(line));
+        const msg = try protocol.gotoTargetsRequest(allocator, self.nextSeq(), file, @intCast(line), null);
         defer allocator.free(msg);
         const resp = try self.sendRequest(allocator, msg);
         defer allocator.free(resp);
@@ -2130,7 +2204,7 @@ pub const DapProxy = struct {
         if (!self.initialized or self.process == null) return error.NotSupported;
 
         // Use completions request to find symbols
-        const msg = try protocol.completionsRequest(allocator, self.nextSeq(), name, @intCast(name.len), null);
+        const msg = try protocol.completionsRequest(allocator, self.nextSeq(), name, @intCast(name.len), null, null);
         defer allocator.free(msg);
         const resp = try self.sendRequest(allocator, msg);
         defer allocator.free(resp);
@@ -2292,13 +2366,13 @@ test "DapProxy translates DAP variables response to Variable array" {
     try std.testing.expectEqual(@as(u32, 5), vars[1].variables_reference);
 }
 
-test "DapProxy translates DAP exited event to StopReason.exit" {
+test "DapProxy translates DAP exited event with exit_code" {
     const allocator = std.testing.allocator;
     const data =
         \\{"seq":20,"type":"event","event":"exited","body":{"exitCode":0}}
     ;
     const state = try DapProxy.translateExitedEvent(allocator, data);
-    try std.testing.expectEqual(StopReason.exit, state.stop_reason);
+    try std.testing.expectEqual(StopReason.exception, state.stop_reason);
     try std.testing.expectEqual(@as(i32, 0), state.exit_code.?);
 }
 

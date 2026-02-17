@@ -552,6 +552,48 @@ pub const debug_serve =
     ++ "\n"
 ;
 
+pub const debug_dashboard =
+    bold ++ "  cog debug/dashboard" ++ reset ++ "\n"
+    ++ "\n"
+    ++ "  Live debug session dashboard. Runs in a separate terminal and\n"
+    ++ "  shows real-time state from running debug servers.\n"
+    ++ "\n"
+    ++ cyan ++ bold ++ "  Usage" ++ reset ++ "\n"
+    ++ "    cog debug/dashboard\n"
+    ++ "\n"
+    ++ cyan ++ bold ++ "  Key Bindings" ++ reset ++ "\n"
+    ++ "    " ++ bold ++ "q" ++ reset ++ " / " ++ bold ++ "Ctrl+C" ++ reset ++ "            " ++ dim ++ "Quit" ++ reset ++ "\n"
+    ++ "    " ++ bold ++ "Up" ++ reset ++ " / " ++ bold ++ "Down" ++ reset ++ "              " ++ dim ++ "Switch focused session" ++ reset ++ "\n"
+    ++ "    " ++ bold ++ "Tab" ++ reset ++ "                   " ++ dim ++ "Cycle focus forward" ++ reset ++ "\n"
+    ++ "\n"
+    ++ dim ++ "  Communicates with debug/serve via a Unix domain socket.\n"
+    ++ "  Multiple servers can push events to the same dashboard." ++ reset ++ "\n"
+    ++ "\n"
+;
+
+pub const debug_client =
+    bold ++ "  cog debug/client" ++ reset ++ "\n"
+    ++ "\n"
+    ++ "  MCP test harness for the debug server. Exposes 38 typed tools\n"
+    ++ "  that forward requests to a managed cog debug/serve subprocess.\n"
+    ++ "  The server subprocess is started and initialized automatically.\n"
+    ++ "\n"
+    ++ cyan ++ bold ++ "  Usage" ++ reset ++ "\n"
+    ++ "    cog debug/client\n"
+    ++ "\n"
+    ++ cyan ++ bold ++ "  Tools" ++ reset ++ "\n"
+    ++ "    " ++ bold ++ "debug/send_launch" ++ reset ++ "     " ++ dim ++ "Launch a program under the debugger" ++ reset ++ "\n"
+    ++ "    " ++ bold ++ "debug/send_stop" ++ reset ++ "       " ++ dim ++ "Stop a debug session" ++ reset ++ "\n"
+    ++ "    " ++ bold ++ "debug/send_run" ++ reset ++ "        " ++ dim ++ "Continue, step, or restart execution" ++ reset ++ "\n"
+    ++ "    " ++ bold ++ "debug/send_inspect" ++ reset ++ "    " ++ dim ++ "Evaluate expressions and inspect variables" ++ reset ++ "\n"
+    ++ "    " ++ dim ++ "... and 34 more (use tools/list to see all)" ++ reset ++ "\n"
+    ++ "\n"
+    ++ cyan ++ bold ++ "  Transport" ++ reset ++ "\n"
+    ++ "    JSON-RPC 2.0 over stdin/stdout (one JSON object per line).\n"
+    ++ "    Manages a cog debug/serve subprocess internally.\n"
+    ++ "\n"
+;
+
 pub const debug_sign =
     bold ++ "  cog debug/sign" ++ reset ++ "\n"
     ++ "\n"
@@ -564,6 +606,28 @@ pub const debug_sign =
     ++ "\n"
     ++ dim ++ "  Called automatically by Homebrew on install and upgrade.\n"
     ++ "  Run manually after building from source." ++ reset ++ "\n"
+    ++ "\n"
+;
+
+pub const debug_status =
+    bold ++ "  cog debug/status" ++ reset ++ "\n"
+    ++ "\n"
+    ++ "  Check the status of the debug daemon. Reports whether the\n"
+    ++ "  daemon is running and lists active sessions.\n"
+    ++ "\n"
+    ++ cyan ++ bold ++ "  Usage" ++ reset ++ "\n"
+    ++ "    cog debug/status\n"
+    ++ "\n"
+;
+
+pub const debug_kill =
+    bold ++ "  cog debug/kill" ++ reset ++ "\n"
+    ++ "\n"
+    ++ "  Stop the debug daemon. Sends SIGTERM to the daemon process\n"
+    ++ "  and cleans up the socket and PID files.\n"
+    ++ "\n"
+    ++ cyan ++ bold ++ "  Usage" ++ reset ++ "\n"
+    ++ "    cog debug/kill\n"
     ++ "\n"
 ;
 

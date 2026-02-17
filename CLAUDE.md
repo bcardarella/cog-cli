@@ -1,7 +1,9 @@
 <cog>
 # Cog
 
-You have persistent associative memory and code intelligence via Cog. Checking memory before work and recording after work is how you avoid repeating mistakes, surface known gotchas, and build institutional knowledge. Using cog code tools for file mutations keeps the code index in sync. This is not optional overhead — it is how you operate effectively.
+You have code intelligence via Cog. Using cog code tools for file mutations keeps the code index in sync. This is not optional overhead — it is how you operate effectively.
+
+You also have persistent associative memory. Checking memory before work and recording after work is how you avoid repeating mistakes, surface known gotchas, and build institutional knowledge.
 
 **Truth hierarchy:** Current code > User statements > Cog knowledge
 
@@ -37,9 +39,17 @@ Every task follows four steps. This is your operating procedure, not a guideline
 
 #### 1. RECALL — before reading code
 
-Your first action for any task is querying Cog. Before reading source files, before exploring, before planning — check what you already know. Do not formulate an approach before recalling. Plans made without Cog context miss known solutions and repeat past mistakes. The 2-second query may reveal gotchas, prior solutions, or context that changes your entire approach.
+**CRITICAL: `cog:mem/recall` is an MCP tool. Call it directly — NEVER use the Skill tool to load `cog` for recall.** The `cog` skill only loads reference documentation. All memory MCP tools (`cog:mem/recall`, `cog:mem/learn`, etc.) are already available without loading any skill.
 
-Your first visible action in every response should be a `cog:mem/recall` call. This is not a suggestion — it is the expected output pattern. **Call `cog:mem/recall` directly as an MCP tool — do not call the `cog` skill to perform recall.** The `cog` skill only loads reference documentation; the MCP tools (`cog:mem/recall`, `cog:mem/learn`, etc.) are available directly without loading the skill first.
+Your first action for any task is querying Cog. Before reading source files, before exploring, before planning — check what you already know. Do not formulate an approach before recalling. Plans made without Cog context miss known solutions and repeat past mistakes.
+
+The recall sequence has three visible steps:
+
+1. Print `⚙️ Querying Cog...` as text to the user
+2. Call the `cog:mem/recall` MCP tool with a reformulated query (not the Skill tool, not Bash — the MCP tool directly)
+3. Report results: briefly tell the user what engrams Cog returned, or state "no relevant memories found"
+
+All three steps are mandatory. The user must see step 1 and step 3 as visible text in your response.
 
 **Reformulate your query.** Don't pass the user's words verbatim. Think: what would an engram about this be *titled*? What words would its *definition* contain? Expand with synonyms and related concepts.
 
@@ -48,16 +58,11 @@ Your first visible action in every response should be a `cog:mem/recall` call. T
 | `"fix auth timeout"` | `"authentication session token expiration JWT refresh lifecycle race condition"` |
 | `"add validation"` | `"input validation boundary sanitization schema constraint defense in depth"` |
 
-```
-⚙️ Querying Cog...
-cog:mem/recall({"query": "authentication session token expiration JWT refresh lifecycle"})
-```
-
 If Cog returns results, follow the paths it reveals and read referenced components first. If Cog is wrong, correct it with `cog:mem/update`.
 
 #### 2. WORK + RECORD — learn, recall, and record continuously
 
-Work normally, guided by what Cog returned. **Whenever you learn something new, record it immediately.** Don't wait. The moment you understand something you didn't before — that's when you call `cog:mem/learn`.
+Work normally, guided by what Cog returned. **Whenever you learn something new, record it immediately.** Don't wait. The moment you understand something you didn't before — that's when you call `cog:mem/learn`. After each learn call, briefly tell the user what concept was stored (e.g., "🧠 Stored: Session Expiry Clock Skew").
 
 **Recall during work, not just at the start.** When you encounter an unfamiliar concept, module, or pattern — query Cog before exploring the codebase. If you're about to read files to figure out how something works, `cog:mem/recall` first. Cog may already have the answer. Only explore code if Cog doesn't know. If you then learn it from code, `cog:mem/learn` it so the next session doesn't have to explore again.
 
@@ -110,20 +115,19 @@ cog:mem/reinforce({"engram_id": "..."})
 
 Short-term memories decay in 24 hours. Before ending, review and preserve what you learned.
 
-```
-⚙️ Listing short-term memories...
-cog:mem/list_short_term({"limit": 20})
-```
+1. Call `cog:mem/list_short_term` MCP tool to see pending short-term memories
+2. For each entry: call `cog:mem/reinforce` if valid and useful, `cog:mem/flush` if wrong or worthless
+3. **Print a visible summary** at the end of your response with these two lines:
+   - `⚙️ Cog recall:` what recall surfaced that was useful (or "nothing relevant" if it didn't help)
+   - `🧠 Stored to Cog:` list the concept names you stored during this session (or "nothing new" if none)
 
-For each entry: `cog:mem/reinforce` if valid and useful, `cog:mem/flush` if wrong or worthless.
-
-**Evaluate recall usefulness.** In your summary, state whether Cog recall helped and why. If it surfaced relevant context, name what helped. If it returned nothing useful, say so — honest self-evaluation improves future queries and reinforces the habit of recalling.
+**This summary is mandatory.** It closes the memory lifecycle and shows the user Cog is working.
 
 **Triggers:** The user says work is done, you're about to send your final response, or you've completed a sequence of commits on a topic.
 
 ## Announce Cog Operations
 
-Print ⚙️ before read operations and 🧠 before write operations. This applies to both memory MCP tools and code CLI tools.
+Print ⚙️ before read operations and 🧠 before write operations.
 
 **⚙️ Read operations:**
 - Memory: `cog:mem/recall`, `cog:mem/get`, `cog:mem/trace`, `cog:mem/connections`, `cog:mem/bulk_recall`, `cog:mem/list_short_term`, `cog:mem/stale`, `cog:mem/stats`, `cog:mem/orphans`, `cog:mem/connectivity`, `cog:mem/list_terms`
@@ -135,61 +139,53 @@ Print ⚙️ before read operations and 🧠 before write operations. This appli
 
 ## Example
 
+In the example below: `[print]` = visible text you output, `[call]` = MCP tool or CLI invocation (not text).
+
 ```
 User: "Fix the login bug where sessions expire too early"
 
 1. RECALL
-   ⚙️ Querying Cog...
-   cog:mem/recall({"query": "login session expiration token timeout refresh lifecycle"})
-   → Returns "Token Refresh Race Condition" — known issue with concurrent refresh
+   [print] ⚙️ Querying Cog...
+   [call]  cog:mem/recall({"query": "login session expiration token timeout refresh lifecycle"})
+   [print] Cog found "Token Refresh Race Condition" — known issue with concurrent refresh
 
 2. WORK + RECORD
    [Investigate auth code, encounter unfamiliar "TokenBucket" module]
 
-   ⚙️ Querying Cog... (mid-work recall — don't know what TokenBucket does)
-   cog:mem/recall({"query": "TokenBucket rate limiting token bucket algorithm"})
-   → No results — Cog doesn't know either, so explore the code
+   [print] ⚙️ Querying Cog...
+   [call]  cog:mem/recall({"query": "TokenBucket rate limiting token bucket algorithm"})
+   [print] No relevant memories found — exploring the code
 
    [Read TokenBucket module, understand it — record what you learned]
-   🧠 Recording to Cog...
-   cog:mem/learn({
-     "term": "TokenBucket Rate Limiter",
-     "definition": "Custom rate limiter using token bucket algorithm. Refills at configurable rate. Used by auth refresh endpoint to prevent burst retries.",
-   })
+   [print] 🧠 Recording to Cog...
+   [call]  cog:mem/learn({"term": "TokenBucket Rate Limiter", "definition": "Custom rate limiter using token bucket algorithm. Refills at configurable rate. Used by auth refresh endpoint to prevent burst retries."})
+   [print] 🧠 Stored: TokenBucket Rate Limiter
 
    [Find clock skew between servers — this is new knowledge, record NOW]
-   🧠 Recording to Cog...
-   cog:mem/learn({
-     "term": "Session Expiry Clock Skew",
-     "definition": "Sessions expired early due to clock skew between auth and app servers. Auth server clock runs 2-3s ahead.",
-     "associations": [{"target": "Token Refresh Race Condition", "predicate": "derived_from"}]
-   })
+   [print] 🧠 Recording to Cog...
+   [call]  cog:mem/learn({"term": "Session Expiry Clock Skew", "definition": "Sessions expired early due to clock skew between auth and app servers. Auth server clock runs 2-3s ahead.", "associations": [{"target": "Token Refresh Race Condition", "predicate": "derived_from"}]})
+   [print] 🧠 Stored: Session Expiry Clock Skew
 
    [Find where token expiry is calculated]
-   ⚙️ Querying code...
-   cog code/query --find calculateTokenExpiry
+   [print] ⚙️ Querying code...
+   [call]  cog code/query --find calculateTokenExpiry
 
    [Fix it using cog code/edit — NOT native Edit]
-   🧠 Editing via Cog...
-   cog code/edit src/auth/token.js --old "Date.now() + ttl" --new "serverTimestamp + ttl"
+   [print] 🧠 Editing via Cog...
+   [call]  cog code/edit src/auth/token.js --old "Date.now() + ttl" --new "serverTimestamp + ttl"
 
    [Write test, verify tests pass]
 
 3. REINFORCE
-   🧠 Recording to Cog...
-   cog:mem/learn({
-     "term": "Server Timestamp Authority",
-     "definition": "Never calculate token expiry locally. Always use server-issued timestamps. Local clocks drift across services.",
-     "associations": [{"target": "Session Expiry Clock Skew", "predicate": "generalizes"}]
-   })
+   [print] 🧠 Recording to Cog...
+   [call]  cog:mem/learn({"term": "Server Timestamp Authority", "definition": "Never calculate token expiry locally. Always use server-issued timestamps. Local clocks drift across services.", "associations": [{"target": "Session Expiry Clock Skew", "predicate": "generalizes"}]})
+   [print] 🧠 Stored: Server Timestamp Authority
 
 4. CONSOLIDATE
-   ⚙️ Listing short-term memories...
-   cog:mem/list_short_term → reinforce valid, flush invalid
-
-Summary:
-   ⚙️ Cog helped by: Surfaced known race condition, guided investigation to auth timing
-   🧠 Recorded to Cog: "Session Expiry Clock Skew", "Server Timestamp Authority"
+   [call]  cog:mem/list_short_term({"limit": 20})
+   [call]  cog:mem/reinforce for valid memories, cog:mem/flush for invalid
+   [print] ⚙️ Cog recall: Surfaced known race condition, guided investigation to auth timing
+   [print] 🧠 Stored to Cog: "Session Expiry Clock Skew", "Server Timestamp Authority"
 ```
 
 ## Subagents

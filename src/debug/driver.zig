@@ -76,8 +76,6 @@ pub const DriverVTable = struct {
     drainNotificationsFn: ?*const fn (ctx: *anyopaque, allocator: std.mem.Allocator) []const types.DebugNotification = null,
     writeRegistersFn: ?*const fn (ctx: *anyopaque, allocator: std.mem.Allocator, thread_id: u32, name: []const u8, value: u64) anyerror!void = null,
     variableLocationFn: ?*const fn (ctx: *anyopaque, allocator: std.mem.Allocator, name: []const u8, frame_id: u32) anyerror!types.VariableLocationInfo = null,
-    suggestBreakpointsFn: ?*const fn (ctx: *anyopaque, allocator: std.mem.Allocator, file_or_func: []const u8) anyerror![]const types.BreakpointSuggestion = null,
-    expandMacroFn: ?*const fn (ctx: *anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!types.MacroExpansion = null,
 };
 
 /// Runtime-polymorphic debug driver.
@@ -310,16 +308,6 @@ pub const ActiveDriver = struct {
     pub fn variableLocation(self: *ActiveDriver, allocator: std.mem.Allocator, name: []const u8, frame_id: u32) !types.VariableLocationInfo {
         const f = self.vtable.variableLocationFn orelse return error.NotSupported;
         return f(self.ptr, allocator, name, frame_id);
-    }
-
-    pub fn suggestBreakpoints(self: *ActiveDriver, allocator: std.mem.Allocator, file_or_func: []const u8) ![]const types.BreakpointSuggestion {
-        const f = self.vtable.suggestBreakpointsFn orelse return error.NotSupported;
-        return f(self.ptr, allocator, file_or_func);
-    }
-
-    pub fn expandMacro(self: *ActiveDriver, allocator: std.mem.Allocator, name: []const u8) !types.MacroExpansion {
-        const f = self.vtable.expandMacroFn orelse return error.NotSupported;
-        return f(self.ptr, allocator, name);
     }
 
 };

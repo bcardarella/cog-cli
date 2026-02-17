@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const parser = @import("parser.zig");
+const location = @import("location.zig");
 const process_mod = @import("process.zig");
 const binary_macho = @import("binary_macho.zig");
 
@@ -340,13 +341,20 @@ pub fn parseCie(data: []const u8, cie_start: usize) ?CieEntry {
 
     const initial_instructions = if (pos < entry_end) data[pos..entry_end] else &[_]u8{};
 
+    // For .eh_frame, address_size is determined by the target architecture.
+    // For .debug_frame v4+, it would be parsed from the CIE header (not yet supported).
+    const address_size: u8 = switch (builtin.cpu.arch) {
+        .x86, .arm, .riscv32, .powerpc => 4,
+        else => 8,
+    };
+
     return CieEntry{
         .code_alignment = code_alignment,
         .data_alignment = data_alignment,
         .return_address_register = return_address_register,
         .initial_instructions = initial_instructions,
         .augmentation = augmentation,
-        .address_size = 8,
+        .address_size = address_size,
         .fde_encoding = fde_encoding,
     };
 }
@@ -397,9 +405,14 @@ pub fn executeCfaInstructions(
             switch (byte) {
                 DW_CFA_nop => {},
                 DW_CFA_set_loc => {
-                    if (pos + 8 <= instructions.len) {
-                        current_pc = std.mem.readInt(u64, instructions[pos..][0..8], .little);
-                        pos += 8;
+                    const addr_sz: usize = cie.address_size;
+                    if (pos + addr_sz <= instructions.len) {
+                        current_pc = switch (addr_sz) {
+                            4 => @as(u64, std.mem.readInt(u32, instructions[pos..][0..4], .little)),
+                            8 => std.mem.readInt(u64, instructions[pos..][0..8], .little),
+                            else => return,
+                        };
+                        pos += addr_sz;
                         if (current_pc > target_pc) return;
                     } else return;
                 },
@@ -556,8 +569,17 @@ pub fn executeCfaInstructions(
     }
 }
 
+/// Result of CFA-based unwinding for a single frame.
+/// Contains the CFA value, return address, and the full register rules
+/// so callers can recover caller register values for multi-frame unwinding.
+pub const CfaUnwindResult = struct {
+    cfa: u64,
+    return_address: u64,
+    rules: [MAX_CFA_RULES]CfaRule,
+};
+
 /// Find the FDE covering a given PC and compute CFA state.
-/// Returns the CFA value and return address if successful.
+/// Returns the CFA value, return address, and register recovery rules.
 /// The `ctx` parameter is passed through to the reader callbacks, allowing
 /// callers to supply process state without requiring closures.
 pub fn unwindCfa(
@@ -566,7 +588,7 @@ pub fn unwindCfa(
     ctx: *anyopaque,
     reg_reader: *const fn (ctx: *anyopaque, reg: u64) ?u64,
     mem_reader: *const fn (ctx: *anyopaque, addr: u64, size: usize) ?u64,
-) ?struct { cfa: u64, return_address: u64 } {
+) ?CfaUnwindResult {
     // Parse FDEs to find one covering target_pc
     var pos: usize = 0;
 
@@ -657,7 +679,7 @@ pub fn unwindCfa(
 
             // Compute CFA value
             const cfa = if (state.cfa_expression) |cfa_expr| blk: {
-                // CFA defined by a DWARF expression — handle common DW_OP_bregN pattern
+                // CFA defined by a DWARF expression — try fast path for common DW_OP_bregN pattern
                 if (cfa_expr.len >= 2 and cfa_expr[0] >= 0x70 and cfa_expr[0] <= 0x8f) {
                     const breg = @as(u64, cfa_expr[0] - 0x70);
                     var expr_pos: usize = 1;
@@ -667,8 +689,17 @@ pub fn unwindCfa(
                         base +% @as(u64, @intCast(offset))
                     else
                         base -% @as(u64, @intCast(-offset));
-                } else {
-                    break :blk @as(u64, 0);
+                }
+                // Fall back to full DWARF expression evaluator
+                const reg_provider = location.RegisterProvider{
+                    .ptr = ctx,
+                    .readFn = reg_reader,
+                };
+                const result = location.evalLocation(cfa_expr, reg_provider, null);
+                switch (result) {
+                    .address => |addr| break :blk addr,
+                    .value => |val| break :blk val,
+                    else => break :blk @as(u64, 0),
                 }
             } else blk: {
                 const cfa_reg_val = reg_reader(ctx, state.cfa_register) orelse return null;
@@ -699,7 +730,7 @@ pub fn unwindCfa(
                 }
             }
 
-            return .{ .cfa = cfa, .return_address = ret_addr };
+            return .{ .cfa = cfa, .return_address = ret_addr, .rules = state.rules };
         }
 
         _ = entry_start;
@@ -708,6 +739,28 @@ pub fn unwindCfa(
 
     return null;
 }
+
+/// Context for CFA unwinding with virtual register state.
+/// After each frame is unwound, the virtual registers are updated to reflect
+/// the caller's register values, so the next iteration computes CFA correctly.
+const VirtualRegCtx = struct {
+    virtual_regs: [MAX_CFA_RULES]?u64,
+    mem_reader_ctx: *anyopaque,
+    mem_reader_fn: *const fn (ctx: *anyopaque, addr: u64, size: usize) ?u64,
+
+    fn regReader(ctx_opaque: *anyopaque, reg: u64) ?u64 {
+        const self: *VirtualRegCtx = @ptrCast(@alignCast(ctx_opaque));
+        if (reg < MAX_CFA_RULES) {
+            return self.virtual_regs[@intCast(reg)];
+        }
+        return null;
+    }
+
+    fn memReader(ctx_opaque: *anyopaque, addr: u64, size: usize) ?u64 {
+        const self: *VirtualRegCtx = @ptrCast(@alignCast(ctx_opaque));
+        return self.mem_reader_fn(self.mem_reader_ctx, addr, size);
+    }
+};
 
 /// Unwind the stack using CFA (Call Frame Address) information from .eh_frame.
 /// This works even when frame pointers are omitted (-fomit-frame-pointer).
@@ -730,8 +783,24 @@ pub fn unwindStackCfa(
     errdefer frames.deinit(allocator);
 
     var pc = start_pc;
-    _ = start_sp;
     var frame_idx: u32 = 0;
+
+    // Initialize virtual register context with the real register values
+    var virt_ctx = VirtualRegCtx{
+        .virtual_regs = [_]?u64{null} ** MAX_CFA_RULES,
+        .mem_reader_ctx = ctx,
+        .mem_reader_fn = mem_reader,
+    };
+
+    // Populate initial virtual registers from the real process state
+    for (0..MAX_CFA_RULES) |i| {
+        virt_ctx.virtual_regs[i] = reg_reader(ctx, @intCast(i));
+    }
+
+    // DWARF register number for SP (x86_64: 7, aarch64: 31)
+    const sp_reg: usize = if (builtin.cpu.arch == .aarch64) 31 else 7;
+    // Set SP from the explicit start_sp parameter
+    virt_ctx.virtual_regs[sp_reg] = start_sp;
 
     while (frame_idx < max_depth) {
         const func_name = findFunctionForPC(functions, pc);
@@ -750,9 +819,61 @@ pub fn unwindStackCfa(
             break;
         }
 
-        // Use CFA unwinding to get the return address for the next frame
-        const result = unwindCfa(eh_frame_data, pc, ctx, reg_reader, mem_reader) orelse break;
+        // Use CFA unwinding to get the return address and register rules for this frame
+        const result = unwindCfa(
+            eh_frame_data,
+            pc,
+            @ptrCast(&virt_ctx),
+            &VirtualRegCtx.regReader,
+            &VirtualRegCtx.memReader,
+        ) orelse break;
         if (result.return_address == 0) break;
+
+        // Recover caller's register values using the CFA rules
+        var new_regs = [_]?u64{null} ** MAX_CFA_RULES;
+        for (0..MAX_CFA_RULES) |reg_num| {
+            switch (result.rules[reg_num]) {
+                .offset => |off| {
+                    // Register was saved at CFA + offset — read from memory
+                    const addr = if (off >= 0)
+                        result.cfa +% @as(u64, @intCast(off))
+                    else
+                        result.cfa -% @as(u64, @intCast(-off));
+                    new_regs[reg_num] = mem_reader(ctx, addr, 8);
+                },
+                .register => |src_reg| {
+                    // Register value is in another register
+                    if (src_reg < MAX_CFA_RULES) {
+                        new_regs[reg_num] = virt_ctx.virtual_regs[@intCast(src_reg)];
+                    }
+                },
+                .same_value => {
+                    // Register is unchanged from current frame
+                    new_regs[reg_num] = virt_ctx.virtual_regs[reg_num];
+                },
+                .val_offset => |off| {
+                    // Value is CFA + offset directly (not a memory read)
+                    new_regs[reg_num] = if (off >= 0)
+                        result.cfa +% @as(u64, @intCast(off))
+                    else
+                        result.cfa -% @as(u64, @intCast(-off));
+                },
+                .undefined => {
+                    // Register has no recoverable value in the caller
+                    new_regs[reg_num] = null;
+                },
+                .expression, .val_expression => {
+                    // Expression-based rules — leave as null for now
+                    new_regs[reg_num] = null;
+                },
+            }
+        }
+
+        // By definition, CFA equals the caller's stack pointer at the call site
+        new_regs[sp_reg] = result.cfa;
+
+        // Update virtual registers for the next iteration
+        virt_ctx.virtual_regs = new_regs;
 
         pc = result.return_address;
         frame_idx += 1;
@@ -763,6 +884,8 @@ pub fn unwindStackCfa(
 
 /// Unwind the stack by following frame pointers (FP-based unwinding).
 /// This is the simpler approach that works when frame pointers are preserved (-fno-omit-frame-pointer).
+/// `start_lr` is the link register value (ARM64 only, 0 on x86_64), used to detect
+/// leaf functions that don't save LR to the stack.
 pub fn unwindStackFP(
     start_pc: u64,
     start_fp: u64,
@@ -779,6 +902,34 @@ pub fn unwindStackFP(
     var pc = start_pc;
     var fp = start_fp;
     var frame_idx: u32 = 0;
+
+    // On ARM64, read LR to handle leaf functions that don't save it to the stack.
+    // A leaf function doesn't modify FP, so FP still points to the CALLER's frame record.
+    // In that case, [FP+8] is the caller's saved LR (grandparent return addr), NOT the
+    // current function's return address. The actual return address is in the LR register.
+    var lr_return: ?u64 = null;
+    if (builtin.cpu.arch == .aarch64) {
+        const regs = process.readRegisters() catch null;
+        if (regs) |r| {
+            const lr = r.gprs[30]; // x30 = LR
+            if (lr != 0) {
+                // Check if LR points to a different function than [FP+8].
+                // If so, this is a leaf function and LR is the correct return address.
+                const stack_ret = blk: {
+                    const ret_bytes = process.readMemory(fp + 8, 8, allocator) catch break :blk @as(u64, 0);
+                    defer allocator.free(ret_bytes);
+                    break :blk std.mem.readInt(u64, ret_bytes[0..8], .little);
+                };
+                const lr_func = findFunctionForPC(functions, lr);
+                const stack_func = findFunctionForPC(functions, stack_ret);
+                if (!std.mem.eql(u8, lr_func, stack_func) and
+                    !std.mem.eql(u8, lr_func, "<unknown>"))
+                {
+                    lr_return = lr;
+                }
+            }
+        }
+    }
 
     while (frame_idx < max_depth and fp != 0) {
         // Find function name for this PC
@@ -798,6 +949,15 @@ pub fn unwindStackFP(
         // Stop at main or _start
         if (std.mem.eql(u8, func_name, "main") or std.mem.eql(u8, func_name, "_start")) {
             break;
+        }
+
+        // On the first frame, if we detected a leaf function, use LR as the return address
+        // and keep FP unchanged (leaf function didn't modify FP).
+        if (frame_idx == 0 and lr_return != null) {
+            pc = lr_return.?;
+            lr_return = null; // Only use LR for the first frame
+            frame_idx += 1;
+            continue;
         }
 
         // Read saved frame pointer and return address from stack
@@ -849,7 +1009,7 @@ pub fn buildStackTrace(
     return try frames.toOwnedSlice(allocator);
 }
 
-fn findFunctionForPC(functions: []const parser.FunctionInfo, pc: u64) []const u8 {
+pub fn findFunctionForPC(functions: []const parser.FunctionInfo, pc: u64) []const u8 {
     for (functions) |f| {
         if (pc >= f.low_pc and (f.high_pc == 0 or pc < f.high_pc)) {
             return f.name;
