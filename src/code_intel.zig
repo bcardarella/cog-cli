@@ -393,8 +393,11 @@ fn codeIndex(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         if (ext.len == 0) continue;
         if (tree_sitter_indexer.detectLanguage(ext) != null) {
             indexable_count += 1;
-        } else if (extensions.resolveByExtension(allocator, ext) != null) {
-            indexable_count += 1;
+        } else {
+            if (extensions.resolveByExtension(allocator, ext)) |resolved| {
+                extensions.freeExtension(allocator, &resolved);
+                indexable_count += 1;
+            }
         }
     }
 
@@ -456,7 +459,7 @@ fn codeIndex(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
             }
         } else {
             // Track for external indexer fallback
-            const extension = extensions.resolveByExtension(allocator, ext) orelse continue;
+            var extension = extensions.resolveByExtension(allocator, ext) orelse continue;
             var found = false;
             for (seen_names[0..num_unique]) |name| {
                 if (std.mem.eql(u8, name, extension.name)) {
@@ -468,6 +471,8 @@ fn codeIndex(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
                 seen_names[num_unique] = extension.name;
                 unique_exts[num_unique] = extension;
                 num_unique += 1;
+            } else {
+                extensions.freeExtension(allocator, &extension);
             }
         }
     }
@@ -505,6 +510,11 @@ fn codeIndex(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
             allocator.free(sym.relationships);
         }
         allocator.free(result.index.external_symbols);
+    }
+
+    // Free installed extensions tracked during indexing
+    for (unique_exts[0..num_unique]) |*ext| {
+        extensions.freeExtension(allocator, ext);
     }
 
     // Encode and write the master index
@@ -998,6 +1008,7 @@ fn reindexFile(allocator: std.mem.Allocator, file_path: []const u8) bool {
     } else {
         // Fall back to external indexer
         const extension = extensions.resolveByExtension(allocator, ext_str) orelse return false;
+        defer extensions.freeExtension(allocator, &extension);
 
         const file_result = invokeIndexerForFile(allocator, file_path, &extension) catch return false;
         mergeDocument(allocator, &master_index, file_result.doc);

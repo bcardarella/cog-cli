@@ -175,6 +175,9 @@ fn scanInstalled(allocator: std.mem.Allocator, file_ext: []const u8) ?Extension 
             if (std.mem.eql(u8, ext, file_ext)) {
                 const bin_path = std.fmt.allocPrint(allocator, "{s}/{s}/bin/{s}", .{ ext_dir, entry.name, manifest.name }) catch continue;
 
+                // Free build_cmd — not carried into Extension
+                allocator.free(manifest.build_cmd);
+
                 return Extension{
                     .name = manifest.name,
                     .file_extensions = manifest.file_extensions,
@@ -328,6 +331,10 @@ fn parseDebuggerConfig(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !?
                     result.adapter_transport = try allocator.dupe(u8, tr.string);
                 }
             }
+            // Ensure transport is always heap-allocated when command is set
+            if (result.adapter_command != null and result.adapter_transport == null) {
+                result.adapter_transport = try allocator.dupe(u8, "stdio");
+            }
             if (adapter.get("args")) |args_v| {
                 if (args_v == .array) {
                     const adapter_args = try allocator.alloc([]const u8, args_v.array.items.len);
@@ -377,17 +384,47 @@ fn freeManifest(allocator: std.mem.Allocator, manifest: *const ManifestData) voi
     allocator.free(manifest.args);
     allocator.free(manifest.build_cmd);
     allocator.free(manifest.ext_dir);
-    if (manifest.debugger) |dbg| {
-        if (dbg.adapter_command) |c| allocator.free(c);
-        if (dbg.adapter_transport) |t| allocator.free(t);
-        if (dbg.adapter_args) |args| {
-            for (args) |a| allocator.free(a);
-            allocator.free(args);
+    freeDebuggerAllocs(allocator, manifest.debugger);
+}
+
+/// Free heap-allocated fields of a DebuggerConfig that originated from an
+/// installed extension (where all strings are heap-allocated). Built-in
+/// extensions use comptime literals and must NOT be freed — the `installed`
+/// flag on Extension guards this.
+pub fn freeExtension(allocator: std.mem.Allocator, ext: *const Extension) void {
+    if (!ext.installed) return;
+
+    allocator.free(ext.name);
+    for (ext.file_extensions) |e| allocator.free(e);
+    allocator.free(ext.file_extensions);
+    allocator.free(ext.command);
+    for (ext.args) |a| allocator.free(a);
+    allocator.free(ext.args);
+    allocator.free(ext.path);
+    if (ext.debugger) |dbg| {
+        if (dbg.adapter) |adapter| {
+            allocator.free(adapter.command);
+            allocator.free(adapter.transport);
+            for (adapter.args) |a| allocator.free(a);
+            if (adapter.args.len > 0) allocator.free(adapter.args);
         }
         if (dbg.launch_args_template) |l| allocator.free(l);
         for (dbg.boundary_markers) |m| allocator.free(m);
         if (dbg.boundary_markers.len > 0) allocator.free(dbg.boundary_markers);
     }
+}
+
+fn freeDebuggerAllocs(allocator: std.mem.Allocator, debugger: ?AllocatedDebuggerConfig) void {
+    const dbg = debugger orelse return;
+    if (dbg.adapter_command) |c| allocator.free(c);
+    if (dbg.adapter_transport) |t| allocator.free(t);
+    if (dbg.adapter_args) |args| {
+        for (args) |a| allocator.free(a);
+        allocator.free(args);
+    }
+    if (dbg.launch_args_template) |l| allocator.free(l);
+    for (dbg.boundary_markers) |m| allocator.free(m);
+    if (dbg.boundary_markers.len > 0) allocator.free(dbg.boundary_markers);
 }
 
 fn printErr(msg: []const u8) void {
