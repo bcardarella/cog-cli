@@ -76,14 +76,12 @@ pub const DaemonServer = struct {
         g_daemon_socket_path_len = sock_path.len;
 
         // Accept loop with idle timeout
-        while (true) {
+        while (!g_shutdown_requested) {
             // Check idle timeout
             const now = std.time.milliTimestamp();
             if (now - self.last_activity > IDLE_TIMEOUT_MS) {
                 // Check if there are active sessions
-                const sessions = self.server.session_manager.listSessions(self.allocator) catch break;
-                defer self.allocator.free(sessions);
-                if (sessions.len == 0) break; // No active sessions, shut down
+                if (self.server.session_manager.sessionCount() == 0) break; // No active sessions, shut down
             }
 
             // Use poll to wait for connections with timeout
@@ -96,7 +94,10 @@ pub const DaemonServer = struct {
             const poll_timeout: i32 = 5000; // 5 second poll intervals
             const poll_result = posix.poll(&fds, poll_timeout) catch continue;
 
-            if (poll_result == 0) continue; // timeout, loop back to check idle
+            if (poll_result == 0) {
+                if (g_shutdown_requested) break;
+                continue; // timeout, loop back to check idle
+            }
 
             if (fds[0].revents & posix.POLL.IN == 0) continue;
 
@@ -113,14 +114,16 @@ pub const DaemonServer = struct {
         // Read one JSON line from the client
         var read_buf: [65536]u8 = undefined;
         var total_read: usize = 0;
+        var scan_start: usize = 0;
 
         while (total_read < read_buf.len) {
             const n = posix.read(client_fd, read_buf[total_read..]) catch return;
             if (n == 0) break;
             total_read += n;
 
-            // Check if we have a complete line
-            if (std.mem.indexOfScalar(u8, read_buf[0..total_read], '\n') != null) break;
+            // Only scan newly-read bytes for newline (avoids O(n²) rescan)
+            if (std.mem.indexOfScalar(u8, read_buf[scan_start..total_read], '\n') != null) break;
+            scan_start = total_read;
         }
 
         if (total_read == 0) return;
@@ -197,8 +200,11 @@ pub const DaemonServer = struct {
 
     fn writeResponse(self: *DaemonServer, client_fd: posix.socket_t, response: []const u8) void {
         _ = self;
-        _ = posix.write(client_fd, response) catch {};
-        _ = posix.write(client_fd, "\n") catch {};
+        const iovecs = [_]posix.iovec_const{
+            .{ .base = response.ptr, .len = response.len },
+            .{ .base = "\n", .len = 1 },
+        };
+        _ = posix.writev(client_fd, &iovecs) catch {};
     }
 
     fn writePidFile(self: *DaemonServer) !void {
@@ -253,6 +259,7 @@ pub fn getPidPath(buf: []u8) ?[]const u8 {
 
 var g_daemon_socket_path: [128]u8 = undefined;
 var g_daemon_socket_path_len: usize = 0;
+var g_shutdown_requested: bool = false;
 
 fn setupSignalHandler() void {
     const act: posix.Sigaction = .{
@@ -274,17 +281,7 @@ fn setupSignalHandler() void {
 }
 
 fn sigHandler(_: c_int) callconv(.c) void {
-    // Clean up socket file
-    if (g_daemon_socket_path_len > 0) {
-        const path = g_daemon_socket_path[0..g_daemon_socket_path_len];
-        std.fs.deleteFileAbsolute(path) catch {};
-    }
-    // Clean up pid file
-    var pid_buf: [128]u8 = undefined;
-    if (getPidPath(&pid_buf)) |path| {
-        std.fs.deleteFileAbsolute(path) catch {};
-    }
-    std.process.exit(0);
+    g_shutdown_requested = true;
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────
