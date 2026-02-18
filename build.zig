@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const version = "0.0.1";
+const version = "0.1.0";
 
 const tree_sitter_version = "v0.25.4";
 
