@@ -970,35 +970,90 @@ pub const DwarfEngine = struct {
         return null;
     }
 
+    /// Find the nearest DWARF line address <= dwarf_pc using binary search.
+    /// Converts between runtime and DWARF address spaces via aslr_slide.
+    fn findNearestDwarfLineAddress(self: *const DwarfEngine, dwarf_pc: u64) u64 {
+        if (self.line_entries.len == 0) return 0;
+        // Convert DWARF PC to runtime PC for comparison against sorted line_entries
+        const runtime_pc = if (self.aslr_slide >= 0)
+            dwarf_pc +% @as(u64, @intCast(self.aslr_slide))
+        else
+            dwarf_pc -% @as(u64, @intCast(-self.aslr_slide));
+        // Binary search: find rightmost entry with address <= runtime_pc
+        var lo: usize = 0;
+        var hi: usize = self.line_entries.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (self.line_entries[mid].address <= runtime_pc) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        // Walk back to find non-end_sequence entry
+        var i = lo;
+        while (i > 0) {
+            i -= 1;
+            if (!self.line_entries[i].end_sequence) {
+                // Convert back to DWARF address space
+                return if (self.aslr_slide >= 0)
+                    self.line_entries[i].address -% @as(u64, @intCast(self.aslr_slide))
+                else
+                    self.line_entries[i].address +% @as(u64, @intCast(-self.aslr_slide));
+            }
+        }
+        return 0;
+    }
+
     /// Find the prologue end address for a function containing the given PC.
     /// Returns the first line entry with `prologue_end == true` in the function's range.
     /// Falls back to the first `is_stmt` entry if no prologue_end marker exists.
     fn findPrologueEndAddress(self: *DwarfEngine, pc: u64) ?u64 {
         if (self.line_entries.len == 0 or self.functions.len == 0) return null;
 
-        // Find the function containing this PC
+        // Binary search: find the function containing this PC
         var func_start: u64 = 0;
         var func_end: u64 = 0;
-        for (self.functions) |f| {
+        var lo: usize = 0;
+        var hi: usize = self.functions.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (self.functions[mid].low_pc <= pc) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        if (lo > 0) {
+            const f = self.functions[lo - 1];
             if (pc >= f.low_pc and (f.high_pc == 0 or pc < f.high_pc)) {
                 func_start = f.low_pc;
                 func_end = f.high_pc;
-                break;
             }
         }
         if (func_start == 0 and func_end == 0) return null;
 
-        // Look for prologue_end marker within the function's address range
+        // Binary search line_entries for the first entry at or after func_start
+        lo = 0;
+        hi = self.line_entries.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (self.line_entries[mid].address < func_start) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+
+        // Scan forward within the function's range
         var first_stmt: ?u64 = null;
-        for (self.line_entries) |entry| {
+        for (self.line_entries[lo..]) |entry| {
+            if (func_end > 0 and entry.address >= func_end) break;
             if (entry.end_sequence) continue;
-            if (entry.address < func_start) continue;
-            if (func_end > 0 and entry.address >= func_end) continue;
 
             if (entry.prologue_end) {
                 return entry.address;
             }
-            // Track first is_stmt as fallback
             if (entry.is_stmt and first_stmt == null and entry.address >= func_start) {
                 first_stmt = entry.address;
             }
@@ -1451,24 +1506,14 @@ pub const DwarfEngine = struct {
             dwarf_pc,
             self.allocator,
             if (self.abbrev_cache) |*ac| ac else null,
-            null,
+            self.cuHintForPC(dwarf_pc),
             if (self.type_die_cache) |*tdc| tdc else null,
         ) catch return &.{};
         defer parser.freeScopedVariables(scoped, self.allocator);
 
         // Nearest line entry fallback: handles DWARF location list gaps after stepping
         if (scoped.variables.len == 0 and self.line_entries.len > 0) {
-            var best_addr: u64 = 0;
-            for (self.line_entries) |entry| {
-                if (entry.end_sequence) continue;
-                const entry_dwarf = if (self.aslr_slide >= 0)
-                    entry.address -% @as(u64, @intCast(self.aslr_slide))
-                else
-                    entry.address +% @as(u64, @intCast(-self.aslr_slide));
-                if (entry_dwarf <= dwarf_pc and entry_dwarf > best_addr) {
-                    best_addr = entry_dwarf;
-                }
-            }
+            const best_addr = self.findNearestDwarfLineAddress(dwarf_pc);
             if (best_addr != 0 and best_addr != dwarf_pc) {
                 const fallback_scoped = parser.parseScopedVariables(
                     dd.info_data,
@@ -1485,7 +1530,7 @@ pub const DwarfEngine = struct {
                     best_addr,
                     self.allocator,
                     if (self.abbrev_cache) |*ac| ac else null,
-                    null,
+                    self.cuHintForPC(best_addr),
                     if (self.type_die_cache) |*tdc| tdc else null,
                 ) catch scoped;
                 if (fallback_scoped.variables.len > 0) {
@@ -1750,7 +1795,7 @@ pub const DwarfEngine = struct {
             target_pc,
             allocator,
             if (self.abbrev_cache) |*ac| ac else null,
-            null,
+            self.cuHintForPC(target_pc),
             if (self.type_die_cache) |*tdc| tdc else null,
         ) catch {
             return .{ .result = "<parse error>", .@"type" = "" };
@@ -1787,17 +1832,7 @@ pub const DwarfEngine = struct {
 
         // 5c. Nearest line entry fallback: handles DWARF location list gaps after stepping
         if (scoped.variables.len == 0 and self.line_entries.len > 0) {
-            var best_addr: u64 = 0;
-            for (self.line_entries) |entry| {
-                if (entry.end_sequence) continue;
-                const entry_dwarf = if (self.aslr_slide >= 0)
-                    entry.address -% @as(u64, @intCast(self.aslr_slide))
-                else
-                    entry.address +% @as(u64, @intCast(-self.aslr_slide));
-                if (entry_dwarf <= target_pc and entry_dwarf > best_addr) {
-                    best_addr = entry_dwarf;
-                }
-            }
+            const best_addr = self.findNearestDwarfLineAddress(target_pc);
             if (best_addr != 0 and best_addr != target_pc) {
                 const fallback_scoped = parser.parseScopedVariables(
                     info_data,
@@ -1814,7 +1849,7 @@ pub const DwarfEngine = struct {
                     best_addr,
                     allocator,
                     if (self.abbrev_cache) |*ac| ac else null,
-                    null,
+                    self.cuHintForPC(best_addr),
                     if (self.type_die_cache) |*tdc| tdc else null,
                 ) catch scoped;
                 if (fallback_scoped.variables.len > 0) {
@@ -2294,7 +2329,7 @@ pub const DwarfEngine = struct {
             dwarf_pc,
             self.allocator,
             if (self.abbrev_cache) |*ac| ac else null,
-            null,
+            self.cuHintForPC(dwarf_pc),
             if (self.type_die_cache) |*tdc| tdc else null,
         ) catch return null;
 
@@ -2376,7 +2411,7 @@ pub const DwarfEngine = struct {
             dwarf_pc,
             self.allocator,
             if (self.abbrev_cache) |*ac| ac else null,
-            null,
+            self.cuHintForPC(dwarf_pc),
             if (self.type_die_cache) |*tdc| tdc else null,
         ) catch return self.allocator.dupe(u8, template) catch null;
         defer parser.freeScopedVariables(scoped, self.allocator);
@@ -2870,7 +2905,7 @@ pub const DwarfEngine = struct {
             dwarf_pc,
             allocator,
             if (self.abbrev_cache) |*ac| ac else null,
-            null,
+            self.cuHintForPC(dwarf_pc),
             if (self.type_die_cache) |*tdc| tdc else null,
         );
         defer parser.freeScopedVariables(scoped, allocator);
@@ -2920,17 +2955,7 @@ pub const DwarfEngine = struct {
         // Variable not found at current PC — try nearest line entry PC
         // (handles DWARF location list gaps after stepping)
         if (self.line_entries.len > 0) {
-            var best_addr: u64 = 0;
-            for (self.line_entries) |entry| {
-                if (entry.end_sequence) continue;
-                const entry_dwarf = if (self.aslr_slide >= 0)
-                    entry.address -% @as(u64, @intCast(self.aslr_slide))
-                else
-                    entry.address +% @as(u64, @intCast(-self.aslr_slide));
-                if (entry_dwarf <= dwarf_pc and entry_dwarf > best_addr) {
-                    best_addr = entry_dwarf;
-                }
-            }
+            const best_addr = self.findNearestDwarfLineAddress(dwarf_pc);
             if (best_addr != 0 and best_addr != dwarf_pc) {
                 parser.freeScopedVariables(scoped, allocator);
                 scoped = parser.parseScopedVariables(
@@ -2941,7 +2966,7 @@ pub const DwarfEngine = struct {
                     best_addr,
                     allocator,
                     if (self.abbrev_cache) |*ac| ac else null,
-                    null,
+                    self.cuHintForPC(best_addr),
                     if (self.type_die_cache) |*tdc| tdc else null,
                 ) catch return error.VariableNotFound;
 
@@ -3099,7 +3124,7 @@ pub const DwarfEngine = struct {
             dwarf_pc,
             allocator,
             if (self.abbrev_cache) |*ac| ac else null,
-            null,
+            self.cuHintForPC(dwarf_pc),
             if (self.type_die_cache) |*tdc| tdc else null,
         ) catch return error.NoDebugInfo;
         defer parser.freeScopedVariables(scoped, allocator);
@@ -3819,7 +3844,7 @@ pub const DwarfEngine = struct {
             dwarf_pc,
             allocator,
             if (self.abbrev_cache) |*ac| ac else null,
-            null,
+            self.cuHintForPC(dwarf_pc),
             if (self.type_die_cache) |*tdc| tdc else null,
         ) catch return .{
             .name = try allocator.dupe(u8, name),
