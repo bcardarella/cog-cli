@@ -1,0 +1,131 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Download grammars
+        run: zig build setup
+
+      - name: Build release tarballs
+        run: zig build release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-tarballs
+          path: zig-out/release/cog-*.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-tarballs
+          path: tarballs
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          files: tarballs/cog-*.tar.gz
+
+  update-tap:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-tarballs
+          path: tarballs
+
+      - name: Compute SHA256 hashes
+        id: hashes
+        run: |
+          echo "darwin_arm64=$(sha256sum tarballs/cog-darwin-arm64.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "darwin_x86_64=$(sha256sum tarballs/cog-darwin-x86_64.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "linux_arm64=$(sha256sum tarballs/cog-linux-arm64.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "linux_x86_64=$(sha256sum tarballs/cog-linux-x86_64.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Check out Homebrew tap
+        uses: actions/checkout@v4
+        with:
+          repository: trycog/homebrew-tap
+          token: ${{ secrets.TAP_GITHUB_TOKEN }}
+          path: homebrew-tap
+
+      - name: Update formula
+        env:
+          VERSION: ${{ github.ref_name }}
+          SHA_DARWIN_ARM64: ${{ steps.hashes.outputs.darwin_arm64 }}
+          SHA_DARWIN_X86_64: ${{ steps.hashes.outputs.darwin_x86_64 }}
+          SHA_LINUX_ARM64: ${{ steps.hashes.outputs.linux_arm64 }}
+          SHA_LINUX_X86_64: ${{ steps.hashes.outputs.linux_x86_64 }}
+        run: |
+          # Strip leading 'v' for the version field
+          SEMVER="${VERSION#v}"
+
+          cat > homebrew-tap/Formula/cog.rb << FORMULA
+          class Cog < Formula
+            desc "Memory, code intelligence, and debugging for AI agents"
+            homepage "https://github.com/trycog/cog-cli"
+            version "${SEMVER}"
+            license "MIT"
+
+            on_macos do
+              on_arm do
+                url "https://github.com/trycog/cog-cli/releases/download/${VERSION}/cog-darwin-arm64.tar.gz"
+                sha256 "${SHA_DARWIN_ARM64}"
+              end
+              on_intel do
+                url "https://github.com/trycog/cog-cli/releases/download/${VERSION}/cog-darwin-x86_64.tar.gz"
+                sha256 "${SHA_DARWIN_X86_64}"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "https://github.com/trycog/cog-cli/releases/download/${VERSION}/cog-linux-arm64.tar.gz"
+                sha256 "${SHA_LINUX_ARM64}"
+              end
+              on_intel do
+                url "https://github.com/trycog/cog-cli/releases/download/${VERSION}/cog-linux-x86_64.tar.gz"
+                sha256 "${SHA_LINUX_X86_64}"
+              end
+            end
+
+            def install
+              bin.install "cog"
+            end
+
+            test do
+              output = shell_output("#{bin}/cog --help 2>&1")
+              assert_match "Usage:", output
+            end
+          end
+          FORMULA
+
+      - name: Commit and push formula
+        working-directory: homebrew-tap
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/cog.rb
+          git commit -m "cog ${VERSION}"
+          git push
