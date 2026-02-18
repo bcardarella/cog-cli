@@ -3342,14 +3342,14 @@ pub fn parseScopedVariables(
                     var type_desc: ?TypeDescription = null;
 
                     if (die_type_ref != 0) {
-                        if (type_map.get(die_type_ref)) |type_die| {
+                        if (type_map_ptr.get(die_type_ref)) |type_die| {
                             encoding = type_die.encoding;
                             byte_size = type_die.byte_size;
                             type_name = type_die.name orelse "";
 
                             // Build rich type description for composite types
                             if (type_die.tag != DW_TAG_base_type) {
-                                type_desc = resolveTypeDescription(&type_map, die_type_ref, allocator) catch null;
+                                type_desc = resolveTypeDescription(type_map_ptr, die_type_ref, allocator) catch null;
                                 if (type_desc) |td| {
                                     // Use resolved info for display
                                     if (td.byte_size > 0) byte_size = td.byte_size;

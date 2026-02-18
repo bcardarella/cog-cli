@@ -68,6 +68,8 @@ pub const DwarfEngine = struct {
     abbrev_cache: ?parser.AbbrevCache = null,
     /// CU index for fast PC-to-CU lookup
     cu_index: []parser.CuIndexEntry = &.{},
+    /// Type DIE cache per compilation unit
+    type_die_cache: ?parser.TypeDieCache = null,
 
     pub fn init(allocator: std.mem.Allocator) DwarfEngine {
         return .{
@@ -100,6 +102,7 @@ pub const DwarfEngine = struct {
         if (self.dwo_elf_binaries.len > 0) self.allocator.free(self.dwo_elf_binaries);
         if (self.type_units.len > 0) self.allocator.free(self.type_units);
         if (self.skeleton_cus.len > 0) self.allocator.free(self.skeleton_cus);
+        if (self.type_die_cache) |*tdc| tdc.deinit(self.allocator);
         if (self.cu_index.len > 0) self.allocator.free(self.cu_index);
         if (self.eh_frame_index) |*idx| idx.deinit(self.allocator);
         if (self.cie_cache) |*cc| cc.deinit(self.allocator);
@@ -233,6 +236,9 @@ pub const DwarfEngine = struct {
 
         // Initialize abbreviation cache for parseScopedVariables
         self.abbrev_cache = .{};
+
+        // Initialize type DIE cache for parseScopedVariables
+        self.type_die_cache = .{};
 
         // Build CU index for fast PC-to-CU lookup
         if (self.resolveDebugData()) |dd| {
@@ -1443,6 +1449,7 @@ pub const DwarfEngine = struct {
             self.allocator,
             if (self.abbrev_cache) |*ac| ac else null,
             null,
+            if (self.type_die_cache) |*tdc| tdc else null,
         ) catch return &.{};
         defer parser.freeScopedVariables(scoped, self.allocator);
 
@@ -1476,6 +1483,7 @@ pub const DwarfEngine = struct {
                     self.allocator,
                     if (self.abbrev_cache) |*ac| ac else null,
                     null,
+                    if (self.type_die_cache) |*tdc| tdc else null,
                 ) catch scoped;
                 if (fallback_scoped.variables.len > 0) {
                     parser.freeScopedVariables(scoped, self.allocator);
@@ -1740,6 +1748,7 @@ pub const DwarfEngine = struct {
             allocator,
             if (self.abbrev_cache) |*ac| ac else null,
             null,
+            if (self.type_die_cache) |*tdc| tdc else null,
         ) catch {
             return .{ .result = "<parse error>", .@"type" = "" };
         };
@@ -1803,6 +1812,7 @@ pub const DwarfEngine = struct {
                     allocator,
                     if (self.abbrev_cache) |*ac| ac else null,
                     null,
+                    if (self.type_die_cache) |*tdc| tdc else null,
                 ) catch scoped;
                 if (fallback_scoped.variables.len > 0) {
                     parser.freeScopedVariables(scoped, allocator);
@@ -1979,6 +1989,7 @@ pub const DwarfEngine = struct {
             allocator,
             null,
             null,
+            null,
         );
     }
 
@@ -2007,6 +2018,7 @@ pub const DwarfEngine = struct {
             },
             target_pc,
             allocator,
+            null,
             null,
             null,
         );
@@ -2280,6 +2292,7 @@ pub const DwarfEngine = struct {
             self.allocator,
             if (self.abbrev_cache) |*ac| ac else null,
             null,
+            if (self.type_die_cache) |*tdc| tdc else null,
         ) catch return null;
 
         if (scoped.variables.len == 0) {
@@ -2361,6 +2374,7 @@ pub const DwarfEngine = struct {
             self.allocator,
             if (self.abbrev_cache) |*ac| ac else null,
             null,
+            if (self.type_die_cache) |*tdc| tdc else null,
         ) catch return self.allocator.dupe(u8, template) catch null;
         defer parser.freeScopedVariables(scoped, self.allocator);
 
@@ -2854,6 +2868,7 @@ pub const DwarfEngine = struct {
             allocator,
             if (self.abbrev_cache) |*ac| ac else null,
             null,
+            if (self.type_die_cache) |*tdc| tdc else null,
         );
         defer parser.freeScopedVariables(scoped, allocator);
 
@@ -2924,6 +2939,7 @@ pub const DwarfEngine = struct {
                     allocator,
                     if (self.abbrev_cache) |*ac| ac else null,
                     null,
+                    if (self.type_die_cache) |*tdc| tdc else null,
                 ) catch return error.VariableNotFound;
 
                 for (scoped.variables) |v| {
@@ -3081,6 +3097,7 @@ pub const DwarfEngine = struct {
             allocator,
             if (self.abbrev_cache) |*ac| ac else null,
             null,
+            if (self.type_die_cache) |*tdc| tdc else null,
         ) catch return error.NoDebugInfo;
         defer parser.freeScopedVariables(scoped, allocator);
 
@@ -3198,6 +3215,7 @@ pub const DwarfEngine = struct {
             dwarf_pc, allocator,
             if (self.abbrev_cache) |*ac| ac else null,
             self.cuHintForPC(dwarf_pc),
+            if (self.type_die_cache) |*tdc| tdc else null,
         ) catch return try items.toOwnedSlice(allocator);
         defer parser.freeScopedVariables(scoped, allocator);
 
@@ -3799,6 +3817,7 @@ pub const DwarfEngine = struct {
             allocator,
             if (self.abbrev_cache) |*ac| ac else null,
             null,
+            if (self.type_die_cache) |*tdc| tdc else null,
         ) catch return .{
             .name = try allocator.dupe(u8, name),
             .location_type = try allocator.dupe(u8, "unknown"),
