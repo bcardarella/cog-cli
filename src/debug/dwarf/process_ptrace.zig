@@ -113,9 +113,17 @@ pub const PtraceProcessControl = struct {
             self.is_running = false;
 
             const status = result.status;
+            // WIFEXITED: (status & 0x7f) == 0
             if ((status & 0x7f) == 0) {
+                self.pid = null;
                 return .{ .status = .exited, .exit_code = @intCast((status >> 8) & 0xff) };
             }
+            // WIFSIGNALED: low 7 bits are signal number (non-zero, not 0x7f)
+            if ((status & 0x7f) != 0 and (status & 0x7f) != 0x7f) {
+                self.pid = null;
+                return .{ .status = .signaled, .signal = @intCast(status & 0x7f) };
+            }
+            // WIFSTOPPED: (status & 0xff) == 0x7f
             if ((status & 0xff) == 0x7f) {
                 return .{ .status = .stopped, .signal = @intCast((status >> 8) & 0xff) };
             }
@@ -398,7 +406,8 @@ pub const PtraceProcessControl = struct {
             if (builtin.os.tag == .linux) {
                 _ = std.os.linux.ptrace(PTRACE_DETACH, pid, 0, 0, 0);
             }
-            self.pid = null;
+            // Do NOT null self.pid — let kill() in deinit handle cleanup
+            // so the process is properly killed and reaped
             self.is_running = false;
         }
     }
