@@ -364,6 +364,10 @@ pub const DebugServer = struct {
     dashboard: dashboard_mod.Dashboard,
     /// Socket connection to standalone dashboard TUI (null if not connected)
     dashboard_socket: ?posix.socket_t = null,
+    /// Whether a dashboard TUI is likely available (false after failed connection)
+    dashboard_available: bool = true,
+    /// Timestamp of last failed dashboard connection attempt (for backoff)
+    last_dashboard_attempt: i64 = 0,
 
     pub fn init(allocator: std.mem.Allocator) DebugServer {
         return .{
@@ -812,13 +816,13 @@ pub const DebugServer = struct {
 
         if (self.session_manager.getSession(session_id)) |session| {
             if (terminate_only) {
-                // Terminate the debuggee but keep the adapter alive (DAP only)
+                // Terminate the debuggee and clean up session
                 session.driver.terminate(allocator) catch {
                     // Fall back to full stop if terminate not supported
                     session.driver.stop(allocator) catch {};
                 };
-                return .{ .ok = try allocator.dupe(u8, "{\"terminated\":true}") };
-            }
+                // Fall through to destroy session below
+            } else
             if (detach) {
                 // Detach without killing the debuggee
                 session.driver.detach(allocator) catch {
@@ -1980,7 +1984,19 @@ pub const DebugServer = struct {
         }
 
         if (self.dashboard_socket == null) {
+            // Apply connection backoff: only retry every 5 seconds
+            if (!self.dashboard_available) {
+                const now = std.time.timestamp();
+                if (now - self.last_dashboard_attempt < 5) return;
+            }
             self.connectDashboardSocket();
+            if (self.dashboard_socket != null) {
+                self.dashboard_available = true;
+            } else {
+                self.dashboard_available = false;
+                self.last_dashboard_attempt = std.time.timestamp();
+                return;
+            }
         }
 
         if (self.sendDashboardData(event_json)) return;
@@ -1991,18 +2007,23 @@ pub const DebugServer = struct {
             self.dashboard_socket = null;
         }
         self.connectDashboardSocket();
-        _ = self.sendDashboardData(event_json);
+        if (self.dashboard_socket != null) {
+            self.dashboard_available = true;
+            _ = self.sendDashboardData(event_json);
+        } else {
+            self.dashboard_available = false;
+            self.last_dashboard_attempt = std.time.timestamp();
+        }
     }
 
-    /// Send event data + newline on the dashboard socket. Returns true on success.
+    /// Send event data + newline on the dashboard socket in a single writev. Returns true on success.
     fn sendDashboardData(self: *DebugServer, event_json: []const u8) bool {
         const sock = self.dashboard_socket orelse return false;
-        _ = posix.send(sock, event_json, 0) catch {
-            posix.close(sock);
-            self.dashboard_socket = null;
-            return false;
+        const iovecs = [_]posix.iovec_const{
+            .{ .base = event_json.ptr, .len = event_json.len },
+            .{ .base = "\n", .len = 1 },
         };
-        _ = posix.send(sock, "\n", 0) catch {
+        _ = posix.writev(sock, &iovecs) catch {
             posix.close(sock);
             self.dashboard_socket = null;
             return false;
@@ -2012,6 +2033,7 @@ pub const DebugServer = struct {
 
     /// Emit a launch event to the dashboard TUI.
     fn emitLaunchEvent(self: *DebugServer, session_id: []const u8, program: []const u8, driver_type: []const u8) void {
+        if (self.dashboard_socket == null and !self.dashboard_available) return;
         var buf: [512]u8 = undefined;
         const event = std.fmt.bufPrint(&buf,
             \\{{"type":"launch","session_id":"{s}","program":"{s}","driver":"{s}"}}
@@ -2021,6 +2043,7 @@ pub const DebugServer = struct {
 
     /// Emit a breakpoint event to the dashboard TUI.
     fn emitBreakpointEvent(self: *DebugServer, session_id: []const u8, action: []const u8, bp: types.BreakpointInfo) void {
+        if (self.dashboard_socket == null and !self.dashboard_available) return;
         var buf: [512]u8 = undefined;
         const event = std.fmt.bufPrint(&buf,
             \\{{"type":"breakpoint","session_id":"{s}","action":"{s}","bp":{{"id":{d},"file":"{s}","line":{d},"verified":{s}}}}}
@@ -2037,6 +2060,7 @@ pub const DebugServer = struct {
 
     /// Emit a stop event (richest event — carries stack trace + locals).
     fn emitStopEvent(self: *DebugServer, session_id: []const u8, action: []const u8, state: types.StopState) void {
+        if (self.dashboard_socket == null and !self.dashboard_available) return;
         // Build JSON using allocator since stop events can be large
         var aw: Writer.Allocating = .init(self.allocator);
         defer aw.deinit();
@@ -2105,6 +2129,7 @@ pub const DebugServer = struct {
 
     /// Emit an inspect event to the dashboard TUI.
     fn emitInspectEvent(self: *DebugServer, session_id: []const u8, expression: []const u8, result_str: []const u8, var_type: []const u8) void {
+        if (self.dashboard_socket == null and !self.dashboard_available) return;
         var buf: [512]u8 = undefined;
         const event = std.fmt.bufPrint(&buf,
             \\{{"type":"inspect","session_id":"{s}","expression":"{s}","result":"{s}","var_type":"{s}"}}
@@ -2119,6 +2144,7 @@ pub const DebugServer = struct {
 
     /// Emit a session end event to the dashboard TUI.
     fn emitSessionEndEvent(self: *DebugServer, session_id: []const u8) void {
+        if (self.dashboard_socket == null and !self.dashboard_available) return;
         var buf: [128]u8 = undefined;
         const event = std.fmt.bufPrint(&buf,
             \\{{"type":"session_end","session_id":"{s}"}}
@@ -2128,6 +2154,7 @@ pub const DebugServer = struct {
 
     /// Emit an error event to the dashboard TUI.
     fn emitErrorEvent(self: *DebugServer, session_id: []const u8, method: []const u8, message: []const u8) void {
+        if (self.dashboard_socket == null and !self.dashboard_available) return;
         var buf: [512]u8 = undefined;
         const event = std.fmt.bufPrint(&buf,
             \\{{"type":"error","session_id":"{s}","method":"{s}","message":"{s}"}}
@@ -2137,6 +2164,7 @@ pub const DebugServer = struct {
 
     /// Emit a generic activity event to the dashboard TUI.
     fn emitActivityEvent(self: *DebugServer, session_id: []const u8, tool: []const u8, summary: []const u8) void {
+        if (self.dashboard_socket == null and !self.dashboard_available) return;
         var buf: [512]u8 = undefined;
         const event = std.fmt.bufPrint(&buf,
             \\{{"type":"activity","session_id":"{s}","tool":"{s}","summary":"{s}"}}
@@ -2146,6 +2174,7 @@ pub const DebugServer = struct {
 
     /// Emit a run event (execution resumed, before stop).
     fn emitRunEvent(self: *DebugServer, session_id: []const u8, action: []const u8) void {
+        if (self.dashboard_socket == null and !self.dashboard_available) return;
         var buf: [256]u8 = undefined;
         const event = std.fmt.bufPrint(&buf,
             \\{{"type":"run","session_id":"{s}","action":"{s}"}}
