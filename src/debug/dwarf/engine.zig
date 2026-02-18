@@ -210,6 +210,22 @@ pub const DwarfEngine = struct {
         } else if (builtin.os.tag == .linux) {
             self.loadDebugInfoElf(program);
         }
+
+        // Sort line entries and functions for binary search lookups
+        if (self.line_entries.len > 0) {
+            std.mem.sort(parser.LineEntry, self.line_entries, {}, struct {
+                fn lessThan(_: void, a: parser.LineEntry, b: parser.LineEntry) bool {
+                    return a.address < b.address;
+                }
+            }.lessThan);
+        }
+        if (self.functions.len > 0) {
+            std.mem.sort(parser.FunctionInfo, self.functions, {}, struct {
+                fn lessThan(_: void, a: parser.FunctionInfo, b: parser.FunctionInfo) bool {
+                    return a.low_pc < b.low_pc;
+                }
+            }.lessThan);
+        }
     }
 
     fn loadDebugInfoMachO(self: *DwarfEngine, program: []const u8) void {
@@ -868,37 +884,56 @@ pub const DwarfEngine = struct {
     }
 
     /// Get the source line number for a given PC address.
+    /// Uses binary search (line_entries are sorted by address during loadDebugInfo).
     fn getLineForPC(self: *DwarfEngine, pc: u64) ?u32 {
         if (self.line_entries.len == 0) return null;
-        var best_line: ?u32 = null;
-        var best_addr: u64 = 0;
-        for (self.line_entries) |entry| {
-            if (entry.end_sequence) continue;
-            if (entry.address <= pc and entry.address >= best_addr) {
-                best_addr = entry.address;
-                best_line = entry.line;
+        // Binary search: find rightmost entry with address <= pc
+        var lo: usize = 0;
+        var hi: usize = self.line_entries.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (self.line_entries[mid].address <= pc) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
             }
         }
-        return best_line;
+        // Walk back to find non-end_sequence entry
+        var i = lo;
+        while (i > 0) {
+            i -= 1;
+            if (!self.line_entries[i].end_sequence) {
+                return self.line_entries[i].line;
+            }
+        }
+        return null;
     }
 
     /// Find the address of the next source line after the given PC.
+    /// Uses binary search to find current position, then scans forward.
     fn findNextLineAddress(self: *DwarfEngine, pc: u64) ?u64 {
         if (self.line_entries.len == 0) return null;
-        // Find current line
         const current_line = self.getLineForPC(pc) orelse return null;
-        // Find next statement line entry with a different line number
-        var best_addr: ?u64 = null;
-        for (self.line_entries) |entry| {
-            if (entry.end_sequence) continue;
-            if (!entry.is_stmt) continue;
-            if (entry.line != current_line and entry.address > pc) {
-                if (best_addr == null or entry.address < best_addr.?) {
-                    best_addr = entry.address;
-                }
+        // Binary search: find first entry with address > pc
+        var lo: usize = 0;
+        var hi: usize = self.line_entries.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (self.line_entries[mid].address <= pc) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
             }
         }
-        return best_addr;
+        // Scan forward from lo for next statement with a different line
+        for (self.line_entries[lo..]) |entry| {
+            if (entry.end_sequence) continue;
+            if (!entry.is_stmt) continue;
+            if (entry.line != current_line) {
+                return entry.address;
+            }
+        }
+        return null;
     }
 
     /// Find the prologue end address for a function containing the given PC.

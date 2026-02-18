@@ -1009,11 +1009,27 @@ pub fn buildStackTrace(
     return try frames.toOwnedSlice(allocator);
 }
 
+/// Find the function name for a given PC address.
+/// Assumes functions are sorted by low_pc (sorted during loadDebugInfo).
 pub fn findFunctionForPC(functions: []const parser.FunctionInfo, pc: u64) []const u8 {
-    for (functions) |f| {
-        if (pc >= f.low_pc and (f.high_pc == 0 or pc < f.high_pc)) {
-            return f.name;
+    if (functions.len == 0) return "<unknown>";
+
+    // Binary search: find rightmost function with low_pc <= pc
+    var lo: usize = 0;
+    var hi: usize = functions.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (functions[mid].low_pc <= pc) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
         }
+    }
+    // lo-1 is the last function with low_pc <= pc; verify high_pc covers target
+    if (lo == 0) return "<unknown>";
+    const f = functions[lo - 1];
+    if (pc >= f.low_pc and (f.high_pc == 0 or pc < f.high_pc)) {
+        return f.name;
     }
     return "<unknown>";
 }
@@ -1139,10 +1155,10 @@ test "unwindStack stops at main entry point" {
     // buildStackTrace returns all frames, but unwindStackFP stops at main.
     // Test that the FP-based unwinder recognizes "main" as a sentinel.
     const functions = [_]parser.FunctionInfo{
-        .{ .name = "deep", .low_pc = 0x3000, .high_pc = 0x3100 },
-        .{ .name = "middle", .low_pc = 0x2000, .high_pc = 0x2100 },
-        .{ .name = "main", .low_pc = 0x1000, .high_pc = 0x1100 },
         .{ .name = "_start", .low_pc = 0x0800, .high_pc = 0x0900 },
+        .{ .name = "main", .low_pc = 0x1000, .high_pc = 0x1100 },
+        .{ .name = "middle", .low_pc = 0x2000, .high_pc = 0x2100 },
+        .{ .name = "deep", .low_pc = 0x3000, .high_pc = 0x3100 },
     };
 
     // Simulate: deep -> middle -> main -> _start

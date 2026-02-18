@@ -798,25 +798,34 @@ fn parseLineProgramImpl(data: []const u8, allocator: std.mem.Allocator, keep_fil
 }
 
 /// Resolve an address to a source location using line entries.
+/// Assumes entries are sorted by address (sorted during loadDebugInfo).
 pub fn resolveAddress(entries: []const LineEntry, files: []const FileEntry, address: u64) ?SourceLocation {
-    // Find the line entry with the largest address <= target address
-    var best: ?*const LineEntry = null;
-    for (entries) |*entry| {
-        if (entry.end_sequence) continue;
-        if (entry.address <= address) {
-            if (best == null or entry.address > best.?.address) {
-                best = entry;
-            }
+    if (entries.len == 0) return null;
+
+    // Binary search: find rightmost entry with entry.address <= address
+    var lo: usize = 0;
+    var hi: usize = entries.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (entries[mid].address <= address) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
         }
     }
-
-    if (best) |entry| {
-        const file_name = getFileName(files, entry.file_index);
-        return .{
-            .file = file_name,
-            .line = entry.line,
-            .column = entry.column,
-        };
+    // lo is now the first index with address > target; walk back to find non-end_sequence
+    if (lo == 0) return null;
+    var i = lo;
+    while (i > 0) {
+        i -= 1;
+        if (!entries[i].end_sequence) {
+            const file_name = getFileName(files, entries[i].file_index);
+            return .{
+                .file = file_name,
+                .line = entries[i].line,
+                .column = entries[i].column,
+            };
+        }
     }
     return null;
 }
