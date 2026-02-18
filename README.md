@@ -99,7 +99,7 @@ Run `cog --help` for an overview, or `cog <group> --help` to list commands in a 
 |-------|-------------|
 | `mem` | Persistent associative memory powered by a knowledge graph |
 | `code` | SCIP-based code indexing, querying, and file mutations |
-| `debug` | MCP debug server for AI agents |
+| `debug` | Debug daemon for AI agents |
 | `install` | Language extension management |
 | `init` | Interactive project setup |
 | `update` | Fetch latest prompt and skill |
@@ -605,27 +605,83 @@ cog code/status
 
 ## Debug
 
-MCP debug server for AI agents. Exposes debug tools over JSON-RPC stdio.
+Debug daemon for AI agents. The daemon runs as a background process, communicates over a Unix domain socket, and is auto-started by `debug/send` when not running.
 
 ### `debug/serve`
 
-Start an MCP debug server over stdio. Exposes debug tools that AI agents can use to step-debug programs.
+Start the debug daemon. Listens on a Unix domain socket and dispatches debug tool calls from `debug/send`.
 
 ```
 cog debug/serve
 ```
 
+The daemon is auto-started by `debug/send` commands when not already running. You typically don't need to start it manually.
+
+### `debug/send`
+
+Send a debug command to the daemon. All debug operations go through this unified command.
+
+```
+cog debug/send <tool> [args] [--flags]
+cog debug/send <tool> --help
+```
+
 **Tools:**
 
-| Tool | Description |
-|------|-------------|
-| `debug_launch` | Launch a program under the debugger |
-| `debug_breakpoint` | Set, remove, or list breakpoints |
-| `debug_run` | Continue, step, or restart execution |
-| `debug_inspect` | Evaluate expressions and inspect variables |
-| `debug_stop` | Stop a debug session |
+| Category | Tools |
+|----------|-------|
+| Core | `launch`, `stop`, `attach`, `restart`, `sessions` |
+| Breakpoints | `breakpoint_set`, `breakpoint_set_function`, `breakpoint_set_exception`, `breakpoint_remove`, `breakpoint_list`, `breakpoint_locations`, `instruction_breakpoint`, `watchpoint` |
+| Execution | `run`, `goto_targets`, `step_in_targets`, `restart_frame` |
+| Inspection | `inspect`, `set_variable`, `set_expression` |
+| Threads & Stack | `threads`, `stacktrace`, `scopes`, `variable_location` |
+| Memory & Low-Level | `memory`, `disassemble`, `registers`, `write_register`, `find_symbol` |
+| Capabilities | `capabilities`, `modules`, `loaded_sources`, `source`, `completions` |
+| Events | `exception_info`, `poll_events`, `cancel`, `terminate_threads` |
 
-**Transport:** JSON-RPC 2.0 over stdin/stdout (one JSON object per line). Compatible with Claude Code, Cursor, and other MCP clients.
+```sh
+cog debug/send launch ./my_program --stop-on-entry
+cog debug/send breakpoint_set src/main.c:42
+cog debug/send run continue
+cog debug/send inspect "my_var" --frame 0
+cog debug/send stop
+```
+
+Run `cog debug/send --help` to list all tools, or `cog debug/send <tool> --help` for tool-specific usage.
+
+### `debug/dashboard`
+
+Live debug session dashboard. Runs in a separate terminal and shows real-time state from running debug sessions.
+
+```
+cog debug/dashboard
+```
+
+### `debug/status`
+
+Check the status of the debug daemon and list active sessions.
+
+```
+cog debug/status
+```
+
+### `debug/kill`
+
+Stop the debug daemon.
+
+```
+cog debug/kill
+```
+
+### `debug/sign`
+
+Code-sign the cog binary with macOS debug entitlements. Required for the debugger to attach to processes via `task_for_pid`. No-op on Linux.
+
+```
+cog debug/sign
+```
+
+Called automatically by Homebrew on install. Run manually after building from source.
 
 ---
 

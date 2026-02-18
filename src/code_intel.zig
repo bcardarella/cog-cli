@@ -419,6 +419,7 @@ fn codeIndex(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     // Track extensions that need external indexers (not supported by tree-sitter)
     var seen_names: [16][]const u8 = undefined;
     var unique_exts: [16]extensions.Extension = undefined;
+    var ext_files: [16]std.ArrayListUnmanaged([]const u8) = [_]std.ArrayListUnmanaged([]const u8){.empty} ** 16;
     var num_unique: usize = 0;
 
     for (files.items) |file_path| {
@@ -461,60 +462,52 @@ fn codeIndex(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
             // Track for external indexer fallback
             var extension = extensions.resolveByExtension(allocator, ext) orelse continue;
             var found = false;
-            for (seen_names[0..num_unique]) |name| {
+            var found_idx: usize = 0;
+            for (seen_names[0..num_unique], 0..) |name, idx| {
                 if (std.mem.eql(u8, name, extension.name)) {
                     found = true;
+                    found_idx = idx;
                     break;
                 }
             }
             if (!found and num_unique < 16) {
                 seen_names[num_unique] = extension.name;
                 unique_exts[num_unique] = extension;
+                ext_files[num_unique].append(allocator, file_path) catch {};
                 num_unique += 1;
+            } else if (found) {
+                ext_files[found_idx].append(allocator, file_path) catch {};
+                extensions.freeExtension(allocator, &extension);
             } else {
                 extensions.freeExtension(allocator, &extension);
             }
         }
     }
 
-    // Invoke external indexers for unsupported languages
-    // Use the first pattern's prefix as the project root for external indexers,
-    // or "." if there are multiple patterns (shell-expanded).
-    const ext_target: []const u8 = if (patterns.items.len == 1)
-        globPrefix(patterns.items[0])
-    else
-        ".";
-    for (unique_exts[0..num_unique]) |*ext| {
-        if (show_progress) {
-            tui.progressUpdate(indexed_count, total_files, total_symbols, ext.name);
-        }
-
-        const result = invokeProjectIndexer(allocator, ext_target, ext) catch continue;
-
-        if (result.backing_data) |data| {
-            backing_buffers.append(allocator, data) catch {};
-        }
-
-        for (result.index.documents) |doc| {
-            mergeDocument(allocator, &master_index, doc);
-            indexed_count += 1;
-            total_symbols += doc.symbols.len;
+    // Invoke external indexers per-file for unsupported languages
+    for (0..num_unique) |ext_idx| {
+        for (ext_files[ext_idx].items) |ext_file_path| {
             if (show_progress) {
-                tui.progressUpdate(indexed_count, total_files, total_symbols, doc.relative_path);
+                tui.progressUpdate(indexed_count, total_files, total_symbols, ext_file_path);
+            }
+
+            const result = invokeIndexerForFile(allocator, ext_file_path, &unique_exts[ext_idx]) catch continue;
+
+            backing_buffers.append(allocator, result.backing_data) catch {};
+            mergeDocument(allocator, &master_index, result.doc);
+            indexed_count += 1;
+            total_symbols += result.doc.symbols.len;
+
+            if (show_progress) {
+                tui.progressUpdate(indexed_count, total_files, total_symbols, ext_file_path);
             }
         }
-
-        allocator.free(result.index.documents);
-        for (result.index.external_symbols) |*sym| {
-            allocator.free(sym.documentation);
-            allocator.free(sym.relationships);
-        }
-        allocator.free(result.index.external_symbols);
     }
 
-    // Free installed extensions tracked during indexing
-    for (unique_exts[0..num_unique]) |*ext| {
-        extensions.freeExtension(allocator, ext);
+    // Free installed extensions and file lists tracked during indexing
+    for (0..num_unique) |ext_idx| {
+        extensions.freeExtension(allocator, &unique_exts[ext_idx]);
+        ext_files[ext_idx].deinit(allocator);
     }
 
     // Encode and write the master index
