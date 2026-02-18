@@ -376,6 +376,42 @@ pub fn freeAbbrevTable(entries: []AbbrevEntry, allocator: std.mem.Allocator) voi
     allocator.free(entries);
 }
 
+/// Cache for type DIE maps, keyed by CU DIE start position.
+/// Avoids rebuilding the type map on every parseScopedVariables call.
+pub const TypeDieCache = struct {
+    map: std.AutoHashMapUnmanaged(usize, std.AutoHashMap(u64, TypeDie)) = .empty,
+
+    pub fn getOrBuild(
+        self: *TypeDieCache,
+        debug_info: []const u8,
+        abbrevs: []const AbbrevEntry,
+        debug_str: ?[]const u8,
+        extra: ExtraSections,
+        str_offsets_base: u64,
+        is_64bit: bool,
+        address_size: u8,
+        start_pos: usize,
+        unit_end: usize,
+        allocator: std.mem.Allocator,
+    ) ?*std.AutoHashMap(u64, TypeDie) {
+        if (self.map.getPtr(start_pos)) |cached| return cached;
+        var type_map = collectTypeDies(debug_info, abbrevs, debug_str, extra, str_offsets_base, is_64bit, address_size, start_pos, unit_end, allocator) catch return null;
+        self.map.put(allocator, start_pos, type_map) catch {
+            type_map.deinit();
+            return null;
+        };
+        return self.map.getPtr(start_pos);
+    }
+
+    pub fn deinit(self: *TypeDieCache, allocator: std.mem.Allocator) void {
+        var it = self.map.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.deinit();
+        }
+        self.map.deinit(allocator);
+    }
+};
+
 /// CU index entry for fast PC-to-CU lookup.
 pub const CuIndexEntry = struct {
     start_pos: usize, // byte offset of CU start in .debug_info
@@ -2903,6 +2939,7 @@ pub fn parseScopedVariables(
     allocator: std.mem.Allocator,
     abbrev_cache: ?*AbbrevCache,
     cu_start_hint: ?usize,
+    type_die_cache: ?*TypeDieCache,
 ) !ScopedVariableResult {
     var variables: std.ArrayListUnmanaged(VariableInfo) = .empty;
     errdefer {
@@ -3062,19 +3099,14 @@ pub fn parseScopedVariables(
         }
 
         // First pass: collect all type DIEs into a rich type map
-        var type_map = collectTypeDies(
-            debug_info,
-            abbrevs,
-            debug_str,
-            extra,
-            str_offsets_base,
-            is_64bit,
-            address_size,
-            pos,
-            unit_end,
-            allocator,
-        ) catch continue;
-        defer type_map.deinit();
+        var type_map_owned: ?std.AutoHashMap(u64, TypeDie) = null;
+        const type_map_ptr: *std.AutoHashMap(u64, TypeDie) = if (type_die_cache) |tdc|
+            tdc.getOrBuild(debug_info, abbrevs, debug_str, extra, str_offsets_base, is_64bit, address_size, pos, unit_end, allocator) orelse continue
+        else blk: {
+            type_map_owned = collectTypeDies(debug_info, abbrevs, debug_str, extra, str_offsets_base, is_64bit, address_size, pos, unit_end, allocator) catch continue;
+            break :blk &type_map_owned.?;
+        };
+        defer if (type_map_owned != null) type_map_owned.?.deinit();
 
         // Second pass: walk DIEs tracking depth to find the target subprogram
         var depth: u32 = 0;
