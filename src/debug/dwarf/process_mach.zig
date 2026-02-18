@@ -108,6 +108,7 @@ pub const MachProcessControl = struct {
     stdout_pipe_read: ?posix.fd_t = null,
     stderr_pipe_read: ?posix.fd_t = null,
     cached_task: ?std.c.mach_port_name_t = null,
+    cached_thread: ?std.c.mach_port_t = null,
 
     /// Read available data from the captured stdout pipe.
     /// Returns null if no stdout pipe is configured.
@@ -249,7 +250,33 @@ pub const MachProcessControl = struct {
             const status = result.status;
             // WIFEXITED: (status & 0x7f) == 0
             if ((status & 0x7f) == 0) {
+                self.pid = null;
+                self.cached_task = null;
+                self.cached_thread = null;
+                if (self.stdout_pipe_read) |fd| {
+                    posix.close(fd);
+                    self.stdout_pipe_read = null;
+                }
+                if (self.stderr_pipe_read) |fd| {
+                    posix.close(fd);
+                    self.stderr_pipe_read = null;
+                }
                 return .{ .status = .exited, .exit_code = @intCast((status >> 8) & 0xff) };
+            }
+            // WIFSIGNALED: low 7 bits are signal number (non-zero, not 0x7f)
+            if ((status & 0x7f) != 0 and (status & 0x7f) != 0x7f) {
+                self.pid = null;
+                self.cached_task = null;
+                self.cached_thread = null;
+                if (self.stdout_pipe_read) |fd| {
+                    posix.close(fd);
+                    self.stdout_pipe_read = null;
+                }
+                if (self.stderr_pipe_read) |fd| {
+                    posix.close(fd);
+                    self.stderr_pipe_read = null;
+                }
+                return .{ .status = .signaled, .signal = @intCast(status & 0x7f) };
             }
             // WIFSTOPPED: (status & 0xff) == 0x7f
             if ((status & 0xff) == 0x7f) {
@@ -264,21 +291,10 @@ pub const MachProcessControl = struct {
         if (self.pid == null) return error.NoProcess;
         if (builtin.os.tag != .macos) return .{};
 
-        const task = try self.getTask();
-
-        var threads: std.c.mach_port_array_t = undefined;
-        var thread_count: std.c.mach_msg_type_number_t = undefined;
-        var kr = std.c.task_threads(task, &threads, &thread_count);
-        if (kr != 0) return error.TaskThreadsFailed;
-        defer {
-            const size = @sizeOf(std.c.mach_port_t) * thread_count;
-            _ = std.c.vm_deallocate(std.c.mach_task_self(), @intFromPtr(threads), size);
-        }
-
-        if (thread_count == 0) return error.NoThreads;
-        const thread = threads[0];
+        const thread = try self.getThread();
 
         const is_arm = builtin.cpu.arch == .aarch64;
+        var kr: std.c.kern_return_t = undefined;
         if (is_arm) {
             var state: ArmThreadState64 = undefined;
             var count: std.c.mach_msg_type_number_t = ARM_THREAD_STATE64_COUNT;
@@ -337,21 +353,10 @@ pub const MachProcessControl = struct {
         if (self.pid == null) return error.NoProcess;
         if (builtin.os.tag != .macos) return .{};
 
-        const task = try self.getTask();
-
-        var threads: std.c.mach_port_array_t = undefined;
-        var thread_count: std.c.mach_msg_type_number_t = undefined;
-        var kr = std.c.task_threads(task, &threads, &thread_count);
-        if (kr != 0) return error.TaskThreadsFailed;
-        defer {
-            const size = @sizeOf(std.c.mach_port_t) * thread_count;
-            _ = std.c.vm_deallocate(std.c.mach_task_self(), @intFromPtr(threads), size);
-        }
-
-        if (thread_count == 0) return error.NoThreads;
-        const thread = threads[0];
+        const thread = try self.getThread();
 
         const is_arm = builtin.cpu.arch == .aarch64;
+        var kr: std.c.kern_return_t = undefined;
         if (is_arm) {
             var state: ArmNeonState64 = undefined;
             var count: std.c.mach_msg_type_number_t = ARM_NEON_STATE64_COUNT;
@@ -387,21 +392,10 @@ pub const MachProcessControl = struct {
         if (self.pid == null) return error.NoProcess;
         if (builtin.os.tag != .macos) return;
 
-        const task = try self.getTask();
-
-        var threads: std.c.mach_port_array_t = undefined;
-        var thread_count: std.c.mach_msg_type_number_t = undefined;
-        var kr = std.c.task_threads(task, &threads, &thread_count);
-        if (kr != 0) return error.TaskThreadsFailed;
-        defer {
-            const size = @sizeOf(std.c.mach_port_t) * thread_count;
-            _ = std.c.vm_deallocate(std.c.mach_task_self(), @intFromPtr(threads), size);
-        }
-
-        if (thread_count == 0) return error.NoThreads;
-        const thread = threads[0];
+        const thread = try self.getThread();
 
         const is_arm = builtin.cpu.arch == .aarch64;
+        var kr: std.c.kern_return_t = undefined;
         if (is_arm) {
             var state: ArmThreadState64 = undefined;
             var count: std.c.mach_msg_type_number_t = ARM_THREAD_STATE64_COUNT;
@@ -501,6 +495,23 @@ pub const MachProcessControl = struct {
         return task;
     }
 
+    /// Get the main thread port for the traced process.
+    pub fn getThread(self: *MachProcessControl) !std.c.mach_port_t {
+        if (self.cached_thread) |thread| return thread;
+        const task = try self.getTask();
+        var threads: std.c.mach_port_array_t = undefined;
+        var thread_count: std.c.mach_msg_type_number_t = undefined;
+        const kr = std.c.task_threads(task, &threads, &thread_count);
+        if (kr != 0) return error.TaskThreadsFailed;
+        defer {
+            const size = @sizeOf(std.c.mach_port_t) * thread_count;
+            _ = std.c.vm_deallocate(std.c.mach_task_self(), @intFromPtr(threads), size);
+        }
+        if (thread_count == 0) return error.NoThreads;
+        self.cached_thread = threads[0];
+        return threads[0];
+    }
+
     /// Find the actual __TEXT segment base address in the running process.
     /// Used to compute the ASLR slide for breakpoint address resolution.
     pub fn getTextBase(self: *MachProcessControl) !u64 {
@@ -554,15 +565,16 @@ pub const MachProcessControl = struct {
             self.pid = null;
             self.is_running = false;
             self.cached_task = null;
-            // Close captured output pipes
-            if (self.stdout_pipe_read) |fd| {
-                posix.close(fd);
-                self.stdout_pipe_read = null;
-            }
-            if (self.stderr_pipe_read) |fd| {
-                posix.close(fd);
-                self.stderr_pipe_read = null;
-            }
+            self.cached_thread = null;
+        }
+        // Close captured output pipes (even if pid was already null from natural exit)
+        if (self.stdout_pipe_read) |fd| {
+            posix.close(fd);
+            self.stdout_pipe_read = null;
+        }
+        if (self.stderr_pipe_read) |fd| {
+            posix.close(fd);
+            self.stderr_pipe_read = null;
         }
     }
 
@@ -584,8 +596,18 @@ pub const MachProcessControl = struct {
                 const PT_DETACH = 11;
                 _ = std.c.ptrace(PT_DETACH, pid, null, 0);
             }
-            self.pid = null;
+            // Do NOT null self.pid — let kill() in deinit handle cleanup
+            // so the process is properly killed and reaped
             self.is_running = false;
+            // Close pipes since we are done with this session
+            if (self.stdout_pipe_read) |fd| {
+                posix.close(fd);
+                self.stdout_pipe_read = null;
+            }
+            if (self.stderr_pipe_read) |fd| {
+                posix.close(fd);
+                self.stderr_pipe_read = null;
+            }
         }
     }
 };
