@@ -731,12 +731,15 @@ fn sendRequest(allocator: std.mem.Allocator, request: []const u8) void {
     };
     defer posix.close(sock);
 
-    // Send request
-    _ = posix.write(sock, request) catch {
+    // Send request (single writev for request + newline)
+    const iovecs = [_]posix.iovec_const{
+        .{ .base = request.ptr, .len = request.len },
+        .{ .base = "\n", .len = 1 },
+    };
+    _ = posix.writev(sock, &iovecs) catch {
         printErr("error: failed to send request to daemon\n");
         return;
     };
-    _ = posix.write(sock, "\n") catch {};
 
     // Shutdown write side to signal end of request
     std.posix.shutdown(sock, .send) catch {};
@@ -761,7 +764,15 @@ fn sendRequest(allocator: std.mem.Allocator, request: []const u8) void {
     var response = resp_buf.items;
     if (response.len > 0 and response[response.len - 1] == '\n') response = response[0 .. response.len - 1];
 
-    // Parse the response to check for errors
+    // Fast path: extract result substring without full JSON parse-reserialize
+    const ok_prefix = "{\"ok\":true,\"result\":";
+    if (std.mem.startsWith(u8, response, ok_prefix) and response.len > ok_prefix.len and response[response.len - 1] == '}') {
+        writeStdout(response[ok_prefix.len .. response.len - 1]);
+        writeStdout("\n");
+        return;
+    }
+
+    // Fallback: full JSON parse for error responses and unexpected formats
     const resp_parsed = json.parseFromSlice(json.Value, allocator, response, .{}) catch {
         writeStdout(response);
         writeStdout("\n");
@@ -795,7 +806,7 @@ fn sendRequest(allocator: std.mem.Allocator, request: []const u8) void {
         }
     }
 
-    // Success - extract and print the result field
+    // Success with non-standard format - extract and print the result field
     if (resp_parsed.value.object.get("result")) |result_val| {
         var result_aw: Writer.Allocating = .init(allocator);
         defer result_aw.deinit();
