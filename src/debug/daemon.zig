@@ -163,8 +163,8 @@ pub const DaemonServer = struct {
         };
 
         switch (result) {
-            .ok => |raw| {
-                defer self.allocator.free(raw);
+            .ok, .ok_static => |raw| {
+                defer if (result == .ok) self.allocator.free(raw);
                 // Build response: {"ok":true,"result":<raw>}
                 var aw: Writer.Allocating = .init(self.allocator);
                 defer aw.deinit();

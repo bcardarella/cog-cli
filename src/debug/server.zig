@@ -348,6 +348,7 @@ pub const debug_poll_events_schema =
 
 pub const ToolResult = union(enum) {
     ok: []const u8, // raw JSON result string (caller-owned)
+    ok_static: []const u8, // raw JSON result string (static literal, not freed)
     err: ToolError,
 
     pub const ToolError = struct {
@@ -622,7 +623,7 @@ pub const DebugServer = struct {
                 .line = 0,
             });
 
-            return .{ .ok = try allocator.dupe(u8, "{\"removed\":true}") };
+            return .{ .ok_static = "{\"removed\":true}" };
         } else if (std.mem.eql(u8, action_str, "list")) {
             const bps = session.driver.listBreakpoints(allocator) catch |err| {
                 self.dashboard.onError("debug_breakpoint", @errorName(err));
@@ -689,7 +690,7 @@ pub const DebugServer = struct {
                 return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
             };
 
-            return .{ .ok = try allocator.dupe(u8, "{\"exception_breakpoints_set\":true}") };
+            return .{ .ok_static = "{\"exception_breakpoints_set\":true}" };
         } else {
             return .{ .err = .{ .code = INVALID_PARAMS, .message = "action must be set, remove, list, set_function, or set_exception" } };
         }
@@ -842,7 +843,7 @@ pub const DebugServer = struct {
         defer allocator.free(id_copy);
         _ = self.session_manager.destroySession(id_copy);
 
-        return .{ .ok = try allocator.dupe(u8, "{\"stopped\":true}") };
+        return .{ .ok_static = "{\"stopped\":true}" };
     }
 
     // ── New Tool Implementations (Phase 3) ────────────────────────────
@@ -999,7 +1000,7 @@ pub const DebugServer = struct {
             };
             self.dashboard.onMemory(session_id_val.string, "write", addr_val.string);
 
-            return .{ .ok = try allocator.dupe(u8, "{\"written\":true}") };
+            return .{ .ok_static = "{\"written\":true}" };
         } else {
             return .{ .err = .{ .code = INVALID_PARAMS, .message = "action must be read or write" } };
         }
@@ -1461,7 +1462,7 @@ pub const DebugServer = struct {
         };
         self.dashboard.onRestartFrame(session_id_val.string, @intCast(frame_id_val.integer));
 
-        return .{ .ok = try allocator.dupe(u8, "{\"restarted\":true}") };
+        return .{ .ok_static = "{\"restarted\":true}" };
     }
 
     // ── Phase 7 Tool Implementations ────────────────────────────────
@@ -1685,7 +1686,7 @@ pub const DebugServer = struct {
         };
         self.dashboard.onCancel(session_id_val.string);
 
-        return .{ .ok = try allocator.dupe(u8, "{\"cancelled\":true}") };
+        return .{ .ok_static = "{\"cancelled\":true}" };
     }
 
     fn toolTerminateThreads(self: *DebugServer, allocator: std.mem.Allocator, args: ?json.Value) !ToolResult {
@@ -1715,7 +1716,7 @@ pub const DebugServer = struct {
         };
         self.dashboard.onTerminateThreads(session_id_val.string, id_list.items.len);
 
-        return .{ .ok = try allocator.dupe(u8, "{\"terminated\":true}") };
+        return .{ .ok_static = "{\"terminated\":true}" };
     }
 
     fn toolRestart(self: *DebugServer, allocator: std.mem.Allocator, args: ?json.Value) !ToolResult {
@@ -1734,7 +1735,7 @@ pub const DebugServer = struct {
         };
         self.dashboard.onRestart(session_id_val.string);
 
-        return .{ .ok = try allocator.dupe(u8, "{\"restarted\":true}") };
+        return .{ .ok_static = "{\"restarted\":true}" };
     }
 
     // ── Phase 4: New Tool Implementations ────────────────────────────────
@@ -1852,7 +1853,7 @@ pub const DebugServer = struct {
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
 
-        return .{ .ok = try allocator.dupe(u8, "{\"written\":true}") };
+        return .{ .ok_static = "{\"written\":true}" };
     }
 
     fn toolVariableLocation(self: *DebugServer, allocator: std.mem.Allocator, args: ?json.Value) !ToolResult {
@@ -2202,7 +2203,7 @@ test "callTool returns error for unknown tool" {
     const result = try srv.callTool(allocator, "nonexistent_tool", null);
     switch (result) {
         .err => |e| try std.testing.expectEqual(METHOD_NOT_FOUND, e.code),
-        .ok => unreachable,
+        .ok, .ok_static => unreachable,
     }
 }
 
@@ -2221,7 +2222,9 @@ test "callTool dispatches debug_stop" {
     switch (result) {
         .ok => |raw| {
             defer allocator.free(raw);
-            // Should contain stopped:true
+            try std.testing.expect(std.mem.indexOf(u8, raw, "\"stopped\":true") != null);
+        },
+        .ok_static => |raw| {
             try std.testing.expect(std.mem.indexOf(u8, raw, "\"stopped\":true") != null);
         },
         .err => unreachable,
