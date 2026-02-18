@@ -147,6 +147,147 @@ pub const FdeEntry = struct {
     instructions: []const u8,
 };
 
+/// Pre-built index of FDE entries for O(log n) PC-to-FDE lookup.
+pub const EhFrameIndex = struct {
+    entries: []FdeIndexEntry,
+
+    pub const FdeIndexEntry = struct {
+        initial_location: u64,
+        address_range: u64,
+        fde_offset: usize, // byte offset of FDE entry start in eh_frame
+        cie_offset: usize, // byte offset of associated CIE
+    };
+
+    /// Binary search for the FDE covering a given PC.
+    pub fn findFde(self: *const EhFrameIndex, pc: u64) ?*const FdeIndexEntry {
+        if (self.entries.len == 0) return null;
+        // Binary search: find rightmost entry with initial_location <= pc
+        var lo: usize = 0;
+        var hi: usize = self.entries.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (self.entries[mid].initial_location <= pc) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        if (lo == 0) return null;
+        const entry = &self.entries[lo - 1];
+        if (pc >= entry.initial_location and pc < entry.initial_location + entry.address_range) {
+            return entry;
+        }
+        return null;
+    }
+
+    pub fn deinit(self: *EhFrameIndex, allocator: std.mem.Allocator) void {
+        if (self.entries.len > 0) allocator.free(self.entries);
+    }
+};
+
+/// Build an FDE index from eh_frame data for fast PC lookups.
+/// Single pass through eh_frame parsing only headers (length, CIE_id, initial_location, range).
+pub fn buildEhFrameIndex(data: []const u8, allocator: std.mem.Allocator) !EhFrameIndex {
+    var entries: std.ArrayListUnmanaged(EhFrameIndex.FdeIndexEntry) = .empty;
+    errdefer entries.deinit(allocator);
+
+    var pos: usize = 0;
+    while (pos < data.len) {
+        const entry_start = pos;
+
+        if (pos + 4 > data.len) break;
+        const length_32 = std.mem.readInt(u32, data[pos..][0..4], .little);
+        pos += 4;
+        if (length_32 == 0) break;
+
+        var length: u64 = length_32;
+        if (length_32 == 0xFFFFFFFF) {
+            if (pos + 8 > data.len) break;
+            length = std.mem.readInt(u64, data[pos..][0..8], .little);
+            pos += 8;
+        }
+
+        const entry_data_start = pos;
+        const entry_end = entry_data_start + @as(usize, @intCast(length));
+        if (entry_end > data.len) break;
+
+        if (pos + 4 > data.len) break;
+        const cie_id = std.mem.readInt(u32, data[pos..][0..4], .little);
+        pos += 4;
+
+        if (cie_id == 0) {
+            pos = entry_end;
+            continue;
+        }
+
+        // FDE — extract header info for index
+        const cie_offset = entry_data_start - @as(usize, cie_id);
+        const cie = parseCie(data, cie_offset);
+        const fde_enc: u8 = if (cie) |c| c.fde_encoding else 0xFF;
+
+        const addr_field_pc = @as(u64, @intCast(pos));
+        const initial_location = if (fde_enc != 0xFF)
+            readEncodedPointer(data, &pos, fde_enc, addr_field_pc) orelse {
+                pos = entry_end;
+                continue;
+            }
+        else blk: {
+            if (pos + 8 > data.len) break :blk @as(u64, 0);
+            const v = std.mem.readInt(u64, data[pos..][0..8], .little);
+            pos += 8;
+            break :blk v;
+        };
+        const range_enc = fde_enc & 0x0F;
+        const address_range = if (fde_enc != 0xFF)
+            readEncodedPointer(data, &pos, range_enc, 0) orelse {
+                pos = entry_end;
+                continue;
+            }
+        else blk: {
+            if (pos + 8 > data.len) break :blk @as(u64, 0);
+            const v = std.mem.readInt(u64, data[pos..][0..8], .little);
+            pos += 8;
+            break :blk v;
+        };
+
+        try entries.append(allocator, .{
+            .initial_location = initial_location,
+            .address_range = address_range,
+            .fde_offset = entry_start,
+            .cie_offset = cie_offset,
+        });
+
+        pos = entry_end;
+    }
+
+    const result = try entries.toOwnedSlice(allocator);
+
+    // Sort by initial_location for binary search
+    std.mem.sort(EhFrameIndex.FdeIndexEntry, result, {}, struct {
+        fn lessThan(_: void, a: EhFrameIndex.FdeIndexEntry, b: EhFrameIndex.FdeIndexEntry) bool {
+            return a.initial_location < b.initial_location;
+        }
+    }.lessThan);
+
+    return .{ .entries = result };
+}
+
+/// CIE cache to avoid re-parsing the same CIE for multiple FDEs.
+pub const CieCache = struct {
+    map: std.AutoHashMapUnmanaged(usize, CieEntry) = .empty,
+
+    pub fn getOrParse(self: *CieCache, data: []const u8, cie_offset: usize, allocator: std.mem.Allocator) ?CieEntry {
+        if (self.map.get(cie_offset)) |entry| return entry;
+        const cie = parseCie(data, cie_offset) orelse return null;
+        self.map.put(allocator, cie_offset, cie) catch return cie;
+        return cie;
+    }
+
+    pub fn deinit(self: *CieCache, allocator: std.mem.Allocator) void {
+        self.map.deinit(allocator);
+    }
+};
+
 /// Parse .eh_frame section to extract CIE and FDE entries.
 pub fn parseEhFrame(data: []const u8, allocator: std.mem.Allocator) ![]FdeEntry {
     var fdes: std.ArrayListUnmanaged(FdeEntry) = .empty;
@@ -582,14 +723,26 @@ pub const CfaUnwindResult = struct {
 /// Returns the CFA value, return address, and register recovery rules.
 /// The `ctx` parameter is passed through to the reader callbacks, allowing
 /// callers to supply process state without requiring closures.
+/// When `index` and `cie_cache` are provided, uses O(log n) FDE lookup and cached CIE parsing.
 pub fn unwindCfa(
     eh_frame_data: []const u8,
     target_pc: u64,
     ctx: *anyopaque,
     reg_reader: *const fn (ctx: *anyopaque, reg: u64) ?u64,
     mem_reader: *const fn (ctx: *anyopaque, addr: u64, size: usize) ?u64,
+    index: ?*const EhFrameIndex,
+    cie_cache: ?*CieCache,
+    allocator: std.mem.Allocator,
 ) ?CfaUnwindResult {
-    // Parse FDEs to find one covering target_pc
+    // Fast path: use pre-built index for O(log n) FDE lookup
+    if (index) |idx| {
+        if (idx.findFde(target_pc)) |fde_entry| {
+            return unwindCfaFromFde(eh_frame_data, target_pc, fde_entry.fde_offset, fde_entry.cie_offset, ctx, reg_reader, mem_reader, cie_cache, allocator);
+        }
+        return null;
+    }
+
+    // Fallback: linear scan of eh_frame data
     var pos: usize = 0;
 
     while (pos < eh_frame_data.len) {
@@ -616,34 +769,32 @@ pub fn unwindCfa(
         pos += 4;
 
         if (cie_id == 0) {
-            // CIE — skip
             pos = entry_end;
             continue;
         }
 
-        // FDE — parse the corresponding CIE first to get pointer encoding
         const cie_offset = entry_data_start - @as(usize, cie_id);
-        const cie = parseCie(eh_frame_data, cie_offset) orelse {
+        const cie = if (cie_cache) |cc| cc.getOrParse(eh_frame_data, cie_offset, allocator) orelse {
+            pos = entry_end;
+            continue;
+        } else parseCie(eh_frame_data, cie_offset) orelse {
             pos = entry_end;
             continue;
         };
 
-        // Read initial location and address range using the CIE's FDE encoding
-        const addr_field_pc = @as(u64, @intCast(pos)); // Address of this field (for pcrel)
+        const addr_field_pc = @as(u64, @intCast(pos));
         const initial_location = if (cie.fde_encoding != 0xFF)
             readEncodedPointer(eh_frame_data, &pos, cie.fde_encoding, addr_field_pc) orelse {
                 pos = entry_end;
                 continue;
             }
         else blk: {
-            // No encoding specified — default to 8-byte absolute
             if (pos + 8 > eh_frame_data.len) break :blk @as(u64, 0);
             const v = std.mem.readInt(u64, eh_frame_data[pos..][0..8], .little);
             pos += 8;
             break :blk v;
         };
-        // Address range uses same value format but is always absolute (not pcrel)
-        const range_encoding = cie.fde_encoding & 0x0F; // Strip relocation, keep value format
+        const range_encoding = cie.fde_encoding & 0x0F;
         const address_range = if (cie.fde_encoding != 0xFF)
             readEncodedPointer(eh_frame_data, &pos, range_encoding, 0) orelse {
                 pos = entry_end;
@@ -656,81 +807,8 @@ pub fn unwindCfa(
             break :blk v;
         };
 
-        // Check if this FDE covers target_pc
         if (target_pc >= initial_location and target_pc < initial_location + address_range) {
-
-            // Skip augmentation data
-            if (cie.augmentation.len > 0 and cie.augmentation[0] == 'z') {
-                const aug_len = parser.readULEB128(eh_frame_data, &pos) catch {
-                    pos = entry_end;
-                    continue;
-                };
-                pos += @intCast(aug_len);
-            }
-
-            const fde_instructions = if (pos < entry_end) eh_frame_data[pos..entry_end] else &[_]u8{};
-
-            // Execute CIE initial instructions, then FDE instructions
-            var state = CfaState{};
-            executeCfaInstructions(cie.initial_instructions, cie, target_pc, initial_location, &state, null);
-            // Capture CIE initial state so DW_CFA_restore can reference it
-            const cie_initial = state;
-            executeCfaInstructions(fde_instructions, cie, target_pc, initial_location, &state, &cie_initial);
-
-            // Compute CFA value
-            const cfa = if (state.cfa_expression) |cfa_expr| blk: {
-                // CFA defined by a DWARF expression — try fast path for common DW_OP_bregN pattern
-                if (cfa_expr.len >= 2 and cfa_expr[0] >= 0x70 and cfa_expr[0] <= 0x8f) {
-                    const breg = @as(u64, cfa_expr[0] - 0x70);
-                    var expr_pos: usize = 1;
-                    const offset = parser.readSLEB128(cfa_expr, &expr_pos) catch break :blk @as(u64, 0);
-                    const base = reg_reader(ctx, breg) orelse break :blk @as(u64, 0);
-                    break :blk if (offset >= 0)
-                        base +% @as(u64, @intCast(offset))
-                    else
-                        base -% @as(u64, @intCast(-offset));
-                }
-                // Fall back to full DWARF expression evaluator
-                const reg_provider = location.RegisterProvider{
-                    .ptr = ctx,
-                    .readFn = reg_reader,
-                };
-                const result = location.evalLocation(cfa_expr, reg_provider, null);
-                switch (result) {
-                    .address => |addr| break :blk addr,
-                    .value => |val| break :blk val,
-                    else => break :blk @as(u64, 0),
-                }
-            } else blk: {
-                const cfa_reg_val = reg_reader(ctx, state.cfa_register) orelse return null;
-                break :blk if (state.cfa_offset >= 0)
-                    cfa_reg_val +% @as(u64, @intCast(state.cfa_offset))
-                else
-                    cfa_reg_val -% @as(u64, @intCast(-state.cfa_offset));
-            };
-
-            // Get return address from CFA rules
-            var ret_addr: u64 = 0;
-            if (state.return_address_register < MAX_CFA_RULES) {
-                switch (state.rules[@intCast(state.return_address_register)]) {
-                    .offset => |off| {
-                        const addr = if (off >= 0)
-                            cfa +% @as(u64, @intCast(off))
-                        else
-                            cfa -% @as(u64, @intCast(-off));
-                        ret_addr = mem_reader(ctx, addr, 8) orelse return null;
-                    },
-                    .register => |reg| {
-                        ret_addr = reg_reader(ctx, reg) orelse return null;
-                    },
-                    .same_value => {
-                        ret_addr = reg_reader(ctx, state.return_address_register) orelse return null;
-                    },
-                    else => return null,
-                }
-            }
-
-            return .{ .cfa = cfa, .return_address = ret_addr, .rules = state.rules };
+            return computeCfaResult(eh_frame_data, target_pc, initial_location, entry_end, &pos, cie, ctx, reg_reader, mem_reader);
         }
 
         _ = entry_start;
@@ -738,6 +816,146 @@ pub fn unwindCfa(
     }
 
     return null;
+}
+
+/// Unwind CFA from a known FDE offset (used by index-based fast path).
+fn unwindCfaFromFde(
+    eh_frame_data: []const u8,
+    target_pc: u64,
+    fde_offset: usize,
+    cie_offset: usize,
+    ctx: *anyopaque,
+    reg_reader: *const fn (ctx: *anyopaque, reg: u64) ?u64,
+    mem_reader: *const fn (ctx: *anyopaque, addr: u64, size: usize) ?u64,
+    cie_cache: ?*CieCache,
+    allocator: std.mem.Allocator,
+) ?CfaUnwindResult {
+    var pos = fde_offset;
+
+    // Parse FDE length
+    if (pos + 4 > eh_frame_data.len) return null;
+    const length_32 = std.mem.readInt(u32, eh_frame_data[pos..][0..4], .little);
+    pos += 4;
+    if (length_32 == 0) return null;
+
+    var length: u64 = length_32;
+    if (length_32 == 0xFFFFFFFF) {
+        if (pos + 8 > eh_frame_data.len) return null;
+        length = std.mem.readInt(u64, eh_frame_data[pos..][0..8], .little);
+        pos += 8;
+    }
+
+    const entry_data_start = pos;
+    const entry_end = entry_data_start + @as(usize, @intCast(length));
+    if (entry_end > eh_frame_data.len) return null;
+
+    // Skip CIE pointer field
+    pos += 4;
+
+    // Get CIE (from cache or parse)
+    const cie = if (cie_cache) |cc| cc.getOrParse(eh_frame_data, cie_offset, allocator) orelse return null else parseCie(eh_frame_data, cie_offset) orelse return null;
+
+    // Skip initial_location and address_range (we already know them from the index)
+    const addr_field_pc = @as(u64, @intCast(pos));
+    const initial_location = if (cie.fde_encoding != 0xFF)
+        readEncodedPointer(eh_frame_data, &pos, cie.fde_encoding, addr_field_pc) orelse return null
+    else blk: {
+        if (pos + 8 > eh_frame_data.len) return null;
+        const v = std.mem.readInt(u64, eh_frame_data[pos..][0..8], .little);
+        pos += 8;
+        break :blk v;
+    };
+    const range_enc = cie.fde_encoding & 0x0F;
+    _ = if (cie.fde_encoding != 0xFF)
+        readEncodedPointer(eh_frame_data, &pos, range_enc, 0) orelse return null
+    else blk: {
+        if (pos + 8 > eh_frame_data.len) return null;
+        const v = std.mem.readInt(u64, eh_frame_data[pos..][0..8], .little);
+        pos += 8;
+        break :blk v;
+    };
+
+    return computeCfaResult(eh_frame_data, target_pc, initial_location, entry_end, &pos, cie, ctx, reg_reader, mem_reader);
+}
+
+/// Shared computation: given a matching FDE, compute CFA result.
+fn computeCfaResult(
+    eh_frame_data: []const u8,
+    target_pc: u64,
+    initial_location: u64,
+    entry_end: usize,
+    pos: *usize,
+    cie: CieEntry,
+    ctx: *anyopaque,
+    reg_reader: *const fn (ctx: *anyopaque, reg: u64) ?u64,
+    mem_reader: *const fn (ctx: *anyopaque, addr: u64, size: usize) ?u64,
+) ?CfaUnwindResult {
+    // Skip augmentation data
+    if (cie.augmentation.len > 0 and cie.augmentation[0] == 'z') {
+        const aug_len = parser.readULEB128(eh_frame_data, pos) catch return null;
+        pos.* += @intCast(aug_len);
+    }
+
+    const fde_instructions = if (pos.* < entry_end) eh_frame_data[pos.*..entry_end] else &[_]u8{};
+
+    // Execute CIE initial instructions, then FDE instructions
+    var state = CfaState{};
+    executeCfaInstructions(cie.initial_instructions, cie, target_pc, initial_location, &state, null);
+    const cie_initial = state;
+    executeCfaInstructions(fde_instructions, cie, target_pc, initial_location, &state, &cie_initial);
+
+    // Compute CFA value
+    const cfa = if (state.cfa_expression) |cfa_expr| blk: {
+        if (cfa_expr.len >= 2 and cfa_expr[0] >= 0x70 and cfa_expr[0] <= 0x8f) {
+            const breg = @as(u64, cfa_expr[0] - 0x70);
+            var expr_pos: usize = 1;
+            const offset = parser.readSLEB128(cfa_expr, &expr_pos) catch break :blk @as(u64, 0);
+            const base = reg_reader(ctx, breg) orelse break :blk @as(u64, 0);
+            break :blk if (offset >= 0)
+                base +% @as(u64, @intCast(offset))
+            else
+                base -% @as(u64, @intCast(-offset));
+        }
+        const reg_provider = location.RegisterProvider{
+            .ptr = ctx,
+            .readFn = reg_reader,
+        };
+        const result = location.evalLocation(cfa_expr, reg_provider, null);
+        switch (result) {
+            .address => |addr| break :blk addr,
+            .value => |val| break :blk val,
+            else => break :blk @as(u64, 0),
+        }
+    } else blk: {
+        const cfa_reg_val = reg_reader(ctx, state.cfa_register) orelse return null;
+        break :blk if (state.cfa_offset >= 0)
+            cfa_reg_val +% @as(u64, @intCast(state.cfa_offset))
+        else
+            cfa_reg_val -% @as(u64, @intCast(-state.cfa_offset));
+    };
+
+    // Get return address from CFA rules
+    var ret_addr: u64 = 0;
+    if (state.return_address_register < MAX_CFA_RULES) {
+        switch (state.rules[@intCast(state.return_address_register)]) {
+            .offset => |off| {
+                const addr = if (off >= 0)
+                    cfa +% @as(u64, @intCast(off))
+                else
+                    cfa -% @as(u64, @intCast(-off));
+                ret_addr = mem_reader(ctx, addr, 8) orelse return null;
+            },
+            .register => |reg| {
+                ret_addr = reg_reader(ctx, reg) orelse return null;
+            },
+            .same_value => {
+                ret_addr = reg_reader(ctx, state.return_address_register) orelse return null;
+            },
+            else => return null,
+        }
+    }
+
+    return .{ .cfa = cfa, .return_address = ret_addr, .rules = state.rules };
 }
 
 /// Context for CFA unwinding with virtual register state.
@@ -778,6 +996,8 @@ pub fn unwindStackCfa(
     mem_reader: *const fn (ctx: *anyopaque, addr: u64, size: usize) ?u64,
     allocator: std.mem.Allocator,
     max_depth: u32,
+    fde_index: ?*const EhFrameIndex,
+    cie_cache: ?*CieCache,
 ) ![]UnwindFrame {
     var frames: std.ArrayListUnmanaged(UnwindFrame) = .empty;
     errdefer frames.deinit(allocator);
@@ -826,6 +1046,9 @@ pub fn unwindStackCfa(
             @ptrCast(&virt_ctx),
             &VirtualRegCtx.regReader,
             &VirtualRegCtx.memReader,
+            fde_index,
+            cie_cache,
+            allocator,
         ) orelse break;
         if (result.return_address == 0) break;
 
@@ -1356,7 +1579,7 @@ test "unwindCfa returns null for empty eh_frame" {
     };
     var dummy: u8 = 0;
     const ctx: *anyopaque = @ptrCast(&dummy);
-    const result = unwindCfa(&[_]u8{}, 0x1000, ctx, &TestCtx.regReader, &TestCtx.memReader);
+    const result = unwindCfa(&[_]u8{}, 0x1000, ctx, &TestCtx.regReader, &TestCtx.memReader, null, null, std.testing.allocator);
     try std.testing.expect(result == null);
 }
 
@@ -1394,6 +1617,6 @@ test "unwindCfa returns null when no FDE covers target PC" {
     // Terminator
     std.mem.writeInt(u32, frame_data[36..40], 0, .little);
 
-    const result = unwindCfa(&frame_data, 0x2000, ctx, &TestCtx.regReader, &TestCtx.memReader);
+    const result = unwindCfa(&frame_data, 0x2000, ctx, &TestCtx.regReader, &TestCtx.memReader, null, null, std.testing.allocator);
     try std.testing.expect(result == null);
 }

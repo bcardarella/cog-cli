@@ -60,6 +60,10 @@ pub const DwarfEngine = struct {
     type_units: []parser.TypeUnitEntry = &.{},
     /// Split DWARF: skeleton CU info for matching DWO binaries
     skeleton_cus: []const parser.SkeletonCuInfo = &.{},
+    /// Pre-built FDE index for fast PC-to-FDE lookup in eh_frame
+    eh_frame_index: ?unwind.EhFrameIndex = null,
+    /// CIE cache to avoid re-parsing CIEs during CFA unwinding
+    cie_cache: ?unwind.CieCache = null,
 
     pub fn init(allocator: std.mem.Allocator) DwarfEngine {
         return .{
@@ -92,6 +96,8 @@ pub const DwarfEngine = struct {
         if (self.dwo_elf_binaries.len > 0) self.allocator.free(self.dwo_elf_binaries);
         if (self.type_units.len > 0) self.allocator.free(self.type_units);
         if (self.skeleton_cus.len > 0) self.allocator.free(self.skeleton_cus);
+        if (self.eh_frame_index) |*idx| idx.deinit(self.allocator);
+        if (self.cie_cache) |*cc| cc.deinit(self.allocator);
         if (self.dsym_binary) |*b| b.deinit(self.allocator);
         if (self.binary) |*b| b.deinit(self.allocator);
         if (self.elf_binary) |*b| b.deinit(self.allocator);
@@ -209,6 +215,14 @@ pub const DwarfEngine = struct {
             self.loadDebugInfoMachO(program);
         } else if (builtin.os.tag == .linux) {
             self.loadDebugInfoElf(program);
+        }
+
+        // Build FDE index for fast CFA unwinding
+        if (self.resolveEhFrameData()) |eh_frame_data| {
+            self.eh_frame_index = unwind.buildEhFrameIndex(eh_frame_data, self.allocator) catch null;
+            if (self.eh_frame_index != null) {
+                self.cie_cache = .{};
+            }
         }
 
         // Sort line entries and functions for binary search lookups
@@ -1182,6 +1196,8 @@ pub const DwarfEngine = struct {
                     &CfaReaderCtx.memReader,
                     self.allocator,
                     50,
+                    if (self.eh_frame_index) |*idx| idx else null,
+                    if (self.cie_cache) |*cc| cc else null,
                 ) catch fp_frames;
 
                 // Use CFA result only if it's better than FP result
