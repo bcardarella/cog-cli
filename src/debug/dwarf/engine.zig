@@ -1193,11 +1193,14 @@ pub const DwarfEngine = struct {
             50,
         );
 
-        // Always try CFA-based unwinding and use whichever result has more frames.
-        // FP-based unwinding can miss frames for code compiled without frame pointers
-        // or when intermediate frames don't chain FP correctly.
+        // Skip CFA unwinding if FP trace looks complete (reached main/_start)
+        // This avoids the overhead of CFA unwinding when FP unwinding already produced a full trace.
         var unwind_frames = fp_frames;
-        {
+        const fp_complete = fp_frames.len >= 2 and blk: {
+            const last_name = fp_frames[fp_frames.len - 1].function_name;
+            break :blk std.mem.eql(u8, last_name, "main") or std.mem.eql(u8, last_name, "_start");
+        };
+        if (!fp_complete) {
             if (self.resolveEhFrameData()) |eh_frame_data| {
                 var cfa_ctx = CfaReaderCtx{
                     .regs = regs,
