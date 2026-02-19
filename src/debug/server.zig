@@ -29,182 +29,182 @@ pub fn errorToCode(err: anyerror) i32 {
 
 pub const tool_definitions = [_]ToolDef{
     .{
-        .name = "debug_launch",
+        .name = "cog:debug.launch",
         .description = "Launch a program under the debugger",
         .input_schema = debug_launch_schema,
     },
     .{
-        .name = "debug_breakpoint",
+        .name = "cog:debug.breakpoint",
         .description = "Set, remove, or list breakpoints",
         .input_schema = debug_breakpoint_schema,
     },
     .{
-        .name = "debug_run",
+        .name = "cog:debug.run",
         .description = "Continue, step, or restart execution",
         .input_schema = debug_run_schema,
     },
     .{
-        .name = "debug_inspect",
+        .name = "cog:debug.inspect",
         .description = "Evaluate expressions and inspect variables",
         .input_schema = debug_inspect_schema,
     },
     .{
-        .name = "debug_stop",
+        .name = "cog:debug.stop",
         .description = "Stop a debug session",
         .input_schema = debug_stop_schema,
     },
     .{
-        .name = "debug_threads",
+        .name = "cog:debug.threads",
         .description = "List threads in a debug session",
         .input_schema = debug_threads_schema,
     },
     .{
-        .name = "debug_stacktrace",
+        .name = "cog:debug.stacktrace",
         .description = "Get stack trace for a thread",
         .input_schema = debug_stacktrace_schema,
     },
     .{
-        .name = "debug_memory",
+        .name = "cog:debug.memory",
         .description = "Read or write process memory",
         .input_schema = debug_memory_schema,
     },
     .{
-        .name = "debug_disassemble",
+        .name = "cog:debug.disassemble",
         .description = "Disassemble instructions at an address",
         .input_schema = debug_disassemble_schema,
     },
     .{
-        .name = "debug_attach",
+        .name = "cog:debug.attach",
         .description = "Attach to a running process",
         .input_schema = debug_attach_schema,
     },
     .{
-        .name = "debug_set_variable",
+        .name = "cog:debug.setVariable",
         .description = "Set the value of a variable in the current scope",
         .input_schema = debug_set_variable_schema,
     },
     .{
-        .name = "debug_scopes",
+        .name = "cog:debug.scopes",
         .description = "List variable scopes for a stack frame",
         .input_schema = debug_scopes_schema,
     },
     .{
-        .name = "debug_watchpoint",
+        .name = "cog:debug.watchpoint",
         .description = "Set a data breakpoint (watchpoint) on a variable",
         .input_schema = debug_watchpoint_schema,
     },
     .{
-        .name = "debug_capabilities",
+        .name = "cog:debug.capabilities",
         .description = "Query debug driver capabilities",
         .input_schema = debug_capabilities_schema,
     },
     .{
-        .name = "debug_completions",
+        .name = "cog:debug.completions",
         .description = "Get completions for variable names and expressions",
         .input_schema = debug_completions_schema,
     },
     .{
-        .name = "debug_modules",
+        .name = "cog:debug.modules",
         .description = "List loaded modules and shared libraries",
         .input_schema = debug_modules_schema,
     },
     .{
-        .name = "debug_loaded_sources",
+        .name = "cog:debug.loadedSources",
         .description = "List all source files available in the debug session",
         .input_schema = debug_loaded_sources_schema,
     },
     .{
-        .name = "debug_source",
+        .name = "cog:debug.source",
         .description = "Retrieve source code by source reference",
         .input_schema = debug_source_schema,
     },
     .{
-        .name = "debug_set_expression",
+        .name = "cog:debug.setExpression",
         .description = "Evaluate and assign a complex expression",
         .input_schema = debug_set_expression_schema,
     },
     .{
-        .name = "debug_restart_frame",
+        .name = "cog:debug.restartFrame",
         .description = "Restart execution from a specific stack frame",
         .input_schema = debug_restart_frame_schema,
     },
     .{
-        .name = "debug_exception_info",
+        .name = "cog:debug.exceptionInfo",
         .description = "Get detailed information about the current exception",
         .input_schema = debug_exception_info_schema,
     },
     .{
-        .name = "debug_registers",
+        .name = "cog:debug.registers",
         .description = "Read CPU register values (native engine only, not available for DAP sessions)",
         .input_schema = debug_registers_schema,
     },
     .{
-        .name = "debug_instruction_breakpoint",
+        .name = "cog:debug.instructionBreakpoint",
         .description = "Set or remove instruction-level breakpoints",
         .input_schema = debug_instruction_breakpoint_schema,
     },
     .{
-        .name = "debug_step_in_targets",
+        .name = "cog:debug.stepInTargets",
         .description = "List step-in targets for a stack frame",
         .input_schema = debug_step_in_targets_schema,
     },
     .{
-        .name = "debug_breakpoint_locations",
+        .name = "cog:debug.breakpointLocations",
         .description = "Query valid breakpoint positions in a source file",
         .input_schema = debug_breakpoint_locations_schema,
     },
     .{
-        .name = "debug_cancel",
+        .name = "cog:debug.cancel",
         .description = "Cancel a pending debug request",
         .input_schema = debug_cancel_schema,
     },
     .{
-        .name = "debug_terminate_threads",
+        .name = "cog:debug.terminateThreads",
         .description = "Terminate specific threads",
         .input_schema = debug_terminate_threads_schema,
     },
     .{
-        .name = "debug_restart",
+        .name = "cog:debug.restart",
         .description = "Restart the debug session",
         .input_schema = debug_restart_schema,
     },
     .{
-        .name = "debug_sessions",
+        .name = "cog:debug.sessions",
         .description = "List all active debug sessions",
         .input_schema = debug_sessions_schema,
     },
     .{
-        .name = "debug_goto_targets",
+        .name = "cog:debug.gotoTargets",
         .description = "Discover valid goto target locations for a source line",
         .input_schema = debug_goto_targets_schema,
     },
     .{
-        .name = "debug_find_symbol",
+        .name = "cog:debug.findSymbol",
         .description = "Search for symbol definitions by name (native engine only, not available for DAP sessions)",
         .input_schema = debug_find_symbol_schema,
     },
     .{
-        .name = "debug_write_register",
+        .name = "cog:debug.writeRegister",
         .description = "Write a value to a CPU register (native engine only, not available for DAP sessions)",
         .input_schema = debug_write_register_schema,
     },
     .{
-        .name = "debug_variable_location",
+        .name = "cog:debug.variableLocation",
         .description = "Get the physical storage location of a variable (native engine only, not available for DAP sessions)",
         .input_schema = debug_variable_location_schema,
     },
     .{
-        .name = "debug_poll_events",
+        .name = "cog:debug.pollEvents",
         .description = "Poll for pending debug events and notifications",
         .input_schema = debug_poll_events_schema,
     },
     .{
-        .name = "debug_load_core",
+        .name = "cog:debug.loadCore",
         .description = "Load a core dump for post-mortem debugging",
         .input_schema = debug_load_core_schema,
     },
     .{
-        .name = "debug_dap_request",
+        .name = "cog:debug.dapRequest",
         .description = "Send a raw DAP request to the debug adapter (DAP sessions only)",
         .input_schema = debug_dap_request_schema,
     },
@@ -406,77 +406,77 @@ pub const DebugServer = struct {
     /// Dispatch a tool call and return the raw result.
     /// Used by the daemon socket transport.
     pub fn callTool(self: *DebugServer, allocator: std.mem.Allocator, tool_name: []const u8, tool_args: ?json.Value) !ToolResult {
-        if (std.mem.eql(u8, tool_name, "debug_launch")) {
+        if (std.mem.eql(u8, tool_name, "cog:debug.launch")) {
             return self.toolLaunch(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_breakpoint")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.breakpoint")) {
             return self.toolBreakpoint(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_run")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.run")) {
             return self.toolRun(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_inspect")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.inspect")) {
             return self.toolInspect(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_stop")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.stop")) {
             return self.toolStop(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_threads")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.threads")) {
             return self.toolThreads(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_stacktrace")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.stacktrace")) {
             return self.toolStackTrace(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_memory")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.memory")) {
             return self.toolMemory(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_disassemble")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.disassemble")) {
             return self.toolDisassemble(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_attach")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.attach")) {
             return self.toolAttach(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_set_variable")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.setVariable")) {
             return self.toolSetVariable(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_scopes")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.scopes")) {
             return self.toolScopes(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_watchpoint")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.watchpoint")) {
             return self.toolWatchpoint(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_capabilities")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.capabilities")) {
             return self.toolCapabilities(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_completions")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.completions")) {
             return self.toolCompletions(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_modules")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.modules")) {
             return self.toolModules(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_loaded_sources")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.loadedSources")) {
             return self.toolLoadedSources(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_source")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.source")) {
             return self.toolSource(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_set_expression")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.setExpression")) {
             return self.toolSetExpression(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_restart_frame")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.restartFrame")) {
             return self.toolRestartFrame(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_exception_info")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.exceptionInfo")) {
             return self.toolExceptionInfo(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_registers")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.registers")) {
             return self.toolRegisters(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_instruction_breakpoint")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.instructionBreakpoint")) {
             return self.toolInstructionBreakpoint(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_step_in_targets")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.stepInTargets")) {
             return self.toolStepInTargets(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_breakpoint_locations")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.breakpointLocations")) {
             return self.toolBreakpointLocations(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_cancel")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.cancel")) {
             return self.toolCancel(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_terminate_threads")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.terminateThreads")) {
             return self.toolTerminateThreads(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_restart")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.restart")) {
             return self.toolRestart(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_sessions")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.sessions")) {
             return self.toolSessions(allocator);
-        } else if (std.mem.eql(u8, tool_name, "debug_goto_targets")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.gotoTargets")) {
             return self.toolGotoTargets(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_find_symbol")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.findSymbol")) {
             return self.toolFindSymbol(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_write_register")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.writeRegister")) {
             return self.toolWriteRegister(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_variable_location")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.variableLocation")) {
             return self.toolVariableLocation(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_poll_events")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.pollEvents")) {
             return self.toolPollEvents(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_load_core")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.loadCore")) {
             return self.toolLoadCore(allocator, tool_args);
-        } else if (std.mem.eql(u8, tool_name, "debug_dap_request")) {
+        } else if (std.mem.eql(u8, tool_name, "cog:debug.dapRequest")) {
             return self.toolDapRequest(allocator, tool_args);
         } else {
             return .{ .err = .{ .code = METHOD_NOT_FOUND, .message = "Unknown tool" } };
@@ -527,7 +527,7 @@ pub const DebugServer = struct {
 
             var driver = proxy.activeDriver();
             driver.launch(allocator, config) catch |err| {
-                self.dashboard.onError("debug_launch", @errorName(err));
+                self.dashboard.onError("cog:debug.launch", @errorName(err));
                 return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
             };
 
@@ -560,7 +560,7 @@ pub const DebugServer = struct {
 
             var driver = engine.activeDriver();
             driver.launch(allocator, config) catch |err| {
-                self.dashboard.onError("debug_launch", @errorName(err));
+                self.dashboard.onError("cog:debug.launch", @errorName(err));
                 return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
             };
 
@@ -610,7 +610,7 @@ pub const DebugServer = struct {
             const log_message = if (a.object.get("log_message")) |c| (if (c == .string) c.string else null) else null;
 
             const bp = session.driver.setBreakpointEx(allocator, file_val.string, @intCast(line_val.integer), condition, hit_condition, log_message) catch |err| {
-                self.dashboard.onError("debug_breakpoint", @errorName(err));
+                self.dashboard.onError("cog:debug.breakpoint", @errorName(err));
                 return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
             };
             self.dashboard.onBreakpoint("set", bp);
@@ -632,7 +632,7 @@ pub const DebugServer = struct {
             if (bp_id_val != .integer) return .{ .err = .{ .code = INVALID_PARAMS, .message = "id must be integer" } };
 
             session.driver.removeBreakpoint(allocator, @intCast(bp_id_val.integer)) catch |err| {
-                self.dashboard.onError("debug_breakpoint", @errorName(err));
+                self.dashboard.onError("cog:debug.breakpoint", @errorName(err));
                 return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
             };
             self.dashboard.onBreakpoint("remove", .{
@@ -651,7 +651,7 @@ pub const DebugServer = struct {
             return .{ .ok_static = "{\"removed\":true}" };
         } else if (std.mem.eql(u8, action_str, "list")) {
             const bps = session.driver.listBreakpoints(allocator) catch |err| {
-                self.dashboard.onError("debug_breakpoint", @errorName(err));
+                self.dashboard.onError("cog:debug.breakpoint", @errorName(err));
                 return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
             };
             self.dashboard.onBreakpoint("list", .{
@@ -681,7 +681,7 @@ pub const DebugServer = struct {
             const condition = if (a.object.get("condition")) |c| (if (c == .string) c.string else null) else null;
 
             const bp = session.driver.setFunctionBreakpoint(allocator, func_val.string, condition) catch |err| {
-                self.dashboard.onError("debug_breakpoint", @errorName(err));
+                self.dashboard.onError("cog:debug.breakpoint", @errorName(err));
                 return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
             };
             self.dashboard.onBreakpoint("set", bp);
@@ -711,7 +711,7 @@ pub const DebugServer = struct {
             }
 
             session.driver.setExceptionBreakpoints(allocator, filter_list.items) catch |err| {
-                self.dashboard.onError("debug_breakpoint", @errorName(err));
+                self.dashboard.onError("cog:debug.breakpoint", @errorName(err));
                 return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
             };
 
@@ -742,7 +742,7 @@ pub const DebugServer = struct {
             if (line_val != .integer) return .{ .err = .{ .code = INVALID_PARAMS, .message = "line must be integer" } };
 
             const state = session.driver.goto(allocator, file_val.string, @intCast(line_val.integer)) catch |err| {
-                self.dashboard.onError("debug_run", @errorName(err));
+                self.dashboard.onError("cog:debug.run", @errorName(err));
                 return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
             };
 
@@ -769,7 +769,7 @@ pub const DebugServer = struct {
 
         session.status = .running;
         const state = session.driver.runEx(allocator, action, run_options) catch |err| {
-            self.dashboard.onError("debug_run", @errorName(err));
+            self.dashboard.onError("cog:debug.run", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
 
@@ -804,7 +804,7 @@ pub const DebugServer = struct {
         };
 
         const result_val = session.driver.inspect(allocator, request) catch |err| {
-            self.dashboard.onError("debug_inspect", @errorName(err));
+            self.dashboard.onError("cog:debug.inspect", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
         defer result_val.deinit(allocator);
@@ -883,14 +883,14 @@ pub const DebugServer = struct {
             return .{ .err = .{ .code = INVALID_PARAMS, .message = "Unknown session" } };
 
         const thread_list = session.driver.threads(allocator) catch |err| {
-            self.dashboard.onError("debug_threads", @errorName(err));
+            self.dashboard.onError("cog:debug.threads", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
         self.dashboard.onThreads(session_id_val.string, thread_list.len);
         {
             var abuf: [64]u8 = undefined;
             const asum = std.fmt.bufPrint(&abuf, "{d} thread(s)", .{thread_list.len}) catch "threads listed";
-            self.emitActivityEvent(session_id_val.string, "debug_threads", asum);
+            self.emitActivityEvent(session_id_val.string, "cog:debug.threads", asum);
         }
 
         var aw: Writer.Allocating = .init(allocator);
@@ -923,14 +923,14 @@ pub const DebugServer = struct {
         const levels: u32 = if (a.object.get("levels")) |v| (if (v == .integer) @intCast(v.integer) else 20) else 20;
 
         const frames = session.driver.stackTrace(allocator, thread_id, start_frame, levels) catch |err| {
-            self.dashboard.onError("debug_stacktrace", @errorName(err));
+            self.dashboard.onError("cog:debug.stacktrace", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
         self.dashboard.onStackTrace(session_id_val.string, frames.len);
         {
             var abuf: [64]u8 = undefined;
             const asum = std.fmt.bufPrint(&abuf, "{d} frame(s)", .{frames.len}) catch "stack trace";
-            self.emitActivityEvent(session_id_val.string, "debug_stacktrace", asum);
+            self.emitActivityEvent(session_id_val.string, "cog:debug.stacktrace", asum);
         }
 
         var aw: Writer.Allocating = .init(allocator);
@@ -984,7 +984,7 @@ pub const DebugServer = struct {
             const size: u64 = if (a.object.get("size")) |v| (if (v == .integer) @intCast(v.integer) else 64) else 64;
 
             const hex_data = session.driver.readMemory(allocator, effective_address, size) catch |err| {
-                self.dashboard.onError("debug_memory", @errorName(err));
+                self.dashboard.onError("cog:debug.memory", @errorName(err));
                 return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
             };
             self.dashboard.onMemory(session_id_val.string, "read", addr_val.string);
@@ -1019,7 +1019,7 @@ pub const DebugServer = struct {
             }
 
             session.driver.writeMemory(allocator, effective_address, bytes) catch |err| {
-                self.dashboard.onError("debug_memory", @errorName(err));
+                self.dashboard.onError("cog:debug.memory", @errorName(err));
                 return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
             };
             self.dashboard.onMemory(session_id_val.string, "write", addr_val.string);
@@ -1068,7 +1068,7 @@ pub const DebugServer = struct {
         const resolve_symbols: ?bool = if (a.object.get("resolve_symbols")) |v| (if (v == .bool) v.bool else null) else null;
 
         const instructions = session.driver.disassembleEx(allocator, address, count, instruction_offset, resolve_symbols) catch |err| {
-            self.dashboard.onError("debug_disassemble", @errorName(err));
+            self.dashboard.onError("cog:debug.disassemble", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
         var addr_buf: [18]u8 = undefined;
@@ -1128,7 +1128,7 @@ pub const DebugServer = struct {
 
             driver = proxy.activeDriver();
             driver.attach(allocator, @intCast(pid_val.integer)) catch |err| {
-                self.dashboard.onError("debug_attach", @errorName(err));
+                self.dashboard.onError("cog:debug.attach", @errorName(err));
                 return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
             };
             driver_type_name = "dap";
@@ -1143,7 +1143,7 @@ pub const DebugServer = struct {
 
             driver = engine.activeDriver();
             driver.attach(allocator, @intCast(pid_val.integer)) catch |err| {
-                self.dashboard.onError("debug_attach", @errorName(err));
+                self.dashboard.onError("cog:debug.attach", @errorName(err));
                 return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
             };
             driver_type_name = "native";
@@ -1189,7 +1189,7 @@ pub const DebugServer = struct {
         const frame_id: u32 = if (a.object.get("frame_id")) |v| (if (v == .integer) @intCast(v.integer) else 0) else 0;
 
         const result_val = session.driver.setVariable(allocator, var_val.string, value_val.string, frame_id) catch |err| {
-            self.dashboard.onError("debug_set_variable", @errorName(err));
+            self.dashboard.onError("cog:debug.setVariable", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
         self.dashboard.onSetVariable(session_id_val.string, var_val.string, value_val.string);
@@ -1218,7 +1218,7 @@ pub const DebugServer = struct {
         const frame_id: u32 = if (a.object.get("frame_id")) |v| (if (v == .integer) @intCast(v.integer) else 0) else 0;
 
         const scope_list = session.driver.scopes(allocator, frame_id) catch |err| {
-            self.dashboard.onError("debug_scopes", @errorName(err));
+            self.dashboard.onError("cog:debug.scopes", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
         self.dashboard.onScopes(session_id_val.string, scope_list.len);
@@ -1258,7 +1258,7 @@ pub const DebugServer = struct {
 
         // First, get data breakpoint info
         const info = session.driver.dataBreakpointInfo(allocator, var_val.string, frame_id) catch |err| {
-            self.dashboard.onError("debug_watchpoint", @errorName(err));
+            self.dashboard.onError("cog:debug.watchpoint", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
 
@@ -1268,7 +1268,7 @@ pub const DebugServer = struct {
 
         // Then set the data breakpoint
         const bp = session.driver.setDataBreakpoint(allocator, data_id, access_type) catch |err| {
-            self.dashboard.onError("debug_watchpoint", @errorName(err));
+            self.dashboard.onError("cog:debug.watchpoint", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
         self.dashboard.onWatchpoint(session_id_val.string, var_val.string, access_str);
@@ -1326,7 +1326,7 @@ pub const DebugServer = struct {
         const frame_id: ?u32 = if (a.object.get("frame_id")) |v| (if (v == .integer) @as(u32, @intCast(v.integer)) else null) else null;
 
         const items = session.driver.completions(allocator, text_val.string, column, frame_id) catch |err| {
-            self.dashboard.onError("debug_completions", @errorName(err));
+            self.dashboard.onError("cog:debug.completions", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
         self.dashboard.onCompletions(session_id_val.string, items.len);
@@ -1357,7 +1357,7 @@ pub const DebugServer = struct {
             return .{ .err = .{ .code = INVALID_PARAMS, .message = "Unknown session" } };
 
         const mod_list = session.driver.modules(allocator) catch |err| {
-            self.dashboard.onError("debug_modules", @errorName(err));
+            self.dashboard.onError("cog:debug.modules", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
         self.dashboard.onModules(session_id_val.string, mod_list.len);
@@ -1388,7 +1388,7 @@ pub const DebugServer = struct {
             return .{ .err = .{ .code = INVALID_PARAMS, .message = "Unknown session" } };
 
         const source_list = session.driver.loadedSources(allocator) catch |err| {
-            self.dashboard.onError("debug_loaded_sources", @errorName(err));
+            self.dashboard.onError("cog:debug.loadedSources", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
         self.dashboard.onLoadedSources(session_id_val.string, source_list.len);
@@ -1422,7 +1422,7 @@ pub const DebugServer = struct {
         if (ref_val != .integer) return .{ .err = .{ .code = INVALID_PARAMS, .message = "source_reference must be integer" } };
 
         const content = session.driver.source(allocator, @intCast(ref_val.integer)) catch |err| {
-            self.dashboard.onError("debug_source", @errorName(err));
+            self.dashboard.onError("cog:debug.source", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
 
@@ -1456,7 +1456,7 @@ pub const DebugServer = struct {
         const frame_id: u32 = if (a.object.get("frame_id")) |v| (if (v == .integer) @intCast(v.integer) else 0) else 0;
 
         const result_val = session.driver.setExpression(allocator, expr_val.string, value_val.string, frame_id) catch |err| {
-            self.dashboard.onError("debug_set_expression", @errorName(err));
+            self.dashboard.onError("cog:debug.setExpression", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
         defer result_val.deinit(allocator);
@@ -1485,7 +1485,7 @@ pub const DebugServer = struct {
         if (frame_id_val != .integer) return .{ .err = .{ .code = INVALID_PARAMS, .message = "frame_id must be integer" } };
 
         session.driver.restartFrame(allocator, @intCast(frame_id_val.integer)) catch |err| {
-            self.dashboard.onError("debug_restart_frame", @errorName(err));
+            self.dashboard.onError("cog:debug.restartFrame", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
         self.dashboard.onRestartFrame(session_id_val.string, @intCast(frame_id_val.integer));
@@ -1508,7 +1508,7 @@ pub const DebugServer = struct {
         const thread_id: u32 = if (a.object.get("thread_id")) |v| (if (v == .integer) @intCast(v.integer) else 1) else 1;
 
         const info = session.driver.exceptionInfo(allocator, thread_id) catch |err| {
-            self.dashboard.onError("debug_exception_info", @errorName(err));
+            self.dashboard.onError("cog:debug.exceptionInfo", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
         self.dashboard.onExceptionInfo(session_id_val.string);
@@ -1534,7 +1534,7 @@ pub const DebugServer = struct {
         const thread_id: u32 = if (a.object.get("thread_id")) |v| (if (v == .integer) @intCast(v.integer) else 1) else 1;
 
         const regs = session.driver.readRegisters(allocator, thread_id) catch |err| {
-            self.dashboard.onError("debug_registers", @errorName(err));
+            self.dashboard.onError("cog:debug.registers", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
         self.dashboard.onRegisters(session_id_val.string, regs.len);
@@ -1601,7 +1601,7 @@ pub const DebugServer = struct {
         }
 
         const results = session.driver.setInstructionBreakpoints(allocator, bp_list.items) catch |err| {
-            self.dashboard.onError("debug_instruction_breakpoint", @errorName(err));
+            self.dashboard.onError("cog:debug.instructionBreakpoint", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
         const first_ref = if (bp_list.items.len > 0) bp_list.items[0].instruction_reference else "";
@@ -1636,7 +1636,7 @@ pub const DebugServer = struct {
         if (frame_id_val != .integer) return .{ .err = .{ .code = INVALID_PARAMS, .message = "frame_id must be integer" } };
 
         const targets = session.driver.stepInTargets(allocator, @intCast(frame_id_val.integer)) catch |err| {
-            self.dashboard.onError("debug_step_in_targets", @errorName(err));
+            self.dashboard.onError("cog:debug.stepInTargets", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
         self.dashboard.onStepInTargets(session_id_val.string, @intCast(frame_id_val.integer), targets.len);
@@ -1675,7 +1675,7 @@ pub const DebugServer = struct {
         const end_line: ?u32 = if (a.object.get("end_line")) |v| (if (v == .integer) @as(u32, @intCast(v.integer)) else null) else null;
 
         const locations = session.driver.breakpointLocations(allocator, source_val.string, @intCast(line_val.integer), end_line) catch |err| {
-            self.dashboard.onError("debug_breakpoint_locations", @errorName(err));
+            self.dashboard.onError("cog:debug.breakpointLocations", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
         self.dashboard.onBreakpointLocations(session_id_val.string, source_val.string, @intCast(line_val.integer), locations.len);
@@ -1709,7 +1709,7 @@ pub const DebugServer = struct {
         const progress_id: ?[]const u8 = if (a.object.get("progress_id")) |v| (if (v == .string) v.string else null) else null;
 
         session.driver.cancel(allocator, request_id, progress_id) catch |err| {
-            self.dashboard.onError("debug_cancel", @errorName(err));
+            self.dashboard.onError("cog:debug.cancel", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
         self.dashboard.onCancel(session_id_val.string);
@@ -1739,7 +1739,7 @@ pub const DebugServer = struct {
         }
 
         session.driver.terminateThreads(allocator, id_list.items) catch |err| {
-            self.dashboard.onError("debug_terminate_threads", @errorName(err));
+            self.dashboard.onError("cog:debug.terminateThreads", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
         self.dashboard.onTerminateThreads(session_id_val.string, id_list.items.len);
@@ -1758,7 +1758,7 @@ pub const DebugServer = struct {
             return .{ .err = .{ .code = INVALID_PARAMS, .message = "Unknown session" } };
 
         session.driver.restart(allocator) catch |err| {
-            self.dashboard.onError("debug_restart", @errorName(err));
+            self.dashboard.onError("cog:debug.restart", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
         self.dashboard.onRestart(session_id_val.string);
@@ -1810,7 +1810,7 @@ pub const DebugServer = struct {
         if (line_val != .integer) return .{ .err = .{ .code = INVALID_PARAMS, .message = "line must be integer" } };
 
         const targets = session.driver.gotoTargets(allocator, file_val.string, @intCast(line_val.integer)) catch |err| {
-            self.dashboard.onError("debug_goto_targets", @errorName(err));
+            self.dashboard.onError("cog:debug.gotoTargets", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
 
@@ -1840,7 +1840,7 @@ pub const DebugServer = struct {
         if (name_val != .string) return .{ .err = .{ .code = INVALID_PARAMS, .message = "name must be string" } };
 
         const symbols = session.driver.findSymbol(allocator, name_val.string) catch |err| {
-            self.dashboard.onError("debug_find_symbol", @errorName(err));
+            self.dashboard.onError("cog:debug.findSymbol", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
 
@@ -1877,7 +1877,7 @@ pub const DebugServer = struct {
         const thread_id: u32 = if (a.object.get("thread_id")) |v| (if (v == .integer) @intCast(v.integer) else 0) else 0;
 
         session.driver.writeRegisters(allocator, thread_id, name_val.string, @intCast(value_val.integer)) catch |err| {
-            self.dashboard.onError("debug_write_register", @errorName(err));
+            self.dashboard.onError("cog:debug.writeRegister", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
 
@@ -1900,7 +1900,7 @@ pub const DebugServer = struct {
         const frame_id: u32 = if (a.object.get("frame_id")) |v| (if (v == .integer) @intCast(v.integer) else 0) else 0;
 
         const loc = session.driver.variableLocation(allocator, name_val.string, frame_id) catch |err| {
-            self.dashboard.onError("debug_variable_location", @errorName(err));
+            self.dashboard.onError("cog:debug.variableLocation", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
 
@@ -1991,7 +1991,7 @@ pub const DebugServer = struct {
 
         var driver = engine.activeDriver();
         driver.loadCore(allocator, core_path_val.string, executable) catch |err| {
-            self.dashboard.onError("debug_load_core", @errorName(err));
+            self.dashboard.onError("cog:debug.loadCore", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
 
@@ -2044,7 +2044,7 @@ pub const DebugServer = struct {
         defer if (arguments_str) |s| allocator.free(s);
 
         const response = session.driver.rawRequest(allocator, command_val.string, arguments_str) catch |err| {
-            self.dashboard.onError("debug_dap_request", @errorName(err));
+            self.dashboard.onError("cog:debug.dapRequest", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
 
@@ -2330,7 +2330,7 @@ test "callTool dispatches debug_stop" {
     const args_parsed = try json.parseFromSlice(json.Value, allocator, args_str, .{});
     defer args_parsed.deinit();
 
-    const result = try srv.callTool(allocator, "debug_stop", args_parsed.value);
+    const result = try srv.callTool(allocator, "cog:debug.stop", args_parsed.value);
     switch (result) {
         .ok => |raw| {
             defer allocator.free(raw);

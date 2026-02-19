@@ -16,6 +16,7 @@ pub const tree_sitter_indexer = @import("tree_sitter_indexer.zig");
 pub const agents = @import("agents.zig");
 pub const mcp = @import("mcp.zig");
 pub const hooks = @import("hooks.zig");
+pub const watcher = @import("watcher.zig");
 
 test {
     _ = config;
@@ -36,4 +37,5 @@ test {
     _ = agents;
     _ = mcp;
     _ = hooks;
+    _ = watcher;
 }

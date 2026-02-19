@@ -1065,8 +1065,29 @@ fn removeDocument(allocator: std.mem.Allocator, index: *scip.Index, rel_path: []
     }
 }
 
+/// Remove a file from the SCIP index on disk.
+/// Returns true if the file was found and removed, false otherwise.
+pub fn removeFileFromIndex(allocator: std.mem.Allocator, file_path: []const u8) bool {
+    const cog_dir = paths.findCogDir(allocator) catch return false;
+    defer allocator.free(cog_dir);
+
+    const index_path = std.fmt.allocPrint(allocator, "{s}/index.scip", .{cog_dir}) catch return false;
+    defer allocator.free(index_path);
+
+    const loaded = loadExistingIndex(allocator, index_path);
+    var master_index = loaded.index;
+    defer scip.freeIndex(allocator, &master_index);
+    defer if (loaded.backing_data) |data| allocator.free(data);
+
+    const before = master_index.documents.len;
+    removeDocument(allocator, &master_index, file_path);
+    if (master_index.documents.len == before) return false;
+
+    return saveIndex(allocator, master_index, index_path);
+}
+
 /// Re-index a single file and update the master index.
-fn reindexFile(allocator: std.mem.Allocator, file_path: []const u8) bool {
+pub fn reindexFile(allocator: std.mem.Allocator, file_path: []const u8) bool {
     const cog_dir = paths.findCogDir(allocator) catch return false;
     defer allocator.free(cog_dir);
 

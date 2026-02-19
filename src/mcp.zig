@@ -8,6 +8,8 @@ const code_intel = @import("code_intel.zig");
 const config_mod = @import("config.zig");
 const client = @import("client.zig");
 const debug_server_mod = @import("debug/server.zig");
+const watcher_mod = @import("watcher.zig");
+const paths = @import("paths.zig");
 
 const Config = config_mod.Config;
 const DebugServer = debug_server_mod.DebugServer;
@@ -18,7 +20,7 @@ var server_version: []const u8 = "0.0.0";
 var shutdown_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
 const RemoteTool = struct {
-    name: []const u8, // local name: "mem_recall"
+    name: []const u8, // local name: "cog:mem.recall"
     remote_name: []const u8, // server name: "cog_recall"
     description: []const u8,
     input_schema: []const u8, // raw JSON string
@@ -31,19 +33,27 @@ const Runtime = struct {
     code_cache: ?code_intel.CodeIndex = null,
     remote_tools: ?[]RemoteTool = null,
     mcp_session_id: ?[]const u8 = null,
+    watcher: ?watcher_mod.Watcher = null,
 
     fn init(allocator: std.mem.Allocator) Runtime {
-        return .{
+        var rt = Runtime{
             .allocator = allocator,
             .mem_config = Config.load(allocator) catch null,
             .debug_server = DebugServer.init(allocator),
             .code_cache = null,
             .remote_tools = null,
             .mcp_session_id = null,
+            .watcher = watcher_mod.Watcher.init(allocator),
         };
+        if (rt.watcher != null) {
+            rt.watcher.?.start();
+            debugLog("File watcher started", .{});
+        }
+        return rt;
     }
 
     fn deinit(self: *Runtime) void {
+        if (self.watcher) |*w| w.deinit();
         if (self.mem_config) |cfg| cfg.deinit(self.allocator);
         if (self.code_cache) |*ci| ci.deinit(self.allocator);
         if (self.remote_tools) |tools| {
@@ -116,9 +126,21 @@ pub fn serve(allocator: std.mem.Allocator, version: []const u8) !void {
 
     while (!shutdown_requested.load(.acquire)) {
         if (builtin.os.tag != .windows) {
-            var fds = [_]posix.pollfd{.{ .fd = stdin.handle, .events = posix.POLL.IN, .revents = 0 }};
-            const poll_result = posix.poll(&fds, 250) catch continue;
+            var fds: [2]posix.pollfd = undefined;
+            fds[0] = .{ .fd = stdin.handle, .events = posix.POLL.IN, .revents = 0 };
+            var nfds: usize = 1;
+            if (runtime.watcher) |*w| {
+                fds[1] = .{ .fd = w.getFd(), .events = posix.POLL.IN, .revents = 0 };
+                nfds = 2;
+            }
+            const poll_result = posix.poll(fds[0..nfds], 250) catch continue;
             if (poll_result == 0) continue;
+
+            // Process watcher events if ready
+            if (nfds > 1 and fds[1].revents & posix.POLL.IN != 0) {
+                processWatcherEvents(&runtime);
+            }
+
             if (fds[0].revents & posix.POLL.ERR != 0) {
                 debugLog("poll: POLLERR on stdin, exiting", .{});
                 break;
@@ -731,7 +753,7 @@ fn buildToolCatalogResourceJson(runtime: *Runtime) ![]u8 {
 }
 
 fn writeToolCatalog(runtime: *Runtime, allocator: std.mem.Allocator, s: *Stringify) !void {
-    try writeToolDef(s, "code.query", "Find symbol definitions, references, file symbols, or project structure", &.{
+    try writeToolDef(s, "cog:code.query", "Find symbol definitions, references, file symbols, or project structure", &.{
         .{ .name = "mode", .typ = "string", .desc = "Query mode: find, refs, symbols, or structure", .required = true },
         .{ .name = "name", .typ = "string", .desc = "Symbol name (for find/refs modes)", .required = false },
         .{ .name = "file", .typ = "string", .desc = "File path (for symbols mode)", .required = false },
@@ -739,11 +761,7 @@ fn writeToolCatalog(runtime: *Runtime, allocator: std.mem.Allocator, s: *Stringi
         .{ .name = "limit", .typ = "integer", .desc = "Max results to return", .required = false },
     });
 
-    try writeToolDef(s, "code.index", "Build or update the SCIP code index", &.{
-        .{ .name = "patterns", .typ = "array", .desc = "Glob patterns to index (default: **/*)", .required = false },
-    });
-
-    try writeToolDef(s, "code.status", "Report index status", &.{});
+    try writeToolDef(s, "cog:code.status", "Report index status", &.{});
 
     // Lazily discover remote memory tools on first tools/list
     if (runtime.hasMemory() and runtime.remote_tools == null) {
@@ -765,18 +783,16 @@ fn writeToolCatalog(runtime: *Runtime, allocator: std.mem.Allocator, s: *Stringi
 
 fn runtimeCallTool(runtime: *Runtime, tool_name: []const u8, arguments: ?json.Value) ![]const u8 {
     // Code tools
-    if (std.mem.eql(u8, tool_name, "code.query")) {
+    if (std.mem.eql(u8, tool_name, "cog:code.query")) {
         return callCodeQuery(runtime, arguments);
-    } else if (std.mem.eql(u8, tool_name, "code.index")) {
-        return callCodeIndex(runtime, arguments);
-    } else if (std.mem.eql(u8, tool_name, "code.status")) {
+    } else if (std.mem.eql(u8, tool_name, "cog:code.status")) {
         return callCodeStatus(runtime);
-    } else if (std.mem.startsWith(u8, tool_name, "debug_")) {
+    } else if (std.mem.startsWith(u8, tool_name, "cog:debug.")) {
         return callDebugTool(runtime, tool_name, arguments);
     }
 
     // Memory tools — proxy to remote MCP server
-    if (std.mem.startsWith(u8, tool_name, "mem_")) {
+    if (std.mem.startsWith(u8, tool_name, "cog:mem.")) {
         return callRemoteMcpTool(runtime, tool_name, arguments);
     }
 
@@ -784,6 +800,35 @@ fn runtimeCallTool(runtime: *Runtime, tool_name: []const u8, arguments: ?json.Va
 }
 
 // ── Remote MCP Proxy ────────────────────────────────────────────────────
+
+/// Convert a snake_case suffix into "prefix.camelCase".
+/// e.g. snakeToDotCamel(alloc, "mem", "bulk_recall") → "mem.bulkRecall"
+fn snakeToDotCamel(allocator: std.mem.Allocator, prefix: []const u8, snake: []const u8) ![]const u8 {
+    // Count output length: prefix + '.' + camelCase(snake)
+    // camelCase removes underscores and capitalizes following chars
+    var len: usize = prefix.len + 1; // prefix + dot
+    for (snake) |c| {
+        if (c != '_') len += 1;
+    }
+
+    const buf = try allocator.alloc(u8, len);
+    @memcpy(buf[0..prefix.len], prefix);
+    buf[prefix.len] = '.';
+
+    var pos: usize = prefix.len + 1;
+    var prev_underscore = false;
+    for (snake) |c| {
+        if (c == '_') {
+            prev_underscore = true;
+        } else {
+            buf[pos] = if (prev_underscore) std.ascii.toUpper(c) else c;
+            prev_underscore = false;
+            pos += 1;
+        }
+    }
+
+    return buf[0..pos];
+}
 
 fn discoverRemoteTools(runtime: *Runtime) !void {
     const allocator = runtime.allocator;
@@ -842,9 +887,9 @@ fn discoverRemoteTools(runtime: *Runtime) !void {
         const cog_prefix = "cog_";
         if (!std.mem.startsWith(u8, remote_name, cog_prefix)) continue;
 
-        // Rename cog_* → mem_*
+        // Rename cog_snake_case → cog:mem.camelCase
         const suffix = remote_name[cog_prefix.len..];
-        const local_name = try std.fmt.allocPrint(allocator, "mem_{s}", .{suffix});
+        const local_name = try snakeToDotCamel(allocator, "cog:mem", suffix);
         errdefer allocator.free(local_name);
 
         const remote_name_dup = try allocator.dupe(u8, remote_name);
@@ -1001,44 +1046,43 @@ fn callCodeQuery(runtime: *Runtime, arguments: ?json.Value) ![]const u8 {
     });
 }
 
-fn callCodeIndex(runtime: *Runtime, arguments: ?json.Value) ![]const u8 {
-    const allocator = runtime.allocator;
-    // Extract patterns array if provided
-    if (arguments) |args| {
-        if (args.object.get("patterns")) |pats| {
-            if (pats == .array) {
-                var list: std.ArrayListUnmanaged([]const u8) = .empty;
-                defer list.deinit(allocator);
-                for (pats.array.items) |item| {
-                    if (item == .string) {
-                        try list.append(allocator, item.string);
-                    }
-                }
-                if (list.items.len > 0) {
-                    const res = try code_intel.codeIndexInner(allocator, list.items);
-                    runtime.syncCodeCacheAfterWrite() catch {
-                        allocator.free(res);
-                        return error.Explained;
-                    };
-                    return res;
-                }
-            }
-        }
-    }
-    const res = try code_intel.codeIndexInner(allocator, null);
-    runtime.syncCodeCacheAfterWrite() catch {
-        allocator.free(res);
-        return error.Explained;
-    };
-    return res;
-}
-
 fn callCodeStatus(runtime: *Runtime) ![]const u8 {
     const allocator = runtime.allocator;
     if (runtime.code_cache) |*ci| {
         return code_intel.codeStatusFromLoadedIndex(allocator, ci);
     }
     return code_intel.codeStatusInner(allocator);
+}
+
+// ── File Watcher Event Processing ───────────────────────────────────────
+
+fn processWatcherEvents(runtime: *Runtime) void {
+    var w = &runtime.watcher.?;
+    var changed = false;
+    while (w.drainOne()) |rel_path| {
+        // Dupe the path since drainOne's slice is only valid until next call
+        const path_copy = runtime.allocator.dupe(u8, rel_path) catch continue;
+        defer runtime.allocator.free(path_copy);
+
+        const exists = blk: {
+            std.fs.cwd().access(path_copy, .{}) catch break :blk false;
+            break :blk true;
+        };
+        if (exists) {
+            if (code_intel.reindexFile(runtime.allocator, path_copy)) {
+                debugLog("Watcher: reindexed {s}", .{path_copy});
+                changed = true;
+            }
+        } else {
+            if (code_intel.removeFileFromIndex(runtime.allocator, path_copy)) {
+                debugLog("Watcher: removed {s}", .{path_copy});
+                changed = true;
+            }
+        }
+    }
+    if (changed) {
+        runtime.syncCodeCacheAfterWrite() catch {};
+    }
 }
 
 fn callDebugTool(runtime: *Runtime, tool_name: []const u8, arguments: ?json.Value) ![]const u8 {
