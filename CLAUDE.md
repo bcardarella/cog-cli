@@ -103,9 +103,11 @@ You have code intelligence via Cog.
 
 ## Announce Cog Operations
 
-Print ⚙️ before Cog tool calls.
+Print an emoji before Cog tool calls to indicate the category:
 
-- Code: `cog_code_query`, `cog_code_status`
+- 🔍 Code: `cog_code_query`, `cog_code_status`, `cog_code_index`
+- 🧠 Memory: all `cog_mem_*` tools
+- 🐞 Debug: all `debug_*` tools
 
 ## Memory
 
@@ -115,7 +117,7 @@ You also have persistent associative memory. Checking memory before work and rec
 
 ### Announce Memory Operations
 
-- ⚙️ Read: `cog_mem_recall`, `cog_mem_list_short_term`
+- 🧠 Read: `cog_mem_recall`, `cog_mem_list_short_term`
 - 🧠 Write: `cog_mem_learn`, `cog_mem_reinforce`, `cog_mem_update`, `cog_mem_flush`
 
 ### The Memory Lifecycle
@@ -134,13 +136,13 @@ Every task follows four steps. This is your operating procedure, not a guideline
 
 **CRITICAL: `cog_mem_recall` is an MCP tool. Call it directly — NEVER use the Skill tool to load `cog` for recall.** The `cog` skill only loads reference documentation. All memory MCP tools (`cog_mem_recall`, `cog_mem_learn`, etc.) are available directly when memory is configured.
 
-If `cog_mem_*` tools are missing, memory is not configured in this workspace (no brain URL in `.cog/settings.json`). In that case, run `cog init` and choose `Memory + Tools`. Do not use deprecated `cog mem/*` CLI commands.
+If `cog_mem_*` tools are missing, memory is not configured in this workspace (no brain URL in `.cog/settings.json`). In that case, run `cog init` and choose `Memory + Tools`. Do not use deprecated `cog mem:*` CLI commands.
 
 Your first action for any task is querying Cog. Before reading source files, before exploring, before planning — check what you already know. Do not formulate an approach before recalling. Plans made without Cog context miss known solutions and repeat past mistakes.
 
 The recall sequence has three visible steps:
 
-1. Print `⚙️ Querying Cog...` as text to the user
+1. Print `🧠 Querying Cog...` as text to the user
 2. Call the `cog_mem_recall` MCP tool with a reformulated query (not the Skill tool, not Bash — the MCP tool directly)
 3. Report results: briefly tell the user what engrams Cog returned, or state "no relevant memories found"
 
@@ -157,19 +159,9 @@ If Cog returns results, follow the paths it reveals and read referenced componen
 
 #### 2. WORK + RECORD — learn, recall, and record continuously
 
-Work normally, guided by what Cog returned. **Whenever you learn something new, record it immediately.** Don't wait. The moment you understand something you didn't before — that's when you call `cog_mem_learn`. After each learn call, briefly tell the user what concept was stored (e.g., "🧠 Stored: Session Expiry Clock Skew").
+Work normally, guided by what Cog returned. **Recall during work, not just at the start.** When you encounter an unfamiliar concept, module, or pattern — query Cog before exploring the codebase. If you're about to read files to figure out how something works, `cog_mem_recall` first. Cog may already have the answer. Only explore code if Cog doesn't know.
 
-**Recall during work, not just at the start.** When you encounter an unfamiliar concept, module, or pattern — query Cog before exploring the codebase. If you're about to read files to figure out how something works, `cog_mem_recall` first. Cog may already have the answer. Only explore code if Cog doesn't know. If you then learn it from code, `cog_mem_learn` it so the next session doesn't have to explore again.
-
-**When the user explains something, record it immediately** as a short-term memory via `cog_mem_learn`. If the user had to tell you how something works, that's knowledge Cog should have. Capture it now — it will be validated and reinforced during consolidation.
-
-Record when you:
-- **Encounter an unfamiliar concept** — recall first, explore second, record what you learn
-- **Receive an explanation from the user** — record it as short-term memory immediately
-- **Identify a root cause** — record before fixing, while the diagnostic details are sharp
-- **Hit unexpected behavior** — record before moving on, while the surprise is specific
-- **Discover a pattern, convention, or gotcha** — record before it becomes background knowledge you forget to capture
-- **Make an architectural decision** — record the what and the why
+**Record any concept-shaped knowledge that Cog doesn't have.** If you produce, receive, or synthesize knowledge that has a nameable term, a definition, and potential relationships to other concepts — and recall didn't return it — record it immediately via `cog_mem_learn`. The source doesn't matter: code exploration, user explanation, answering a question, diagnosing a bug, or reasoning from context all qualify equally. The test is simple: *is this a concept Cog should know but doesn't?* If yes, record it now. After each learn call, briefly tell the user what concept was stored (e.g., "🧠 Stored: Session Expiry Clock Skew").
 
 **Choose the right structure:**
 - Sequential knowledge (A enables B enables C) → use `chain_to`
@@ -225,7 +217,7 @@ Short-term memories decay in 24 hours. Before ending, review and preserve what y
 1. Call `cog_mem_list_short_term` MCP tool to see pending short-term memories
 2. For each entry: call `cog_mem_reinforce` if valid and useful, `cog_mem_flush` if wrong or worthless
 3. **Print a visible summary** at the end of your response with these two lines:
-   - `⚙️ Cog recall:` what recall surfaced that was useful (or "nothing relevant" if it didn't help)
+   - `🧠 Cog recall:` what recall surfaced that was useful (or "nothing relevant" if it didn't help)
    - `🧠 Stored to Cog:` list the concept names you stored during this session (or "nothing new" if none)
 
 **This summary is mandatory.** It closes the memory lifecycle and shows the user Cog is working.
@@ -239,20 +231,20 @@ In the example below: `[print]` = visible text you output, `[call]` = real MCP t
 ```
 User: "Fix login sessions expiring early"
 
-1. [print] ⚙️ Querying Cog...
+1. [print] 🧠 Querying Cog...
    [call]  cog_mem_recall({...})
 2. [print] 🧠 Recording to Cog...
    [call]  cog_mem_learn({...})
 3. Implement fix using code tools, then test.
 4. [call]  cog_mem_list_short_term({...}) and reinforce/flush as needed.
 5. Final response includes:
-   [print] ⚙️ Cog recall: ...
+   [print] 🧠 Cog recall: ...
    [print] 🧠 Stored to Cog: ...
 ```
 
 ### Subagents
 
-Subagents query Cog before exploring code. Same recall-first rule, same query reformulation.
+Subagents follow the same memory lifecycle as the primary agent. Query Cog before exploring code — same recall-first rule, same query reformulation. Record any concept-shaped knowledge produced during subagent work via `cog_mem_learn`. If a subagent synthesizes, discovers, or receives knowledge that Cog doesn't have, it records it before returning results.
 
 ### Never Store
 
@@ -261,4 +253,56 @@ Passwords, API keys, tokens, secrets, SSH/PGP keys, certificates, connection str
 ---
 
 **RECALL → WORK+RECORD → REINFORCE → CONSOLIDATE.** Skipping recall wastes time rediscovering known solutions. Deferring recording loses details while they're fresh. Skipping reinforcement loses the higher-level lesson. Skipping consolidation lets memories decay within 24 hours. Every step exists because the alternative is measurably worse.
+
+<cog:debug>
+## Debugger
+
+Print 🐞 before all debug tool calls.
+
+You have a full interactive debugger via Cog. **Use it instead of adding print, console.log, logging, or any IO statements to inspect runtime state.** The debugger replaces print debugging entirely. Only fall back to IO-based inspection if the debugger is unavailable for the target language or runtime.
+
+### When to use the debugger
+
+Use the debugger whenever you would otherwise inject logging or print statements to understand runtime behavior. This includes:
+
+- A program crashes or throws an exception and the error message alone doesn't explain why
+- A program produces wrong output and you need to trace how values flow through the code
+- You need to inspect variable state at a specific point in execution
+- You need to understand which code path is actually taken at runtime
+- A test fails and the assertion message doesn't reveal the root cause
+
+Do NOT use the debugger for problems that don't require runtime inspection: compile errors, type errors, syntax errors, missing imports, configuration issues, or bugs that are obvious from reading the code.
+
+### Two strategies
+
+**Exception-first** — for crashes and runtime errors. Set an exception breakpoint, run the program, and let the runtime find the crash site. Then inspect the stack trace, exception info, and variable state at that point. This requires zero prior knowledge of where the bug is.
+
+**Hypothesis-first** — for logic bugs where the program doesn't crash but produces wrong output. Formulate what you think is wrong ("I believe `total` is being calculated before `discount` is applied"), set targeted breakpoints at the relevant locations, run, and inspect state to confirm or refute the hypothesis.
+
+### The debugging loop
+
+1. **Launch** a debug session for the program or test
+2. **Set breakpoints** — exception breakpoints for crashes, line/function breakpoints for logic bugs
+3. **Run** and wait for the program to hit a breakpoint
+4. **Inspect** — examine the stack trace, variable scopes, and evaluate expressions to understand the state
+5. **Decide** — either you have enough information to diagnose the bug, or set new breakpoints and continue
+6. **Stop** the debug session
+7. **Fix the source code** based on what you learned
+
+### Runtime mutation
+
+Some languages and runtimes support modifying variables and re-executing frames at runtime. Others do not — compiled languages like Zig, Rust, and Go may not support meaningful runtime mutation. Call `debug_capabilities` after launching a session to determine what the debug driver supports.
+
+If runtime mutation is supported, you may use it to test hypotheses — "if I change this value, does the bug disappear?" — but always fix the source code for the actual resolution. Runtime mutation is for diagnosis, not for fixes.
+
+If runtime mutation is not supported, the debugger is observation-only: inspect state, diagnose the problem, stop the session, then fix the source code.
+
+### Session recovery
+
+Debug sessions may terminate due to idle timeout. If a debug tool call fails because the session is no longer available, relaunch the session and restore your previous state — re-set all breakpoints, exception filters, and watchpoints that were active before the session was lost.
+
+### Cleanup
+
+Always call `debug_stop` when you are done investigating. Never leave debug sessions running.
+</cog:debug>
 </cog>

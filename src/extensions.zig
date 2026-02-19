@@ -197,6 +197,71 @@ fn scanInstalled(allocator: std.mem.Allocator, file_ext: []const u8) ?Extension 
     return null;
 }
 
+/// Info about an installed extension for display purposes.
+pub const InstalledInfo = struct {
+    name: []const u8,
+    file_extensions: []const []const u8,
+    has_debugger: bool,
+};
+
+/// List all installed extensions found in ~/.config/cog/extensions/.
+/// Caller must free each entry's name and file_extensions with freeInstalledList().
+pub fn listInstalled(allocator: std.mem.Allocator) ![]InstalledInfo {
+    var result: std.ArrayListUnmanaged(InstalledInfo) = .empty;
+    errdefer {
+        for (result.items) |item| {
+            allocator.free(item.name);
+            for (item.file_extensions) |e| allocator.free(e);
+            allocator.free(item.file_extensions);
+        }
+        result.deinit(allocator);
+    }
+
+    const config_dir = try paths.getGlobalConfigDir(allocator);
+    defer allocator.free(config_dir);
+
+    const ext_dir = try std.fmt.allocPrint(allocator, "{s}/extensions", .{config_dir});
+    defer allocator.free(ext_dir);
+
+    var dir = std.fs.openDirAbsolute(ext_dir, .{ .iterate = true }) catch return try result.toOwnedSlice(allocator);
+    defer dir.close();
+
+    var iter = dir.iterate();
+    while (try iter.next()) |entry| {
+        if (entry.kind != .directory) continue;
+
+        const manifest_path = try std.fmt.allocPrint(allocator, "{s}/{s}/cog-extension.json", .{ ext_dir, entry.name });
+        defer allocator.free(manifest_path);
+
+        const manifest = readManifest(allocator, manifest_path) catch continue;
+        defer {
+            for (manifest.args) |a| allocator.free(a);
+            allocator.free(manifest.args);
+            allocator.free(manifest.build_cmd);
+            allocator.free(manifest.ext_dir);
+            freeDebuggerAllocs(allocator, manifest.debugger);
+        }
+        // Keep name and file_extensions, free the rest
+        try result.append(allocator, .{
+            .name = manifest.name,
+            .file_extensions = manifest.file_extensions,
+            .has_debugger = manifest.debugger != null,
+        });
+    }
+
+    return try result.toOwnedSlice(allocator);
+}
+
+/// Free the list returned by listInstalled.
+pub fn freeInstalledList(allocator: std.mem.Allocator, list: []InstalledInfo) void {
+    for (list) |item| {
+        allocator.free(item.name);
+        for (item.file_extensions) |e| allocator.free(e);
+        allocator.free(item.file_extensions);
+    }
+    allocator.free(list);
+}
+
 const ManifestData = struct {
     name: []const u8,
     file_extensions: []const []const u8,

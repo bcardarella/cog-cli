@@ -13,6 +13,8 @@ const extensions = @import("extensions.zig");
 const tree_sitter_indexer = @import("tree_sitter_indexer.zig");
 
 // ANSI styles
+const cyan = "\x1B[36m";
+const bold = "\x1B[1m";
 const dim = "\x1B[2m";
 const reset = "\x1B[0m";
 
@@ -27,7 +29,7 @@ fn printStdout(text: []const u8) void {
 }
 
 fn printErr(msg: []const u8) void {
-    var buf: [4096]u8 = undefined;
+    var buf: [8192]u8 = undefined;
     var w = std.fs.File.stderr().writer(&buf);
     w.interface.writeAll(msg) catch {};
     w.interface.flush() catch {};
@@ -36,6 +38,70 @@ fn printErr(msg: []const u8) void {
 fn printCommandHelp(comptime help_text: []const u8) void {
     tui.header();
     printErr(help_text);
+}
+
+pub fn builtinExtensionList() []const u8 {
+    comptime {
+        var out: []const u8 = "";
+        for (extensions.builtins) |b| {
+            out = out ++ "    " ++ bold ++ b.name ++ reset ++ dim;
+            for (b.file_extensions) |ext| {
+                out = out ++ " " ++ ext;
+            }
+            out = out ++ reset ++ "\n";
+        }
+        return out;
+    }
+}
+
+pub fn listInstalledBlock(allocator: std.mem.Allocator) ?[]const u8 {
+    return listInstalledBlockFiltered(allocator, false);
+}
+
+pub fn listInstalledDebugBlock(allocator: std.mem.Allocator) ?[]const u8 {
+    return listInstalledBlockFiltered(allocator, true);
+}
+
+fn listInstalledBlockFiltered(allocator: std.mem.Allocator, debug_only: bool) ?[]const u8 {
+    const installed = extensions.listInstalled(allocator) catch return null;
+    defer extensions.freeInstalledList(allocator, installed);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(allocator);
+    var count: usize = 0;
+    for (installed) |ext| {
+        if (debug_only and !ext.has_debugger) continue;
+        if (count == 0) {
+            w.writeAll(cyan ++ bold ++ "  Installed" ++ reset ++ "\n") catch return null;
+        }
+        w.writeAll("    " ++ bold) catch return null;
+        w.writeAll(ext.name) catch return null;
+        w.writeAll(reset ++ dim) catch return null;
+        for (ext.file_extensions) |fe| {
+            w.writeAll(" ") catch return null;
+            w.writeAll(fe) catch return null;
+        }
+        w.writeAll(reset ++ "\n") catch return null;
+        count += 1;
+    }
+    if (count == 0) return null;
+    w.writeAll("\n") catch return null;
+    return buf.toOwnedSlice(allocator) catch return null;
+}
+
+pub fn builtinDebugExtensionList() []const u8 {
+    comptime {
+        var out: []const u8 = "";
+        for (extensions.builtins) |b| {
+            if (b.debugger == null) continue;
+            out = out ++ "    " ++ bold ++ b.name ++ reset ++ dim;
+            for (b.file_extensions) |ext| {
+                out = out ++ " " ++ ext;
+            }
+            out = out ++ reset ++ "\n";
+        }
+        return out;
+    }
 }
 
 fn findFlag(args: []const [:0]const u8, flag: []const u8) ?[:0]const u8 {
@@ -60,7 +126,7 @@ fn hasFlag(args: []const [:0]const u8, flag: []const u8) bool {
 /// Get the path to the index.scip file.
 fn getIndexPath(allocator: std.mem.Allocator) ![]const u8 {
     const cog_dir = paths.findCogDir(allocator) catch {
-        printErr("error: no .cog directory found. Run " ++ dim ++ "cog code/index" ++ reset ++ " first.\n");
+        printErr("error: no .cog directory found. Run " ++ dim ++ "cog code:index" ++ reset ++ " first.\n");
         return error.Explained;
     };
     defer allocator.free(cog_dir);
@@ -272,7 +338,7 @@ fn loadIndex(allocator: std.mem.Allocator) !CodeIndex {
     defer allocator.free(index_path);
 
     const file = std.fs.openFileAbsolute(index_path, .{}) catch {
-        printErr("error: no index found. Run " ++ dim ++ "cog code/index" ++ reset ++ " first.\n");
+        printErr("error: no index found. Run " ++ dim ++ "cog code:index" ++ reset ++ " first.\n");
         return error.Explained;
     };
     defer file.close();
@@ -345,9 +411,37 @@ fn codeIndex(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         }
     }
 
-    // Default to "**/*" (everything, recursive) when no patterns given
     if (patterns.items.len == 0) {
-        try patterns.append(allocator, "**/*");
+        const static_part = bold ++ "  cog code:index" ++ reset ++ " " ++ dim ++ "<pattern> [pattern...]" ++ reset ++ "\n"
+            ++ "\n"
+            ++ "  Specify one or more glob patterns to index.\n"
+            ++ "\n"
+            ++ cyan ++ bold ++ "  Examples" ++ reset ++ "\n"
+            ++ "    cog code:index \"**/*.ts\"       " ++ dim ++ "All .ts files recursively" ++ reset ++ "\n"
+            ++ "    cog code:index \"src/**/*.go\"   " ++ dim ++ "All .go files under src/" ++ reset ++ "\n"
+            ++ "    cog code:index src/main.zig   " ++ dim ++ "A single file" ++ reset ++ "\n"
+            ++ "\n"
+            ++ cyan ++ bold ++ "  Built-in" ++ reset ++ "\n"
+            ++ comptime builtinExtensionList()
+            ++ "\n";
+
+        const installed_block = listInstalledBlock(allocator);
+        defer if (installed_block) |b| allocator.free(b);
+
+        tui.header();
+        if (installed_block) |block| {
+            const combined = std.fmt.allocPrint(allocator, "{s}{s}", .{ static_part, block }) catch {
+                printErr(static_part);
+                printErr(block);
+                return error.Explained;
+            };
+            defer allocator.free(combined);
+            printErr(combined);
+        } else {
+            printErr(static_part);
+        }
+
+        return error.Explained;
     }
 
     const cog_dir = paths.findOrCreateCogDir(allocator) catch {

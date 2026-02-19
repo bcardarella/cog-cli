@@ -37,7 +37,7 @@ fn mainInner() !void {
     const args = args_list.items;
 
     if (args.len < 2) {
-        printHelp();
+        printHelp(allocator);
         return;
     }
 
@@ -59,7 +59,7 @@ fn mainInner() !void {
 
     // Handle --help at top level
     if (std.mem.eql(u8, subcmd, "--help") or std.mem.eql(u8, subcmd, "-h") or std.mem.eql(u8, subcmd, "help")) {
-        printHelp();
+        printHelp(allocator);
         return;
     }
 
@@ -98,7 +98,7 @@ fn mainInner() !void {
         return;
     }
     if (std.mem.eql(u8, subcmd, "debug")) {
-        printDebugHelp();
+        printDebugHelp(allocator);
         return;
     }
 
@@ -121,12 +121,44 @@ fn mainInner() !void {
     return error.Explained;
 }
 
-fn printHelp() void {
+fn printHelp(allocator: std.mem.Allocator) void {
+    const static_help = bold ++ "  Usage: " ++ reset ++ "cog <command> [options]\n"
+        ++ "\n"
+        ++ cyan ++ bold ++ "  Setup" ++ reset ++ "\n"
+        ++ "    " ++ bold ++ "init" ++ reset ++ "                  " ++ dim ++ "Interactive setup for the current directory" ++ reset ++ "\n"
+        ++ "\n"
+        ++ cyan ++ bold ++ "  Commands" ++ reset ++ "\n"
+        ++ "    " ++ bold ++ "code" ++ reset ++ "                  " ++ dim ++ "Code indexing (CLI compatibility)" ++ reset ++ "\n"
+        ++ "    " ++ bold ++ "mcp" ++ reset ++ "                   " ++ dim ++ "MCP server over stdio (primary interface)" ++ reset ++ "\n"
+        ++ "    " ++ bold ++ "debug" ++ reset ++ "                 " ++ dim ++ "Debug daemon utilities" ++ reset ++ "\n"
+        ++ "    " ++ bold ++ "install" ++ reset ++ "               " ++ dim ++ "Install a language extension from a git URL" ++ reset ++ "\n"
+        ++ "\n"
+        ++ cyan ++ bold ++ "  Built-in" ++ reset ++ "\n"
+        ++ comptime code_intel.builtinExtensionList()
+        ++ "\n";
+
+    const footer = dim ++ "  Run 'cog <command> --help' for details on a specific command." ++ reset ++ "\n\n";
+
+    const installed_block = code_intel.listInstalledBlock(allocator);
+    defer if (installed_block) |b| allocator.free(b);
+
     tui.header();
     printErr(dim ++ "  v");
     printErr(version);
     printErr(reset ++ "\n\n");
-    printErr(bold ++ "  Usage: " ++ reset ++ "cog <command> [options]\n" ++ "\n" ++ cyan ++ bold ++ "  Setup" ++ reset ++ "\n" ++ "    " ++ bold ++ "init" ++ reset ++ "                  " ++ dim ++ "Interactive setup for the current directory" ++ reset ++ "\n" ++ "\n" ++ cyan ++ bold ++ "  Commands" ++ reset ++ "\n" ++ "    " ++ bold ++ "code" ++ reset ++ "                  " ++ dim ++ "Code indexing (CLI compatibility)" ++ reset ++ "\n" ++ "    " ++ bold ++ "mcp" ++ reset ++ "                   " ++ dim ++ "MCP server over stdio (primary interface)" ++ reset ++ "\n" ++ "    " ++ bold ++ "debug" ++ reset ++ "                 " ++ dim ++ "Debug daemon utilities" ++ reset ++ "\n" ++ "    " ++ bold ++ "install" ++ reset ++ "               " ++ dim ++ "Install a language extension from a git URL" ++ reset ++ "\n" ++ "\n" ++ dim ++ "  Run 'cog <command> --help' for details on a specific command." ++ reset ++ "\n" ++ "\n");
+
+    if (installed_block) |block| {
+        const combined = std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ static_help, block, footer }) catch {
+            printErr(static_help);
+            printErr(block);
+            printErr(footer);
+            return;
+        };
+        defer allocator.free(combined);
+        printErr(combined);
+    } else {
+        printErr(static_help ++ footer);
+    }
 }
 
 fn printCodeHelp() void {
@@ -134,9 +166,37 @@ fn printCodeHelp() void {
     printErr(bold ++ "  cog code" ++ reset ++ " — Code indexing\n" ++ "\n" ++ cyan ++ bold ++ "  Commands" ++ reset ++ "\n" ++ "    " ++ bold ++ "code:index" ++ reset ++ "            " ++ dim ++ "Build SCIP code index (per-file incremental)" ++ reset ++ "\n" ++ "\n" ++ dim ++ "  code:query, code:status, code:edit, code:create, code:delete, and code:rename" ++ reset ++ "\n" ++ dim ++ "  moved to MCP tools (cog_code_*). Run 'cog mcp --help' for MCP usage." ++ reset ++ "\n" ++ "\n");
 }
 
-fn printDebugHelp() void {
+fn printDebugHelp(allocator: std.mem.Allocator) void {
+    const static_debug = bold ++ "  cog debug" ++ reset ++ " — Debug daemon utilities\n"
+        ++ "\n"
+        ++ cyan ++ bold ++ "  Server" ++ reset ++ "\n"
+        ++ "    " ++ bold ++ "debug:serve" ++ reset ++ "           " ++ dim ++ "Start the debug daemon" ++ reset ++ "\n"
+        ++ "    " ++ bold ++ "debug:dashboard" ++ reset ++ "       " ++ dim ++ "Live debug session dashboard" ++ reset ++ "\n"
+        ++ "    " ++ bold ++ "debug:status" ++ reset ++ "          " ++ dim ++ "Check daemon status and active sessions" ++ reset ++ "\n"
+        ++ "    " ++ bold ++ "debug:kill" ++ reset ++ "            " ++ dim ++ "Stop the debug daemon" ++ reset ++ "\n"
+        ++ "    " ++ bold ++ "debug:sign" ++ reset ++ "            " ++ dim ++ "Code-sign binary with debug entitlements (macOS)" ++ reset ++ "\n"
+        ++ "\n"
+        ++ cyan ++ bold ++ "  Built-in" ++ reset ++ "\n"
+        ++ comptime code_intel.builtinDebugExtensionList()
+        ++ "\n"
+        ++ dim ++ "  debug:send moved to MCP tools (debug_*). Run 'cog mcp --help'." ++ reset ++ "\n"
+        ++ "\n";
+
+    const installed_block = code_intel.listInstalledDebugBlock(allocator);
+    defer if (installed_block) |b| allocator.free(b);
+
     tui.header();
-    printErr(bold ++ "  cog debug" ++ reset ++ " — Debug daemon utilities\n" ++ "\n" ++ cyan ++ bold ++ "  Server" ++ reset ++ "\n" ++ "    " ++ bold ++ "debug:serve" ++ reset ++ "           " ++ dim ++ "Start the debug daemon" ++ reset ++ "\n" ++ "    " ++ bold ++ "debug:dashboard" ++ reset ++ "       " ++ dim ++ "Live debug session dashboard" ++ reset ++ "\n" ++ "    " ++ bold ++ "debug:status" ++ reset ++ "          " ++ dim ++ "Check daemon status and active sessions" ++ reset ++ "\n" ++ "    " ++ bold ++ "debug:kill" ++ reset ++ "            " ++ dim ++ "Stop the debug daemon" ++ reset ++ "\n" ++ "    " ++ bold ++ "debug:sign" ++ reset ++ "            " ++ dim ++ "Code-sign binary with debug entitlements (macOS)" ++ reset ++ "\n" ++ "\n" ++ dim ++ "  debug:send moved to MCP tools (debug_*). Run 'cog mcp --help'." ++ reset ++ "\n" ++ "\n");
+    if (installed_block) |block| {
+        const combined = std.fmt.allocPrint(allocator, "{s}{s}", .{ static_debug, block }) catch {
+            printErr(static_debug);
+            printErr(block);
+            return;
+        };
+        defer allocator.free(combined);
+        printErr(combined);
+    } else {
+        printErr(static_debug);
+    }
 }
 
 fn printMcpHelp() void {
