@@ -16,7 +16,7 @@
 
 ## Why Cog?
 
-AI coding agents start every session from scratch. They don't remember the architectural decisions from last week. They can't look up where a function is defined without grepping through your entire codebase. They can't set a breakpoint.
+AI coding can feel fast but it's still limited by suboptimal methods and tooling. Your agent doesn't remember the architectural decisions from last week. It can't look up where a function is defined without grepping through your entire codebase. It can't set a breakpoint.
 
 We built Cog to fix that. It's a single native binary that runs as an MCP server and gives your agent three capabilities it doesn't have on its own:
 
@@ -28,12 +28,12 @@ We built Cog to fix that. It's a single native binary that runs as an MCP server
 
 We benchmarked Cog's code intelligence against standard agent tools (grep, glob, read) on the React codebase:
 
-| Task | Cog | Without Cog | Savings |
-|------|-----|-------------|---------|
-| Find `createElement` definition | 3.7s, 1 call | 34.1s, 15 calls | **9.2x faster, 98% fewer tokens** |
-| Find `useState` references | 9.3s, 2 calls | 27.4s, 15 calls | **2.9x faster, 90% fewer tokens** |
-| List `ReactFiberWorkLoop` symbols | 10.8s, 1 call | 35.7s, 13 calls | **3.3x faster, 84% fewer tokens** |
-| Find `Component` class | 14.3s, 5 calls | 28.9s, 15 calls | **2.0x faster, 74% fewer tokens** |
+| Task | Cog | Without Cog | Speedup | Token Savings |
+|------|-----|-------------|---------|---------------|
+| Find `createElement` definition | 3.7s, 1 call, 1.4K tokens | 34.1s, 15 calls, 78.4K tokens | **9.2x faster** | **98%** |
+| Find `useState` references | 9.3s, 2 calls, 2.5K tokens | 27.4s, 15 calls, 24.1K tokens | **2.9x faster** | **90%** |
+| List `ReactFiberWorkLoop` symbols | 10.8s, 1 call, 4.0K tokens | 35.7s, 13 calls, 25.2K tokens | **3.3x faster** | **84%** |
+| Find `Component` class | 14.3s, 5 calls, 7.4K tokens | 28.9s, 15 calls, 28.1K tokens | **2.0x faster** | **74%** |
 
 On average, **2.8x faster with 89% fewer tokens**.
 
