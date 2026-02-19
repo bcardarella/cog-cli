@@ -4,6 +4,7 @@ const paths = @import("paths.zig");
 pub const Config = struct {
     api_key: []const u8,
     url: []const u8,
+    brain_url: []const u8,
 
     pub fn load(allocator: std.mem.Allocator) !Config {
         const api_key = getApiKey(allocator) catch |err| switch (err) {
@@ -25,7 +26,16 @@ pub const Config = struct {
         };
         defer allocator.free(cog_content);
 
-        const url = resolveUrl(allocator, cog_content) catch |err| switch (err) {
+        const brain_url = resolveBrainUrl(allocator, cog_content) catch |err| switch (err) {
+            error.InvalidCogUrl => {
+                printErr("error: invalid URL in settings file\n");
+                return error.Explained;
+            },
+            else => return err,
+        };
+        errdefer allocator.free(brain_url);
+
+        const url = extractApiUrl(allocator, brain_url) catch |err| switch (err) {
             error.InvalidCogUrl => {
                 printErr("error: invalid URL in settings file\n");
                 return error.Explained;
@@ -33,12 +43,13 @@ pub const Config = struct {
             else => return err,
         };
 
-        return .{ .api_key = api_key, .url = url };
+        return .{ .api_key = api_key, .url = url, .brain_url = brain_url };
     }
 
     pub fn deinit(self: Config, allocator: std.mem.Allocator) void {
         allocator.free(self.api_key);
         allocator.free(self.url);
+        allocator.free(self.brain_url);
     }
 };
 
@@ -81,15 +92,11 @@ pub fn findCogFile(allocator: std.mem.Allocator) ![]const u8 {
     defer allocator.free(current);
 
     while (true) {
-        // Try .cog/settings.json first, then .cog.json, then legacy .cog
         const settings_path = std.fmt.allocPrint(allocator, "{s}/.cog/settings.json", .{current}) catch null;
         const raw = if (settings_path) |sp| blk: {
             defer allocator.free(sp);
-            break :blk readFileAtPath(allocator, sp) orelse
-                readFileInDir(allocator, current, ".cog.json") orelse
-                readFileInDir(allocator, current, ".cog");
-        } else readFileInDir(allocator, current, ".cog.json") orelse
-            readFileInDir(allocator, current, ".cog");
+            break :blk readFileAtPath(allocator, sp);
+        } else null;
 
         if (raw) |content| {
             defer allocator.free(content);
@@ -126,6 +133,12 @@ fn readFileInDir(allocator: std.mem.Allocator, dir_path: []const u8, filename: [
 }
 
 pub fn resolveUrl(allocator: std.mem.Allocator, cog_content: []const u8) ![]const u8 {
+    const brain_url = try resolveBrainUrl(allocator, cog_content);
+    defer allocator.free(brain_url);
+    return extractApiUrl(allocator, brain_url);
+}
+
+pub fn resolveBrainUrl(allocator: std.mem.Allocator, cog_content: []const u8) ![]const u8 {
     // Try JSON format first: {"brain": {"url": "https://host/user/brain"}}
     if (std.json.parseFromSlice(std.json.Value, allocator, cog_content, .{})) |parsed| {
         defer parsed.deinit();
@@ -134,8 +147,7 @@ pub fn resolveUrl(allocator: std.mem.Allocator, cog_content: []const u8) ![]cons
                 if (brain == .object) {
                     if (brain.object.get("url")) |url_val| {
                         if (url_val == .string) {
-                            const url = url_val.string;
-                            return extractApiUrl(allocator, url);
+                            return allocator.dupe(u8, url_val.string);
                         }
                     }
                 }
@@ -149,10 +161,8 @@ pub fn resolveUrl(allocator: std.mem.Allocator, cog_content: []const u8) ![]cons
     if (std.mem.startsWith(u8, cog_content, prefix)) {
         const rest = cog_content[prefix.len..];
         if (rest.len == 0) return error.InvalidCogUrl;
-        if (std.mem.indexOfScalar(u8, rest, '/')) |slash| {
-            const host = rest[0..slash];
-            const path = rest[slash..];
-            return std.fmt.allocPrint(allocator, "https://{s}/api/v1{s}", .{ host, path });
+        if (std.mem.indexOfScalar(u8, rest, '/')) |_| {
+            return std.fmt.allocPrint(allocator, "https://{s}", .{rest});
         }
     }
 

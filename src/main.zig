@@ -22,10 +22,6 @@ pub fn main() void {
 }
 
 fn mainInner() !void {
-    const curl = @import("cog").curl;
-    curl.globalInit();
-    defer curl.globalCleanup();
-
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -48,6 +44,13 @@ fn mainInner() !void {
     const subcmd: []const u8 = args[1];
     const cmd_args = args[2..];
 
+    // Avoid unnecessary startup work for MCP server mode.
+    if (!std.mem.eql(u8, subcmd, "mcp")) {
+        const curl = @import("cog").curl;
+        curl.globalInit();
+        defer curl.globalCleanup();
+    }
+
     // Handle --version
     if (std.mem.eql(u8, subcmd, "--version") or std.mem.eql(u8, subcmd, "-v")) {
         printStdout(version);
@@ -68,7 +71,7 @@ fn mainInner() !void {
 
     // Handle update command (doesn't need config)
     if (std.mem.eql(u8, subcmd, "update")) {
-        try commands.updatePromptAndSkill(allocator, cmd_args);
+        try commands.updatePrompt(allocator, cmd_args);
         return;
     }
 

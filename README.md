@@ -52,7 +52,7 @@ Run the interactive setup:
 cog init
 ```
 
-You'll be prompted to choose between **Memory + Tools** (full setup with brain selection) or **Tools only** (code intelligence and debug server), then select which AI coding agents to configure. For each selected agent, `cog init` writes the system prompt, installs the skill, configures the MCP server, and sets up hooks.
+You'll be prompted to choose between **Memory + Tools** (full setup with brain selection) or **Tools only** (code intelligence and debug server), then select which AI coding agents to configure. For each selected agent, `cog init` writes the system prompt, configures the MCP server, and sets up hooks. If any selected agent supports config-file tool permissions, you'll be asked whether to auto-allow all Cog tools without prompting (currently supported by Claude Code, Gemini CLI, and Amp).
 
 **Supported agents:** Claude Code, Gemini CLI, GitHub Copilot, Windsurf, Cursor, OpenAI Codex CLI, Amp, Goose, Roo Code, OpenCode.
 
@@ -105,7 +105,7 @@ Run `cog --help` for an overview, or `cog <group> --help` to list commands in a 
 | `debug` | Debug daemon for AI agents |
 | `install` | Language extension management |
 | `init` | Interactive multi-agent project setup |
-| `update` | Fetch latest prompt and skill |
+| `update` | Fetch latest prompt |
 
 ---
 
@@ -667,7 +667,7 @@ See **[Writing a Language Extension](EXTENSIONS.md)** for a complete guide on bu
 
 ### `init`
 
-Interactive multi-agent setup for the current directory. Optionally configures memory, then sets up system prompts, skills, MCP server, and hooks for your selected AI coding agents.
+Interactive multi-agent setup for the current directory. Optionally configures memory, then sets up system prompts, MCP server, and hooks for your selected AI coding agents. For agents that support config-file tool permissions (Claude Code, Gemini CLI, Amp), offers to auto-allow all Cog tools without per-call prompting.
 
 ```
 cog init [options]
@@ -679,7 +679,7 @@ cog init [options]
 
 ### `update`
 
-Fetch the latest system prompt and agent skill. Updates existing prompt files and the installed `SKILL.md`.
+Fetch the latest system prompt. Updates existing prompt files (CLAUDE.md/AGENTS.md).
 
 ```
 cog update [options]

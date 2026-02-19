@@ -17,11 +17,20 @@ const DebugServer = debug_server_mod.DebugServer;
 var server_version: []const u8 = "0.0.0";
 var shutdown_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
+const RemoteTool = struct {
+    name: []const u8, // local name: "mem_recall"
+    remote_name: []const u8, // server name: "cog_recall"
+    description: []const u8,
+    input_schema: []const u8, // raw JSON string
+};
+
 const Runtime = struct {
     allocator: std.mem.Allocator,
     mem_config: ?Config,
     debug_server: DebugServer,
     code_cache: ?code_intel.CodeIndex = null,
+    remote_tools: ?[]RemoteTool = null,
+    mcp_session_id: ?[]const u8 = null,
 
     fn init(allocator: std.mem.Allocator) Runtime {
         return .{
@@ -29,12 +38,24 @@ const Runtime = struct {
             .mem_config = Config.load(allocator) catch null,
             .debug_server = DebugServer.init(allocator),
             .code_cache = null,
+            .remote_tools = null,
+            .mcp_session_id = null,
         };
     }
 
     fn deinit(self: *Runtime) void {
         if (self.mem_config) |cfg| cfg.deinit(self.allocator);
         if (self.code_cache) |*ci| ci.deinit(self.allocator);
+        if (self.remote_tools) |tools| {
+            for (tools) |tool| {
+                self.allocator.free(tool.name);
+                self.allocator.free(tool.remote_name);
+                self.allocator.free(tool.description);
+                self.allocator.free(tool.input_schema);
+            }
+            self.allocator.free(tools);
+        }
+        if (self.mcp_session_id) |sid| self.allocator.free(sid);
         self.debug_server.deinit();
     }
 
@@ -78,10 +99,13 @@ const Runtime = struct {
 pub fn serve(allocator: std.mem.Allocator, version: []const u8) !void {
     server_version = version;
     shutdown_requested.store(false, .release);
+    debugLogInit();
+    defer debugLogDeinit();
     setupSignalHandler();
 
     var runtime = Runtime.init(allocator);
     defer runtime.deinit();
+    debugLog("Runtime initialized, mem_config={s}, entering main loop", .{if (runtime.mem_config != null) "present" else "null"});
 
     const stdin = std.fs.File.stdin();
 
@@ -95,12 +119,31 @@ pub fn serve(allocator: std.mem.Allocator, version: []const u8) !void {
             var fds = [_]posix.pollfd{.{ .fd = stdin.handle, .events = posix.POLL.IN, .revents = 0 }};
             const poll_result = posix.poll(&fds, 250) catch continue;
             if (poll_result == 0) continue;
-            if (fds[0].revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) break;
-            if (fds[0].revents & posix.POLL.IN == 0) continue;
+            if (fds[0].revents & posix.POLL.ERR != 0) {
+                debugLog("poll: POLLERR on stdin, exiting", .{});
+                break;
+            }
+            if (fds[0].revents & posix.POLL.IN == 0) {
+                // If stdin is hung up and there's no readable data left,
+                // terminate the server loop.
+                if (fds[0].revents & posix.POLL.HUP != 0) {
+                    debugLog("poll: POLLHUP on stdin, exiting", .{});
+                    break;
+                }
+                continue;
+            }
         }
 
-        const n = stdin.read(&read_buf) catch break;
-        if (n == 0) break;
+        const n = stdin.read(&read_buf) catch |err| {
+            debugLog("stdin read error: {s}", .{@errorName(err)});
+            break;
+        };
+        if (n == 0) {
+            debugLog("stdin EOF (read returned 0)", .{});
+            break;
+        }
+        debugLog("Read {d} bytes from stdin", .{n});
+        debugLogBytes("RAW stdin bytes: ", read_buf[0..n]);
         if (std.mem.indexOfScalar(u8, read_buf[0..n], 0x03) != null) {
             shutdown_requested.store(true, .release);
             break;
@@ -109,7 +152,9 @@ pub fn serve(allocator: std.mem.Allocator, version: []const u8) !void {
 
         while (try nextMessageFromBuffer(allocator, &input_buf)) |msg| {
             defer allocator.free(msg);
-            processMessage(&runtime, msg) catch {};
+            processMessage(&runtime, msg) catch |err| {
+                logErr("MCP processMessage error: ", err);
+            };
         }
     }
 }
@@ -130,19 +175,6 @@ fn sigHandler(_: c_int) callconv(.c) void {
     shutdown_requested.store(true, .release);
 }
 
-fn parseContentLength(headers: []const u8) ?usize {
-    var it = std.mem.splitSequence(u8, headers, "\r\n");
-    while (it.next()) |line| {
-        if (line.len == 0) continue;
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
-        const name = std.mem.trim(u8, line[0..colon], " \t");
-        if (!std.ascii.eqlIgnoreCase(name, "Content-Length")) continue;
-        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
-        return std.fmt.parseInt(usize, value, 10) catch null;
-    }
-    return null;
-}
-
 fn drainConsumed(allocator: std.mem.Allocator, input: *std.ArrayListUnmanaged(u8), consumed: usize) !void {
     if (consumed == 0) return;
     if (consumed >= input.items.len) {
@@ -156,26 +188,76 @@ fn drainConsumed(allocator: std.mem.Allocator, input: *std.ArrayListUnmanaged(u8
 }
 
 fn nextMessageFromBuffer(allocator: std.mem.Allocator, input: *std.ArrayListUnmanaged(u8)) !?[]u8 {
+    // MCP stdio transport: messages are newline-delimited JSON.
+    // Each message is a single JSON object on one line, terminated by \n.
     const bytes = input.items;
+    if (bytes.len == 0) return null;
 
-    if (std.mem.indexOf(u8, bytes, "\r\n\r\n")) |header_end| {
-        const headers = bytes[0..header_end];
-        const content_len = parseContentLength(headers) orelse return null;
-        const body_start = header_end + 4;
-        if (bytes.len < body_start + content_len) return null;
-        const msg = try allocator.dupe(u8, bytes[body_start .. body_start + content_len]);
-        try drainConsumed(allocator, input, body_start + content_len);
+    // Skip any leading whitespace/newlines between messages.
+    var start: usize = 0;
+    while (start < bytes.len and (bytes[start] == '\n' or bytes[start] == '\r' or bytes[start] == ' ' or bytes[start] == '\t')) {
+        start += 1;
+    }
+    if (start > 0) {
+        try drainConsumed(allocator, input, start);
+        if (input.items.len == 0) return null;
+    }
+
+    // Find the newline that terminates this JSON message.
+    const newline_pos = std.mem.indexOfScalar(u8, input.items, '\n');
+    if (newline_pos) |pos| {
+        const msg = try allocator.dupe(u8, input.items[0..pos]);
+        try drainConsumed(allocator, input, pos + 1);
         return msg;
     }
 
+    // No newline yet — check if the buffer contains a complete JSON object.
+    // Some clients send JSON without a trailing newline (e.g. as last message
+    // before closing stdin). Try to parse what we have.
+    if (input.items.len > 0 and input.items[0] == '{') {
+        // Validate it's complete JSON by counting braces.
+        var depth: usize = 0;
+        var in_string = false;
+        var escape = false;
+        for (input.items, 0..) |c, i| {
+            if (escape) {
+                escape = false;
+                continue;
+            }
+            if (c == '\\' and in_string) {
+                escape = true;
+                continue;
+            }
+            if (c == '"' and !escape) {
+                in_string = !in_string;
+                continue;
+            }
+            if (!in_string) {
+                if (c == '{') depth += 1;
+                if (c == '}') {
+                    depth -= 1;
+                    if (depth == 0) {
+                        const end = i + 1;
+                        const msg = try allocator.dupe(u8, input.items[0..end]);
+                        try drainConsumed(allocator, input, end);
+                        return msg;
+                    }
+                }
+            }
+        }
+    }
+
+    // Incomplete message — wait for more data.
     return null;
 }
 
 fn processMessage(runtime: *Runtime, line: []const u8) !void {
     const allocator = runtime.allocator;
     const stdout = std.fs.File.stdout();
+    debugLogBytes(">>> RECV: ", line);
 
     const parsed = json.parseFromSlice(json.Value, allocator, line, .{}) catch {
+        debugLog("Parse error on incoming message", .{});
         try writeError(allocator, null, -32700, "Parse error", stdout);
         return;
     };
@@ -196,36 +278,55 @@ fn processMessage(runtime: *Runtime, line: []const u8) !void {
         return;
     }
     const method = method_val.string;
+    debugLog("Method: {s}", .{method});
 
     // Get request id (may be null for notifications)
     const id = root.object.get("id");
 
     // Dispatch
     if (std.mem.eql(u8, method, "initialize")) {
-        try handleInitialize(allocator, id, stdout);
+        handleInitialize(allocator, id, stdout) catch {
+            writeInternalError(allocator, id, stdout);
+        };
     } else if (std.mem.eql(u8, method, "notifications/initialized")) {
         // No-op notification, no response needed
     } else if (std.mem.eql(u8, method, "shutdown")) {
-        try handleShutdown(allocator, id, stdout);
+        handleShutdown(allocator, id, stdout) catch {
+            writeInternalError(allocator, id, stdout);
+        };
     } else if (std.mem.eql(u8, method, "exit")) {
         shutdown_requested.store(true, .release);
     } else if (std.mem.eql(u8, method, "ping")) {
-        try handlePing(allocator, id, stdout);
+        handlePing(allocator, id, stdout) catch {
+            writeInternalError(allocator, id, stdout);
+        };
     } else if (std.mem.eql(u8, method, "tools/list")) {
-        try handleToolsList(runtime, id, stdout);
+        handleToolsList(runtime, id, stdout) catch {
+            writeInternalError(allocator, id, stdout);
+        };
     } else if (std.mem.eql(u8, method, "tools/call")) {
         const params = root.object.get("params");
-        try handleToolsCall(runtime, id, params, stdout);
+        handleToolsCall(runtime, id, params, stdout) catch {
+            writeInternalError(allocator, id, stdout);
+        };
     } else if (std.mem.eql(u8, method, "resources/list")) {
-        try handleResourcesList(allocator, id, stdout);
+        handleResourcesList(allocator, id, stdout) catch {
+            writeInternalError(allocator, id, stdout);
+        };
     } else if (std.mem.eql(u8, method, "resources/read")) {
         const params = root.object.get("params");
-        try handleResourcesRead(runtime, id, params, stdout);
+        handleResourcesRead(runtime, id, params, stdout) catch {
+            writeInternalError(allocator, id, stdout);
+        };
     } else if (std.mem.eql(u8, method, "prompts/list")) {
-        try handlePromptsList(allocator, id, stdout);
+        handlePromptsList(allocator, id, stdout) catch {
+            writeInternalError(allocator, id, stdout);
+        };
     } else if (std.mem.eql(u8, method, "prompts/get")) {
         const params = root.object.get("params");
-        try handlePromptsGet(allocator, id, params, stdout);
+        handlePromptsGet(allocator, id, params, stdout) catch {
+            writeInternalError(allocator, id, stdout);
+        };
     } else if (std.mem.eql(u8, method, "notifications/cancelled") or std.mem.eql(u8, method, "notifications/progress")) {
         // Optional notifications; no-op.
     } else {
@@ -233,6 +334,11 @@ fn processMessage(runtime: *Runtime, line: []const u8) !void {
             try writeError(allocator, id, -32601, "Method not found", stdout);
         }
     }
+}
+
+fn writeInternalError(allocator: std.mem.Allocator, id: ?json.Value, stdout: std.fs.File) void {
+    if (id == null) return;
+    writeError(allocator, id, -32603, "Internal error", stdout) catch {};
 }
 
 fn handleShutdown(allocator: std.mem.Allocator, id: ?json.Value, stdout: std.fs.File) !void {
@@ -282,7 +388,7 @@ fn handleInitialize(allocator: std.mem.Allocator, id: ?json.Value, stdout: std.f
     try s.objectField("result");
     try s.beginObject();
     try s.objectField("protocolVersion");
-    try s.write("2024-11-05");
+    try s.write("2025-11-25");
     try s.objectField("capabilities");
     try s.beginObject();
     try s.objectField("tools");
@@ -547,7 +653,7 @@ fn handleResourcesRead(runtime: *Runtime, id: ?json.Value, params: ?json.Value, 
     const mime: []const u8 = "application/json";
 
     if (std.mem.eql(u8, uri, "cog://index/status")) {
-        payload = try callCodeStatus(runtime);
+        payload = callCodeStatus(runtime) catch try allocator.dupe(u8, "{\"exists\":false,\"error\":\"status_unavailable\"}");
     } else if (std.mem.eql(u8, uri, "cog://debug/tools")) {
         payload = try buildDebugToolsResourceJson(allocator);
     } else if (std.mem.eql(u8, uri, "cog://tools/catalog")) {
@@ -625,7 +731,7 @@ fn buildToolCatalogResourceJson(runtime: *Runtime) ![]u8 {
 }
 
 fn writeToolCatalog(runtime: *Runtime, allocator: std.mem.Allocator, s: *Stringify) !void {
-    try writeToolDef(s, "cog_code_query", "Find symbol definitions, references, file symbols, or project structure", &.{
+    try writeToolDef(s, "code.query", "Find symbol definitions, references, file symbols, or project structure", &.{
         .{ .name = "mode", .typ = "string", .desc = "Query mode: find, refs, symbols, or structure", .required = true },
         .{ .name = "name", .typ = "string", .desc = "Symbol name (for find/refs modes)", .required = false },
         .{ .name = "file", .typ = "string", .desc = "File path (for symbols mode)", .required = false },
@@ -633,143 +739,23 @@ fn writeToolCatalog(runtime: *Runtime, allocator: std.mem.Allocator, s: *Stringi
         .{ .name = "limit", .typ = "integer", .desc = "Max results to return", .required = false },
     });
 
-    try writeToolDef(s, "cog_code_index", "Build or update the SCIP code index", &.{
+    try writeToolDef(s, "code.index", "Build or update the SCIP code index", &.{
         .{ .name = "patterns", .typ = "array", .desc = "Glob patterns to index (default: **/*)", .required = false },
     });
 
-    try writeToolDef(s, "cog_code_edit", "Edit a file with string replacement and re-index", &.{
-        .{ .name = "file", .typ = "string", .desc = "File path to edit", .required = true },
-        .{ .name = "old_text", .typ = "string", .desc = "Text to find and replace", .required = true },
-        .{ .name = "new_text", .typ = "string", .desc = "Replacement text", .required = true },
-    });
+    try writeToolDef(s, "code.status", "Report index status", &.{});
 
-    try writeToolDef(s, "cog_code_create", "Create a new file and index it", &.{
-        .{ .name = "file", .typ = "string", .desc = "File path to create", .required = true },
-        .{ .name = "content", .typ = "string", .desc = "File content", .required = false },
-    });
+    // Lazily discover remote memory tools on first tools/list
+    if (runtime.hasMemory() and runtime.remote_tools == null) {
+        discoverRemoteTools(runtime) catch |err| {
+            debugLog("Remote tool discovery failed: {s}", .{@errorName(err)});
+        };
+    }
 
-    try writeToolDef(s, "cog_code_delete", "Delete a file and remove from index", &.{
-        .{ .name = "file", .typ = "string", .desc = "File path to delete", .required = true },
-    });
-
-    try writeToolDef(s, "cog_code_rename", "Rename a file and update index", &.{
-        .{ .name = "old_path", .typ = "string", .desc = "Current file path", .required = true },
-        .{ .name = "new_path", .typ = "string", .desc = "New file path", .required = true },
-    });
-
-    try writeToolDef(s, "cog_code_status", "Report index status", &.{});
-
-    if (runtime.hasMemory()) {
-        try writeToolDef(s, "cog_mem_recall", "Search memory using spreading activation", &.{
-            .{ .name = "query", .typ = "string", .desc = "What to search for", .required = true },
-            .{ .name = "limit", .typ = "integer", .desc = "Max seed results (default: 5)", .required = false },
-            .{ .name = "predicate_filter", .typ = "array", .desc = "Only include these predicate types", .required = false },
-            .{ .name = "exclude_predicates", .typ = "array", .desc = "Exclude these predicate types", .required = false },
-            .{ .name = "created_after", .typ = "string", .desc = "ISO 8601 date filter", .required = false },
-            .{ .name = "created_before", .typ = "string", .desc = "ISO 8601 date filter", .required = false },
-            .{ .name = "strengthen", .typ = "boolean", .desc = "Strengthen retrieved synapses (default: true)", .required = false },
-        });
-
-        try writeToolDef(s, "cog_mem_get", "Retrieve a specific engram by ID", &.{
-            .{ .name = "engram_id", .typ = "string", .desc = "UUID of the engram", .required = true },
-        });
-
-        try writeToolDef(s, "cog_mem_update", "Update an existing engram", &.{
-            .{ .name = "engram_id", .typ = "string", .desc = "UUID of the engram", .required = true },
-            .{ .name = "term", .typ = "string", .desc = "New term", .required = false },
-            .{ .name = "definition", .typ = "string", .desc = "New definition", .required = false },
-        });
-
-        try writeToolDef(s, "cog_mem_learn", "Store a new concept", &.{
-            .{ .name = "term", .typ = "string", .desc = "Concise canonical name (2-5 words)", .required = true },
-            .{ .name = "definition", .typ = "string", .desc = "Your understanding in 1-3 sentences", .required = true },
-            .{ .name = "associations", .typ = "array", .desc = "Links to existing concepts", .required = false },
-            .{ .name = "chain_to", .typ = "array", .desc = "Create a reasoning chain from this concept", .required = false },
-            .{ .name = "long_term", .typ = "boolean", .desc = "Skip short-term phase", .required = false },
-        });
-
-        try writeToolDef(s, "cog_mem_associate", "Create a link between two concepts", &.{
-            .{ .name = "source_term", .typ = "string", .desc = "Source concept term", .required = false },
-            .{ .name = "target_term", .typ = "string", .desc = "Target concept term", .required = false },
-            .{ .name = "source_id", .typ = "string", .desc = "Source engram UUID (alternative)", .required = false },
-            .{ .name = "target_id", .typ = "string", .desc = "Target engram UUID (alternative)", .required = false },
-            .{ .name = "predicate", .typ = "string", .desc = "Relationship type", .required = false },
-        });
-
-        try writeToolDef(s, "cog_mem_unlink", "Remove a synapse", &.{
-            .{ .name = "synapse_id", .typ = "string", .desc = "UUID of the synapse", .required = true },
-        });
-
-        try writeToolDef(s, "cog_mem_verify", "Confirm synapse accuracy", &.{
-            .{ .name = "synapse_id", .typ = "string", .desc = "UUID of the synapse", .required = true },
-        });
-
-        try writeToolDef(s, "cog_mem_trace", "Find reasoning path between concepts", &.{
-            .{ .name = "from_id", .typ = "string", .desc = "UUID of starting concept", .required = true },
-            .{ .name = "to_id", .typ = "string", .desc = "UUID of target concept", .required = true },
-        });
-
-        try writeToolDef(s, "cog_mem_connections", "List connections from an engram", &.{
-            .{ .name = "engram_id", .typ = "string", .desc = "UUID of the engram", .required = true },
-            .{ .name = "direction", .typ = "string", .desc = "outgoing, incoming, or both (default: both)", .required = false },
-        });
-
-        try writeToolDef(s, "cog_mem_refactor", "Update concept via term lookup", &.{
-            .{ .name = "term", .typ = "string", .desc = "Term to find (semantically matched)", .required = true },
-            .{ .name = "definition", .typ = "string", .desc = "New definition", .required = true },
-        });
-
-        try writeToolDef(s, "cog_mem_deprecate", "Mark a concept as obsolete", &.{
-            .{ .name = "term", .typ = "string", .desc = "Term to deprecate (semantically matched)", .required = true },
-        });
-
-        try writeToolDef(s, "cog_mem_reinforce", "Consolidate short-term to long-term", &.{
-            .{ .name = "engram_id", .typ = "string", .desc = "UUID of the short-term engram", .required = true },
-        });
-
-        try writeToolDef(s, "cog_mem_flush", "Delete a short-term memory", &.{
-            .{ .name = "engram_id", .typ = "string", .desc = "UUID of the short-term engram", .required = true },
-        });
-
-        try writeToolDef(s, "cog_mem_meld", "Create cross-brain connection", &.{
-            .{ .name = "target", .typ = "string", .desc = "Brain reference (brain_name, username/brain_name)", .required = true },
-            .{ .name = "description", .typ = "string", .desc = "Gates when meld is traversed during recall", .required = false },
-        });
-
-        try writeToolDef(s, "cog_mem_bulk_learn", "Batch store concepts", &.{
-            .{ .name = "items", .typ = "array", .desc = "Concepts to store (max 100)", .required = true },
-            .{ .name = "memory_term", .typ = "string", .desc = "short or long (default: long)", .required = false },
-        });
-
-        try writeToolDef(s, "cog_mem_bulk_associate", "Batch link concepts", &.{
-            .{ .name = "associations", .typ = "array", .desc = "Associations to create (max 100)", .required = true },
-        });
-
-        try writeToolDef(s, "cog_mem_bulk_recall", "Search with multiple queries", &.{
-            .{ .name = "queries", .typ = "array", .desc = "Search queries (max 20)", .required = true },
-            .{ .name = "limit", .typ = "integer", .desc = "Max seeds per query (default: 3)", .required = false },
-        });
-
-        try writeToolDef(s, "cog_mem_list_short_term", "List short-term memories pending consolidation", &.{
-            .{ .name = "limit", .typ = "integer", .desc = "Max results (default: 20)", .required = false },
-        });
-
-        try writeToolDef(s, "cog_mem_stale", "List synapses approaching staleness", &.{
-            .{ .name = "level", .typ = "string", .desc = "warning, critical, deprecated, or all", .required = false },
-            .{ .name = "limit", .typ = "integer", .desc = "Max results (default: 20)", .required = false },
-        });
-
-        try writeToolDef(s, "cog_mem_stats", "Get brain statistics", &.{});
-
-        try writeToolDef(s, "cog_mem_orphans", "List disconnected concepts", &.{
-            .{ .name = "limit", .typ = "integer", .desc = "Max results (default: 50)", .required = false },
-        });
-
-        try writeToolDef(s, "cog_mem_connectivity", "Analyze graph connectivity", &.{});
-
-        try writeToolDef(s, "cog_mem_list_terms", "List all engram terms", &.{
-            .{ .name = "limit", .typ = "integer", .desc = "Max results (default: 500)", .required = false },
-        });
+    if (runtime.remote_tools) |tools| {
+        for (tools) |tool| {
+            try writeToolDefWithSchemaJson(allocator, s, tool.name, tool.description, tool.input_schema);
+        }
     }
 
     for (debug_server_mod.tool_definitions) |tool| {
@@ -779,71 +765,212 @@ fn writeToolCatalog(runtime: *Runtime, allocator: std.mem.Allocator, s: *Stringi
 
 fn runtimeCallTool(runtime: *Runtime, tool_name: []const u8, arguments: ?json.Value) ![]const u8 {
     // Code tools
-    if (std.mem.eql(u8, tool_name, "cog_code_query")) {
+    if (std.mem.eql(u8, tool_name, "code.query")) {
         return callCodeQuery(runtime, arguments);
-    } else if (std.mem.eql(u8, tool_name, "cog_code_index")) {
+    } else if (std.mem.eql(u8, tool_name, "code.index")) {
         return callCodeIndex(runtime, arguments);
-    } else if (std.mem.eql(u8, tool_name, "cog_code_edit")) {
-        return callCodeEdit(runtime, arguments);
-    } else if (std.mem.eql(u8, tool_name, "cog_code_create")) {
-        return callCodeCreate(runtime, arguments);
-    } else if (std.mem.eql(u8, tool_name, "cog_code_delete")) {
-        return callCodeDelete(runtime, arguments);
-    } else if (std.mem.eql(u8, tool_name, "cog_code_rename")) {
-        return callCodeRename(runtime, arguments);
-    } else if (std.mem.eql(u8, tool_name, "cog_code_status")) {
+    } else if (std.mem.eql(u8, tool_name, "code.status")) {
         return callCodeStatus(runtime);
     } else if (std.mem.startsWith(u8, tool_name, "debug_")) {
         return callDebugTool(runtime, tool_name, arguments);
     }
 
-    // Memory tools
-    const mem_tools = .{
-        .{ "cog_mem_recall", "recall" },
-        .{ "cog_mem_get", "get" },
-        .{ "cog_mem_learn", "learn" },
-        .{ "cog_mem_associate", "associate" },
-        .{ "cog_mem_update", "update" },
-        .{ "cog_mem_unlink", "unlink" },
-        .{ "cog_mem_refactor", "refactor" },
-        .{ "cog_mem_deprecate", "deprecate" },
-        .{ "cog_mem_reinforce", "reinforce" },
-        .{ "cog_mem_flush", "flush" },
-        .{ "cog_mem_verify", "verify" },
-        .{ "cog_mem_meld", "meld" },
-        .{ "cog_mem_trace", "trace" },
-        .{ "cog_mem_connections", "connections" },
-        .{ "cog_mem_bulk_learn", "bulk_learn" },
-        .{ "cog_mem_bulk_associate", "bulk_associate" },
-        .{ "cog_mem_bulk_recall", "bulk_recall" },
-        .{ "cog_mem_list_short_term", "list_short_term" },
-        .{ "cog_mem_stale", "stale" },
-        .{ "cog_mem_stats", "stats" },
-        .{ "cog_mem_orphans", "orphans" },
-        .{ "cog_mem_connectivity", "connectivity" },
-        .{ "cog_mem_list_terms", "list_terms" },
-    };
-
-    inline for (mem_tools) |entry| {
-        if (std.mem.eql(u8, tool_name, entry[0])) {
-            return callMemApi(runtime, entry[1], arguments);
-        }
+    // Memory tools — proxy to remote MCP server
+    if (std.mem.startsWith(u8, tool_name, "mem_")) {
+        return callRemoteMcpTool(runtime, tool_name, arguments);
     }
 
     return error.Explained;
 }
 
-// ── Memory API Handler ──────────────────────────────────────────────────
+// ── Remote MCP Proxy ────────────────────────────────────────────────────
 
-fn callMemApi(runtime: *Runtime, action: []const u8, arguments: ?json.Value) ![]const u8 {
+fn discoverRemoteTools(runtime: *Runtime) !void {
+    const allocator = runtime.allocator;
+    const cfg = runtime.mem_config orelse return;
+
+    // Build MCP endpoint URL: {brain_url}/mcp
+    const endpoint = try std.fmt.allocPrint(allocator, "{s}/mcp", .{cfg.brain_url});
+    defer allocator.free(endpoint);
+
+    // Build JSON-RPC tools/list request
+    const body = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}";
+
+    const response = try client.mcpCall(allocator, endpoint, cfg.api_key, runtime.mcp_session_id, body);
+    defer allocator.free(response.body);
+
+    // Update session ID
+    if (response.session_id) |new_sid| {
+        if (runtime.mcp_session_id) |old_sid| allocator.free(old_sid);
+        runtime.mcp_session_id = new_sid;
+    }
+
+    // Parse response: {"jsonrpc":"2.0","id":1,"result":{"tools":[...]}}
+    const parsed = json.parseFromSlice(json.Value, allocator, response.body, .{}) catch return error.InvalidResponse;
+    defer parsed.deinit();
+
+    const root = parsed.value;
+    if (root != .object) return error.InvalidResponse;
+
+    const result_val = root.object.get("result") orelse return error.InvalidResponse;
+    if (result_val != .object) return error.InvalidResponse;
+
+    const tools_val = result_val.object.get("tools") orelse return error.InvalidResponse;
+    if (tools_val != .array) return error.InvalidResponse;
+
+    const items = tools_val.array.items;
+    var tool_list: std.ArrayListUnmanaged(RemoteTool) = .empty;
+    try tool_list.ensureTotalCapacity(allocator, @intCast(items.len));
+    errdefer {
+        for (tool_list.items) |tool| {
+            allocator.free(tool.name);
+            allocator.free(tool.remote_name);
+            allocator.free(tool.description);
+            allocator.free(tool.input_schema);
+        }
+        tool_list.deinit(allocator);
+    }
+
+    for (items) |item| {
+        if (item != .object) continue;
+
+        const name_val = item.object.get("name") orelse continue;
+        if (name_val != .string) continue;
+        const remote_name = name_val.string;
+
+        // Only process cog_* tools
+        const cog_prefix = "cog_";
+        if (!std.mem.startsWith(u8, remote_name, cog_prefix)) continue;
+
+        // Rename cog_* → mem_*
+        const suffix = remote_name[cog_prefix.len..];
+        const local_name = try std.fmt.allocPrint(allocator, "mem_{s}", .{suffix});
+        errdefer allocator.free(local_name);
+
+        const remote_name_dup = try allocator.dupe(u8, remote_name);
+        errdefer allocator.free(remote_name_dup);
+
+        const desc_val = item.object.get("description");
+        const desc = if (desc_val) |d| (if (d == .string) d.string else "") else "";
+        const desc_dup = try allocator.dupe(u8, desc);
+        errdefer allocator.free(desc_dup);
+
+        // Serialize inputSchema back to JSON string
+        const schema_val = item.object.get("inputSchema");
+        const schema_json = if (schema_val) |sv|
+            try client.writeJsonValue(allocator, sv)
+        else
+            try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{}}");
+        errdefer allocator.free(schema_json);
+
+        try tool_list.append(allocator, .{
+            .name = local_name,
+            .remote_name = remote_name_dup,
+            .description = desc_dup,
+            .input_schema = schema_json,
+        });
+    }
+
+    runtime.remote_tools = try tool_list.toOwnedSlice(allocator);
+    debugLog("Discovered {d} remote memory tools", .{runtime.remote_tools.?.len});
+}
+
+fn callRemoteMcpTool(runtime: *Runtime, tool_name: []const u8, arguments: ?json.Value) ![]const u8 {
     const allocator = runtime.allocator;
     const cfg = runtime.mem_config orelse return error.NotConfigured;
-    const args_json = if (arguments) |args|
-        try client.writeJsonValue(allocator, args)
-    else
-        try allocator.dupe(u8, "{}");
-    defer allocator.free(args_json);
-    return client.call(allocator, cfg.url, cfg.api_key, action, args_json);
+
+    // Find the matching remote tool
+    const tools = runtime.remote_tools orelse return error.NotConfigured;
+    var remote_name: ?[]const u8 = null;
+    for (tools) |tool| {
+        if (std.mem.eql(u8, tool.name, tool_name)) {
+            remote_name = tool.remote_name;
+            break;
+        }
+    }
+    const rname = remote_name orelse return error.Explained;
+
+    // Build MCP endpoint URL
+    const endpoint = try std.fmt.allocPrint(allocator, "{s}/mcp", .{cfg.brain_url});
+    defer allocator.free(endpoint);
+
+    // Build JSON-RPC tools/call request
+    var aw: Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    var s: Stringify = .{ .writer = &aw.writer };
+
+    try s.beginObject();
+    try s.objectField("jsonrpc");
+    try s.write("2.0");
+    try s.objectField("id");
+    try s.write(@as(i64, 1));
+    try s.objectField("method");
+    try s.write("tools/call");
+    try s.objectField("params");
+    try s.beginObject();
+    try s.objectField("name");
+    try s.write(rname);
+    try s.objectField("arguments");
+    if (arguments) |args| {
+        try s.write(args);
+    } else {
+        try s.beginObject();
+        try s.endObject();
+    }
+    try s.endObject();
+    try s.endObject();
+
+    const body = try aw.toOwnedSlice();
+    defer allocator.free(body);
+
+    const response = client.mcpCall(allocator, endpoint, cfg.api_key, runtime.mcp_session_id, body) catch |err| {
+        debugLog("MCP tool call failed for {s}: {s}", .{ tool_name, @errorName(err) });
+        return error.Explained;
+    };
+    defer allocator.free(response.body);
+
+    // Update session ID
+    if (response.session_id) |new_sid| {
+        if (runtime.mcp_session_id) |old_sid| allocator.free(old_sid);
+        runtime.mcp_session_id = new_sid;
+    }
+
+    // Parse response: {"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"..."}]}}
+    const parsed = json.parseFromSlice(json.Value, allocator, response.body, .{}) catch {
+        return error.Explained;
+    };
+    defer parsed.deinit();
+
+    const root = parsed.value;
+    if (root != .object) return error.Explained;
+
+    // Check for MCP error
+    if (root.object.get("error")) |err_val| {
+        if (err_val == .object) {
+            if (err_val.object.get("message")) |msg| {
+                if (msg == .string) {
+                    return allocator.dupe(u8, msg.string);
+                }
+            }
+        }
+        return error.Explained;
+    }
+
+    const result_val = root.object.get("result") orelse return error.Explained;
+    if (result_val != .object) return error.Explained;
+
+    const content_val = result_val.object.get("content") orelse return error.Explained;
+    if (content_val != .array) return error.Explained;
+
+    // Extract text from first content item
+    if (content_val.array.items.len == 0) return allocator.dupe(u8, "");
+    const first = content_val.array.items[0];
+    if (first != .object) return error.Explained;
+
+    const text_val = first.object.get("text") orelse return error.Explained;
+    if (text_val != .string) return error.Explained;
+
+    return allocator.dupe(u8, text_val.string);
 }
 
 // ── Code Tool Handlers ──────────────────────────────────────────────────
@@ -906,124 +1033,6 @@ fn callCodeIndex(runtime: *Runtime, arguments: ?json.Value) ![]const u8 {
     return res;
 }
 
-fn callCodeEdit(runtime: *Runtime, arguments: ?json.Value) ![]const u8 {
-    const allocator = runtime.allocator;
-    const args = arguments orelse return error.Explained;
-    const file = getStr(args, "file") orelse return error.MissingFile;
-    const old_text = getStr(args, "old_text") orelse return error.Explained;
-    const new_text = getStr(args, "new_text") orelse return error.Explained;
-
-    const before = readFileMaybe(allocator, file) orelse return error.Explained;
-    defer allocator.free(before);
-
-    const res = try code_intel.codeEditInner(allocator, file, old_text, new_text);
-    errdefer allocator.free(res);
-
-    const reindexed = jsonBoolField(allocator, res, "reindexed") orelse false;
-    if (!reindexed) {
-        _ = writeFileExact(file, before);
-        _ = reindexPathsBestEffort(allocator, &.{file});
-        return error.Explained;
-    }
-
-    runtime.syncCodeCacheAfterWrite() catch {
-        _ = writeFileExact(file, before);
-        _ = reindexPathsBestEffort(allocator, &.{file});
-        allocator.free(res);
-        return error.Explained;
-    };
-    return res;
-}
-
-fn callCodeCreate(runtime: *Runtime, arguments: ?json.Value) ![]const u8 {
-    const allocator = runtime.allocator;
-    const args = arguments orelse return error.Explained;
-    const file = getStr(args, "file") orelse return error.MissingFile;
-    const content = getStr(args, "content") orelse "";
-
-    const existed_before = fileExists(file);
-    const res = try code_intel.codeCreateInner(allocator, file, content);
-    errdefer allocator.free(res);
-
-    const reindexed = jsonBoolField(allocator, res, "reindexed") orelse false;
-    if (!reindexed) {
-        if (!existed_before) _ = deleteFileIfExists(file);
-        _ = reindexPathsBestEffort(allocator, &.{file});
-        return error.Explained;
-    }
-
-    runtime.syncCodeCacheAfterWrite() catch {
-        if (!existed_before) _ = deleteFileIfExists(file);
-        _ = reindexPathsBestEffort(allocator, &.{file});
-        allocator.free(res);
-        return error.Explained;
-    };
-    return res;
-}
-
-fn callCodeDelete(runtime: *Runtime, arguments: ?json.Value) ![]const u8 {
-    const allocator = runtime.allocator;
-    const args = arguments orelse return error.Explained;
-    const file = getStr(args, "file") orelse return error.MissingFile;
-
-    const before = readFileMaybe(allocator, file);
-    defer if (before) |b| allocator.free(b);
-
-    const res = try code_intel.codeDeleteInner(allocator, file);
-    errdefer allocator.free(res);
-
-    const updated = jsonBoolField(allocator, res, "index_updated") orelse false;
-    if (!updated) {
-        if (before) |b| {
-            _ = writeFileExact(file, b);
-            _ = reindexPathsBestEffort(allocator, &.{file});
-        }
-        return error.Explained;
-    }
-
-    runtime.syncCodeCacheAfterWrite() catch {
-        if (before) |b| {
-            _ = writeFileExact(file, b);
-            _ = reindexPathsBestEffort(allocator, &.{file});
-        }
-        allocator.free(res);
-        return error.Explained;
-    };
-    return res;
-}
-
-fn callCodeRename(runtime: *Runtime, arguments: ?json.Value) ![]const u8 {
-    const allocator = runtime.allocator;
-    const args = arguments orelse return error.Explained;
-    const old_path = getStr(args, "old_path") orelse return error.Explained;
-    const new_path = getStr(args, "new_path") orelse return error.Explained;
-
-    const old_exists_before = fileExists(old_path);
-    const new_exists_before = fileExists(new_path);
-
-    const res = try code_intel.codeRenameInner(allocator, old_path, new_path);
-    errdefer allocator.free(res);
-
-    const reindexed = jsonBoolField(allocator, res, "reindexed") orelse false;
-    if (!reindexed) {
-        if (old_exists_before and !new_exists_before and fileExists(new_path)) {
-            std.fs.cwd().rename(new_path, old_path) catch {};
-            _ = reindexPathsBestEffort(allocator, &.{ old_path, new_path });
-        }
-        return error.Explained;
-    }
-
-    runtime.syncCodeCacheAfterWrite() catch {
-        if (old_exists_before and !new_exists_before and fileExists(new_path)) {
-            std.fs.cwd().rename(new_path, old_path) catch {};
-            _ = reindexPathsBestEffort(allocator, &.{ old_path, new_path });
-        }
-        allocator.free(res);
-        return error.Explained;
-    };
-    return res;
-}
-
 fn callCodeStatus(runtime: *Runtime) ![]const u8 {
     const allocator = runtime.allocator;
     if (runtime.code_cache) |*ci| {
@@ -1051,50 +1060,6 @@ fn callDebugTool(runtime: *Runtime, tool_name: []const u8, arguments: ?json.Valu
             return aw.toOwnedSlice();
         },
     };
-}
-
-fn fileExists(path: []const u8) bool {
-    std.fs.cwd().access(path, .{}) catch return false;
-    return true;
-}
-
-fn readFileMaybe(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
-    const file = std.fs.cwd().openFile(path, .{}) catch return null;
-    defer file.close();
-    return file.readToEndAlloc(allocator, 64 * 1024 * 1024) catch null;
-}
-
-fn writeFileExact(path: []const u8, data: []const u8) bool {
-    if (std.fs.path.dirname(path)) |parent| {
-        std.fs.cwd().makePath(parent) catch {};
-    }
-    const file = std.fs.cwd().createFile(path, .{}) catch return false;
-    defer file.close();
-    file.writeAll(data) catch return false;
-    return true;
-}
-
-fn deleteFileIfExists(path: []const u8) bool {
-    std.fs.cwd().deleteFile(path) catch |err| switch (err) {
-        error.FileNotFound => return true,
-        else => return false,
-    };
-    return true;
-}
-
-fn reindexPathsBestEffort(allocator: std.mem.Allocator, paths: []const []const u8) bool {
-    const res = code_intel.codeIndexInner(allocator, paths) catch return false;
-    allocator.free(res);
-    return true;
-}
-
-fn jsonBoolField(allocator: std.mem.Allocator, payload: []const u8, field: []const u8) ?bool {
-    const parsed = json.parseFromSlice(json.Value, allocator, payload, .{}) catch return null;
-    defer parsed.deinit();
-    if (parsed.value != .object) return null;
-    const v = parsed.value.object.get(field) orelse return null;
-    if (v != .bool) return null;
-    return v.bool;
 }
 
 // ── JSON Helpers ────────────────────────────────────────────────────────
@@ -1272,30 +1237,80 @@ fn writeError(allocator: std.mem.Allocator, id: ?json.Value, code: i32, message:
 }
 
 fn writeResponse(stdout: std.fs.File, data: []const u8) !void {
+    debugLogBytes("<<< SEND: ", data);
+    // MCP stdio transport: write bare JSON followed by newline.
     var buf: [8192]u8 = undefined;
-    var w = stdout.writer(&buf);
-    var header: [128]u8 = undefined;
-    const h = std.fmt.bufPrint(&header, "Content-Length: {d}\r\n\r\n", .{data.len}) catch return;
-    w.interface.writeAll(h) catch return;
-    w.interface.writeAll(data) catch return;
-    w.interface.flush() catch return;
+    var w = stdout.writerStreaming(&buf);
+    w.interface.writeAll(data) catch return error.WriteFailure;
+    w.interface.writeAll("\n") catch return error.WriteFailure;
+    w.interface.flush() catch return error.WriteFailure;
 }
 
-test "parseContentLength parses header value" {
-    try std.testing.expectEqual(@as(?usize, 42), parseContentLength("Content-Length: 42\r\n"));
-    try std.testing.expectEqual(@as(?usize, 9), parseContentLength("X-Test: 1\r\ncontent-length: 9\r\n"));
-    try std.testing.expectEqual(@as(?usize, null), parseContentLength("X: 1\r\n"));
+fn logErr(prefix: []const u8, err: anyerror) void {
+    var errbuf: [4096]u8 = undefined;
+    var w = std.fs.File.stderr().writerStreaming(&errbuf);
+    w.interface.writeAll(prefix) catch {};
+    w.interface.writeAll(@errorName(err)) catch {};
+    w.interface.writeByte('\n') catch {};
+    w.interface.flush() catch {};
 }
 
-test "nextMessageFromBuffer extracts framed message" {
+// ── Debug File Logger ────────────────────────────────────────────────────
+
+var debug_log_file: ?std.fs.File = null;
+
+fn debugLogInit() void {
+    debug_log_file = std.fs.cwd().createFile("/tmp/cog-mcp.log", .{ .truncate = false }) catch null;
+    if (debug_log_file) |f| {
+        f.seekFromEnd(0) catch {};
+    }
+    debugLog("=== MCP server starting (version {s}) ===", .{server_version});
+}
+
+fn debugLogDeinit() void {
+    debugLog("=== MCP server shutting down ===", .{});
+    if (debug_log_file) |f| f.close();
+    debug_log_file = null;
+}
+
+fn debugLog(comptime fmt: []const u8, args: anytype) void {
+    const f = debug_log_file orelse return;
+    var buf: [4096]u8 = undefined;
+    const ts = std.time.timestamp();
+    const prefix = std.fmt.bufPrint(&buf, "[{d}] ", .{ts}) catch return;
+    f.writeAll(prefix) catch return;
+    var msg_buf: [8192]u8 = undefined;
+    const msg = std.fmt.bufPrint(&msg_buf, fmt, args) catch return;
+    f.writeAll(msg) catch return;
+    f.writeAll("\n") catch return;
+}
+
+fn debugLogBytes(prefix: []const u8, data: []const u8) void {
+    const f = debug_log_file orelse return;
+    var buf: [128]u8 = undefined;
+    const ts = std.time.timestamp();
+    const ts_str = std.fmt.bufPrint(&buf, "[{d}] ", .{ts}) catch return;
+    f.writeAll(ts_str) catch return;
+    f.writeAll(prefix) catch return;
+    const max_len: usize = 500;
+    if (data.len <= max_len) {
+        f.writeAll(data) catch return;
+    } else {
+        f.writeAll(data[0..max_len]) catch return;
+        var trunc_buf: [64]u8 = undefined;
+        const trunc_msg = std.fmt.bufPrint(&trunc_buf, "... ({d} bytes total)", .{data.len}) catch return;
+        f.writeAll(trunc_msg) catch return;
+    }
+    f.writeAll("\n") catch return;
+}
+
+test "nextMessageFromBuffer extracts newline-delimited JSON" {
     const allocator = std.testing.allocator;
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
 
     const body = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}";
-    const frame = try std.fmt.allocPrint(allocator, "Content-Length: {d}\r\n\r\n{s}", .{ body.len, body });
-    defer allocator.free(frame);
-    try buf.appendSlice(allocator, frame);
+    try buf.appendSlice(allocator, body ++ "\n");
 
     const msg = (try nextMessageFromBuffer(allocator, &buf)).?;
     defer allocator.free(msg);
@@ -1303,12 +1318,60 @@ test "nextMessageFromBuffer extracts framed message" {
     try std.testing.expectEqual(@as(usize, 0), buf.items.len);
 }
 
-test "nextMessageFromBuffer waits for complete body" {
+test "nextMessageFromBuffer handles multiple messages" {
     const allocator = std.testing.allocator;
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
 
-    const partial = "Content-Length: 20\r\n\r\n{\"jsonrpc\":\"2";
+    const msg1 = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}";
+    const msg2 = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}";
+    try buf.appendSlice(allocator, msg1 ++ "\n" ++ msg2 ++ "\n");
+
+    const result1 = (try nextMessageFromBuffer(allocator, &buf)).?;
+    defer allocator.free(result1);
+    try std.testing.expectEqualStrings(msg1, result1);
+
+    const result2 = (try nextMessageFromBuffer(allocator, &buf)).?;
+    defer allocator.free(result2);
+    try std.testing.expectEqualStrings(msg2, result2);
+
+    try std.testing.expectEqual(@as(usize, 0), buf.items.len);
+}
+
+test "nextMessageFromBuffer skips leading whitespace" {
+    const allocator = std.testing.allocator;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+
+    const body = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}";
+    try buf.appendSlice(allocator, "\n\n  " ++ body ++ "\n");
+
+    const msg = (try nextMessageFromBuffer(allocator, &buf)).?;
+    defer allocator.free(msg);
+    try std.testing.expectEqualStrings(body, msg);
+}
+
+test "nextMessageFromBuffer waits for newline" {
+    const allocator = std.testing.allocator;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+
+    // Incomplete JSON line (no trailing newline) but a complete JSON object
+    // should still be extractable via brace counting.
+    const body = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}";
+    try buf.appendSlice(allocator, body);
+
+    const msg = (try nextMessageFromBuffer(allocator, &buf)).?;
+    defer allocator.free(msg);
+    try std.testing.expectEqualStrings(body, msg);
+}
+
+test "nextMessageFromBuffer returns null for incomplete JSON" {
+    const allocator = std.testing.allocator;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+
+    const partial = "{\"jsonrpc\":\"2.0\",\"id\":1";
     try buf.appendSlice(allocator, partial);
     const msg = try nextMessageFromBuffer(allocator, &buf);
     try std.testing.expect(msg == null);

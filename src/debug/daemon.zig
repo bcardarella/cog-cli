@@ -10,18 +10,21 @@ const ToolResult = server_mod.ToolResult;
 // ── Daemon Server ───────────────────────────────────────────────────────
 
 pub const DaemonServer = struct {
+    const IDLE_TIMEOUT_MS: i64 = 5 * 60 * 1000; // 5 minutes
+    const DEFAULT_SESSION_IDLE_TIMEOUT_MS: i64 = 10 * 60 * 1000; // 10 minutes per-session
+
     allocator: std.mem.Allocator,
     server: DebugServer,
     socket_fd: ?posix.socket_t = null,
     last_activity: i64 = 0,
+    session_idle_timeout_ms: i64 = DEFAULT_SESSION_IDLE_TIMEOUT_MS,
 
-    const IDLE_TIMEOUT_MS: i64 = 5 * 60 * 1000; // 5 minutes
-
-    pub fn init(allocator: std.mem.Allocator) DaemonServer {
+    pub fn init(allocator: std.mem.Allocator, session_idle_timeout_ms: ?i64) DaemonServer {
         return .{
             .allocator = allocator,
             .server = DebugServer.init(allocator),
             .last_activity = std.time.milliTimestamp(),
+            .session_idle_timeout_ms = session_idle_timeout_ms orelse DEFAULT_SESSION_IDLE_TIMEOUT_MS,
         };
     }
 
@@ -116,6 +119,8 @@ pub const DaemonServer = struct {
     fn reapOrphanedSessions(self: *DaemonServer) void {
         if (self.server.session_manager.sessionCount() == 0) return;
 
+        const now = std.time.milliTimestamp();
+
         var ids = std.ArrayListUnmanaged([]const u8).empty;
         defer {
             for (ids.items) |id| self.allocator.free(id);
@@ -124,6 +129,19 @@ pub const DaemonServer = struct {
 
         var iter = self.server.session_manager.sessions.iterator();
         while (iter.next()) |entry| {
+            // Check per-session idle timeout
+            if (entry.value_ptr.last_activity > 0 and
+                now - entry.value_ptr.last_activity > self.session_idle_timeout_ms)
+            {
+                const id_copy = self.allocator.dupe(u8, entry.key_ptr.*) catch continue;
+                ids.append(self.allocator, id_copy) catch {
+                    self.allocator.free(id_copy);
+                    continue;
+                };
+                continue;
+            }
+
+            // Check orphaned owner process
             if (entry.value_ptr.orphan_action == .none) continue;
             const owner_pid = entry.value_ptr.owner_pid orelse continue;
             if (!isProcessAlive(owner_pid)) {
@@ -136,7 +154,8 @@ pub const DaemonServer = struct {
         }
 
         for (ids.items) |id| {
-            if (self.server.session_manager.getSession(id)) |session| {
+            // Use sessions.getPtr directly to avoid updating last_activity
+            if (self.server.session_manager.sessions.getPtr(id)) |session| {
                 switch (session.orphan_action) {
                     .terminate => {
                         session.driver.stop(self.allocator) catch {
@@ -146,7 +165,12 @@ pub const DaemonServer = struct {
                     .detach => {
                         session.driver.detach(self.allocator) catch {};
                     },
-                    .none => {},
+                    .none => {
+                        // Idle-expired sessions with no orphan_action: terminate the driver
+                        session.driver.stop(self.allocator) catch {
+                            session.driver.terminate(self.allocator) catch {};
+                        };
+                    },
                 }
                 self.server.dashboard.onStop(id);
             }

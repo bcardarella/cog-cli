@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
 const json = std.json;
 const Stringify = json.Stringify;
 const Writer = std.io.Writer;
@@ -123,8 +124,6 @@ pub fn init(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         return;
     }
 
-    const host: []const u8 = findFlag(args, "--host") orelse "trycog.ai";
-
     tui.header();
 
     // Ask which features to set up
@@ -150,9 +149,29 @@ pub fn init(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         printErr("  Cog Memory gives your AI agents persistent, associative\n");
         printErr("  memory powered by a knowledge graph with biological\n");
         printErr("  memory dynamics.\n\n");
-        printErr("  " ++ dim ++ "A trycog.ai account is required." ++ reset ++ "\n");
-        printErr("  " ++ dim ++ "Sign up at " ++ reset ++ cyan ++ "https://trycog.ai" ++ reset ++ "\n\n");
-        try initBrain(allocator, host);
+
+        // Ask for host (--host flag overrides the interactive prompt)
+        const effective_host: []const u8 = if (findFlag(args, "--host")) |h| h else blk: {
+            const host_options = [_]tui.MenuItem{
+                .{ .label = "trycog.ai" },
+                .{ .label = "Custom host", .is_input_option = true },
+            };
+            const host_result = try tui.select(allocator, .{
+                .prompt = "Server host:",
+                .items = &host_options,
+            });
+            break :blk switch (host_result) {
+                .selected => "trycog.ai",
+                .input => |custom| custom,
+                .back, .cancelled => {
+                    printErr("  Aborted.\n");
+                    return;
+                },
+            };
+        };
+
+        printErr("\n");
+        try initBrain(allocator, effective_host);
     }
 
     tui.separator();
@@ -172,47 +191,30 @@ pub fn init(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     };
     defer allocator.free(selected_indices);
 
-    // Fetch PROMPT.md + SKILL.md once
-    printErr("  Fetching system prompt... ");
-    const prompt_url = try std.fmt.allocPrint(allocator, "https://{s}/PROMPT.md", .{host});
-    defer allocator.free(prompt_url);
-    const raw_prompt = client.httpGetPublic(allocator, prompt_url) catch {
-        printErr("\n  error: failed to fetch system prompt\n");
-        return error.Explained;
+    // Check if any selected agent supports tool permissions
+    const any_supports_perms = blk: {
+        for (selected_indices) |idx| {
+            if (agents_mod.agents[idx].supportsToolPermissions()) break :blk true;
+        }
+        break :blk false;
     };
-    defer allocator.free(raw_prompt);
-    const prompt_content = try processCogMemTags(allocator, raw_prompt, setup_mem);
-    defer allocator.free(prompt_content);
-    tui.checkmark();
-    printErr("\n");
 
-    printErr("  Fetching skill... ");
-    const skill_url = try std.fmt.allocPrint(allocator, "https://{s}/SKILL.md", .{host});
-    defer allocator.free(skill_url);
-    const raw_skill = client.httpGetPublic(allocator, skill_url) catch {
-        printErr("\n  error: failed to fetch SKILL.md\n");
-        return error.Explained;
-    };
-    defer allocator.free(raw_skill);
-    const skill_content = try processCogMemTags(allocator, raw_skill, setup_mem);
-    defer allocator.free(skill_content);
-    tui.checkmark();
-    printErr("\n");
+    const allow_tools = if (any_supports_perms)
+        try tui.confirm("Allow all Cog tools without prompting?")
+    else
+        false;
+
+    // Process embedded PROMPT.md
+    const prompt_content = try processCogMemTags(allocator, build_options.prompt_md, setup_mem);
+    defer allocator.free(prompt_content);
 
     // Track which config files have been written (for dedup)
-    // Separate arrays for MCP and hooks because some agents share the same
-    // file for both (e.g. Gemini uses .gemini/settings.json for MCP + hooks).
     var written_mcp: [16][]const u8 = undefined;
     var written_mcp_count: usize = 0;
-    var written_hooks: [16][]const u8 = undefined;
-    var written_hooks_count: usize = 0;
-    var hook_scripts_generated = false;
 
     // Track which prompt targets have been written (for dedup)
     var written_prompts: [4]agents_mod.PromptTarget = undefined;
     var written_prompts_count: usize = 0;
-
-    const home = std.posix.getenv("HOME") orelse "";
 
     for (selected_indices) |idx| {
         const agent = agents_mod.agents[idx];
@@ -249,27 +251,7 @@ pub fn init(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
             }
         }
 
-        // b. Install skill (if agent has skill_dir)
-        if (agent.skill_dir) |skill_rel_dir| {
-            if (home.len > 0) {
-                const base_dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ home, skill_rel_dir });
-                defer allocator.free(base_dir);
-                const skill_dir = try std.fmt.allocPrint(allocator, "{s}/cog", .{base_dir});
-                defer allocator.free(skill_dir);
-                const skill_path = try std.fmt.allocPrint(allocator, "{s}/cog/SKILL.md", .{base_dir});
-                defer allocator.free(skill_path);
-
-                makeDirsAbsolute(skill_dir) catch {};
-                writeAbsoluteFile(skill_path, skill_content) catch {};
-                printErr("    ");
-                tui.checkmark();
-                printErr(" ");
-                printErr(skill_path);
-                printErr("\n");
-            }
-        }
-
-        // c. Configure MCP server (dedup by path)
+        // b. Configure MCP server (dedup by path)
         if (agent.mcp_path) |mcp_path| {
             var mcp_already_written = false;
             for (written_mcp[0..written_mcp_count]) |wc| {
@@ -293,35 +275,17 @@ pub fn init(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
             hooks_mod.configureMcp(allocator, agent) catch {};
         }
 
-        // d. Configure hooks (dedup by path)
-        if (agent.hooks_path) |hooks_path| {
-            var hooks_already_written = false;
-            for (written_hooks[0..written_hooks_count]) |wc| {
-                if (std.mem.eql(u8, wc, hooks_path)) { hooks_already_written = true; break; }
-            }
-            if (!hooks_already_written) {
-                hooks_mod.configureHooks(allocator, agent) catch {};
-                printErr("    ");
-                tui.checkmark();
-                printErr(" ");
-                printErr(hooks_path);
-                printErr("\n");
-                if (written_hooks_count < 16) {
-                    written_hooks[written_hooks_count] = hooks_path;
-                    written_hooks_count += 1;
-                }
-            }
-        }
-
-        // e. Generate hook scripts (once, first agent with hooks)
-        if (!hook_scripts_generated and agent.hooks_format != .none) {
-            hooks_mod.generateHookScripts() catch {};
+        // c. Configure tool permissions if user opted in
+        if (allow_tools and agent.supportsToolPermissions()) {
+            hooks_mod.configureToolPermissions(allocator, agent) catch {};
             printErr("    ");
             tui.checkmark();
-            printErr(" .cog/hooks/\n");
-            hook_scripts_generated = true;
+            printErr(" tool permissions\n");
         }
     }
+
+    // Ensure .cog/ is in .gitignore (only in git repos)
+    ensureGitignore(allocator);
 
     // Code-sign for debug server on macOS
     if (builtin.os.tag == .macos) {
@@ -420,13 +384,11 @@ fn initBrain(allocator: std.mem.Allocator, host: []const u8) !void {
     }
 }
 
-pub fn updatePromptAndSkill(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
+pub fn updatePrompt(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     if (hasFlag(args, "--help")) {
         printCommandHelp(help.update_cmd);
         return;
     }
-
-    const host: []const u8 = findFlag(args, "--host") orelse "trycog.ai";
 
     tui.header();
 
@@ -449,11 +411,7 @@ pub fn updatePromptAndSkill(allocator: std.mem.Allocator, args: []const [:0]cons
     };
 
     // Update system prompt
-    try setupSystemPrompt(allocator, host, has_mem);
-    tui.separator();
-
-    // Update agent skill
-    try installSkill(allocator, host, has_mem);
+    try setupSystemPrompt(allocator, has_mem);
 }
 
 fn buildAccountLabel(allocator: std.mem.Allocator, account: json.Value) ![]const u8 {
@@ -855,21 +813,9 @@ fn updateFileWithPrompt(allocator: std.mem.Allocator, filename: []const u8, prom
     try writeCwdFile(filename, new_content);
 }
 
-fn setupSystemPrompt(allocator: std.mem.Allocator, host: []const u8, setup_mem: bool) !void {
-    printErr("  Fetching system prompt... ");
-    const prompt_url = try std.fmt.allocPrint(allocator, "https://{s}/PROMPT.md", .{host});
-    defer allocator.free(prompt_url);
-
-    const raw_content = client.httpGetPublic(allocator, prompt_url) catch {
-        printErr("\n  error: failed to fetch system prompt\n");
-        return error.Explained;
-    };
-    defer allocator.free(raw_content);
-
-    const prompt_content = try processCogMemTags(allocator, raw_content, setup_mem);
+fn setupSystemPrompt(allocator: std.mem.Allocator, setup_mem: bool) !void {
+    const prompt_content = try processCogMemTags(allocator, build_options.prompt_md, setup_mem);
     defer allocator.free(prompt_content);
-    tui.checkmark();
-    printErr("\n");
 
     const agents_exists = fileExistsInCwd("AGENTS.md");
     const claude_exists = fileExistsInCwd("CLAUDE.md");
@@ -911,7 +857,41 @@ fn setupSystemPrompt(allocator: std.mem.Allocator, host: []const u8, setup_mem: 
     }
 }
 
-// ── Skill Installation ──────────────────────────────────────────────────
+fn ensureGitignore(allocator: std.mem.Allocator) void {
+    // Only act in git repos
+    std.fs.cwd().access(".git", .{}) catch return;
+
+    const entry = ".cog/";
+
+    const existing = readCwdFile(allocator, ".gitignore");
+    defer if (existing) |e| allocator.free(e);
+
+    if (existing) |content| {
+        // Check if .cog/ is already listed
+        var lines = std.mem.splitScalar(u8, content, '\n');
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
+            if (std.mem.eql(u8, trimmed, entry)) return;
+        }
+        // Append
+        const new_content = std.fmt.allocPrint(allocator, "{s}{s}\n", .{
+            if (content.len > 0 and content[content.len - 1] != '\n') "\n" else "",
+            entry,
+        }) catch return;
+        defer allocator.free(new_content);
+
+        const file = std.fs.cwd().openFile(".gitignore", .{ .mode = .write_only }) catch return;
+        defer file.close();
+        file.seekFromEnd(0) catch return;
+        var buf: [4096]u8 = undefined;
+        var fw = file.writer(&buf);
+        fw.interface.writeAll(new_content) catch return;
+        fw.interface.flush() catch return;
+    } else {
+        // Create new .gitignore
+        writeCwdFile(".gitignore", entry ++ "\n") catch return;
+    }
+}
 
 fn signForDebug(allocator: std.mem.Allocator) void {
     printErr("  Signing for debug server... ");
@@ -968,139 +948,6 @@ fn signForDebug(allocator: std.mem.Allocator) void {
         else => {},
     }
     printErr("skipped (codesign failed)\n");
-}
-
-fn installSkill(allocator: std.mem.Allocator, host: []const u8, setup_mem: bool) !void {
-    const home = std.posix.getenv("HOME") orelse {
-        printErr("error: HOME not set\n");
-        return error.Explained;
-    };
-
-    const skill_options = [_]tui.MenuItem{
-        .{ .label = "Claude Code / Copilot / Cursor / Amp / Goose / OpenCode" },
-        .{ .label = "Gemini CLI" },
-        .{ .label = "OpenAI Codex" },
-        .{ .label = "Windsurf" },
-        .{ .label = "Roo Code" },
-        .{ .label = "Custom path", .is_input_option = true },
-    };
-
-    const result = try tui.select(allocator, .{
-        .prompt = "Install Cog skill for your agent:",
-        .items = &skill_options,
-    });
-
-    const base_dir = switch (result) {
-        .selected => |idx| switch (idx) {
-            0 => try std.fmt.allocPrint(allocator, "{s}/.claude/skills", .{home}),
-            1 => try std.fmt.allocPrint(allocator, "{s}/.gemini/skills", .{home}),
-            2 => try std.fmt.allocPrint(allocator, "{s}/.agents/skills", .{home}),
-            3 => try std.fmt.allocPrint(allocator, "{s}/.codeium/windsurf/skills", .{home}),
-            4 => try std.fmt.allocPrint(allocator, "{s}/.roo/skills", .{home}),
-            else => unreachable,
-        },
-        .input => |custom_path| blk: {
-            if (custom_path.len == 0) {
-                printErr("  Skipped skill installation.\n");
-                return;
-            }
-            // Expand ~ to $HOME
-            if (custom_path[0] == '~') {
-                break :blk try std.fmt.allocPrint(allocator, "{s}{s}", .{ home, custom_path[1..] });
-            }
-            break :blk try allocator.dupe(u8, custom_path);
-        },
-        .back, .cancelled => {
-            printErr("  Skipped skill installation.\n");
-            return;
-        },
-    };
-    defer allocator.free(base_dir);
-
-    // Fetch SKILL.md from server
-    printErr("  Fetching skill... ");
-    const skill_url = try std.fmt.allocPrint(allocator, "https://{s}/SKILL.md", .{host});
-    defer allocator.free(skill_url);
-
-    const raw_skill = client.httpGetPublic(allocator, skill_url) catch {
-        printErr("\n  error: failed to fetch SKILL.md\n");
-        return error.Explained;
-    };
-    defer allocator.free(raw_skill);
-
-    const skill_content = try processCogMemTags(allocator, raw_skill, setup_mem);
-    defer allocator.free(skill_content);
-    tui.checkmark();
-    printErr("\n");
-
-    // Compute paths
-    const skill_dir = try std.fmt.allocPrint(allocator, "{s}/cog", .{base_dir});
-    defer allocator.free(skill_dir);
-    const skill_path = try std.fmt.allocPrint(allocator, "{s}/cog/SKILL.md", .{base_dir});
-    defer allocator.free(skill_path);
-
-    // Check if SKILL.md already exists
-    const existing_content = readAbsoluteFileAlloc(allocator, skill_path);
-    defer if (existing_content) |c| allocator.free(c);
-
-    if (existing_content) |existing| {
-        if (std.mem.eql(u8, existing, skill_content)) {
-            printErr("  SKILL.md is already up to date.\n");
-            return;
-        }
-
-        // File exists but differs — let user decide
-        while (true) {
-            const update_options = [_]tui.MenuItem{
-                .{ .label = "View diff" },
-                .{ .label = "Update" },
-                .{ .label = "Skip" },
-            };
-
-            const update_result = try tui.select(allocator, .{
-                .prompt = "SKILL.md has changed:",
-                .items = &update_options,
-            });
-
-            switch (update_result) {
-                .selected => |idx| switch (idx) {
-                    0 => {
-                        showDiff(allocator, existing, skill_content);
-                        continue;
-                    },
-                    1 => break,
-                    2 => {
-                        printErr("  Skipped skill update.\n");
-                        return;
-                    },
-                    else => unreachable,
-                },
-                .back, .cancelled => {
-                    printErr("  Skipped skill update.\n");
-                    return;
-                },
-                .input => unreachable,
-            }
-        }
-    }
-
-    // Create {base_dir}/cog/ directory (recursive)
-    makeDirsAbsolute(skill_dir) catch {
-        printErr("  error: failed to create directory ");
-        printErr(skill_dir);
-        printErr("\n");
-        return error.Explained;
-    };
-
-    // Write SKILL.md
-    writeAbsoluteFile(skill_path, skill_content) catch {
-        return error.Explained;
-    };
-
-    const verb: []const u8 = if (existing_content != null) "  Updated " else "  Installed ";
-    printErr(verb);
-    printErr(skill_path);
-    printErr("\n");
 }
 
 fn makeDirsAbsolute(path: []const u8) !void {

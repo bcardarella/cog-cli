@@ -9,6 +9,7 @@ pub const Session = struct {
     status: Status,
     owner_pid: ?posix.pid_t = null,
     orphan_action: OrphanAction = .none,
+    last_activity: i64 = 0,
 
     pub const Status = enum {
         launching,
@@ -58,13 +59,16 @@ pub const SessionManager = struct {
             .status = .launching,
             .owner_pid = owner_pid,
             .orphan_action = orphan_action,
+            .last_activity = std.time.milliTimestamp(),
         });
 
         return id;
     }
 
     pub fn getSession(self: *SessionManager, id: []const u8) ?*Session {
-        return self.sessions.getPtr(id);
+        const session = self.sessions.getPtr(id) orelse return null;
+        session.last_activity = std.time.milliTimestamp();
+        return session;
     }
 
     pub fn destroySession(self: *SessionManager, id: []const u8) bool {
@@ -176,4 +180,50 @@ test "SessionManager handles multiple concurrent sessions" {
     for (ids) |id| {
         try std.testing.expect(mgr.getSession(id) != null);
     }
+}
+
+test "createSession initializes last_activity to recent timestamp" {
+    const allocator = std.testing.allocator;
+    var mgr = SessionManager.init(allocator);
+    defer mgr.deinit();
+
+    const before = std.time.milliTimestamp();
+    var mock = driver_mod.MockDriver{};
+    const id = try mgr.createSession(mock.activeDriver(), null, .none);
+    const after = std.time.milliTimestamp();
+
+    // Access via iterator to avoid getSession updating the timestamp
+    var iter = mgr.sessions.iterator();
+    const session = while (iter.next()) |entry| {
+        if (std.mem.eql(u8, entry.key_ptr.*, id)) break entry.value_ptr;
+    } else null;
+
+    try std.testing.expect(session != null);
+    try std.testing.expect(session.?.last_activity >= before);
+    try std.testing.expect(session.?.last_activity <= after);
+}
+
+test "getSession updates last_activity" {
+    const allocator = std.testing.allocator;
+    var mgr = SessionManager.init(allocator);
+    defer mgr.deinit();
+
+    var mock = driver_mod.MockDriver{};
+    const id = try mgr.createSession(mock.activeDriver(), null, .none);
+
+    // Read initial timestamp via iterator (bypasses getSession)
+    const initial_ts = blk: {
+        var iter = mgr.sessions.iterator();
+        break :blk while (iter.next()) |entry| {
+            if (std.mem.eql(u8, entry.key_ptr.*, id)) break entry.value_ptr.last_activity;
+        } else 0;
+    };
+
+    // Small sleep so the clock advances
+    std.Thread.sleep(2 * std.time.ns_per_ms);
+
+    // getSession should update last_activity
+    const session = mgr.getSession(id);
+    try std.testing.expect(session != null);
+    try std.testing.expect(session.?.last_activity > initial_ts);
 }

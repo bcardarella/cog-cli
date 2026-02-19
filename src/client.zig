@@ -10,18 +10,94 @@ pub const ClientError = error{
     InvalidResponse,
 };
 
-pub fn call(
-    allocator: std.mem.Allocator,
-    base_url: []const u8,
-    api_key: []const u8,
-    action: []const u8,
-    args_json: []const u8,
-) ![]const u8 {
-    // Construct URL: {base_url}/{action}
-    const url = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ base_url, action });
-    defer allocator.free(url);
+pub const McpResponse = struct {
+    body: []const u8,
+    session_id: ?[]const u8,
+};
 
-    return post(allocator, url, api_key, args_json);
+pub fn mcpCall(
+    allocator: std.mem.Allocator,
+    endpoint: []const u8,
+    api_key: []const u8,
+    session_id: ?[]const u8,
+    body: []const u8,
+) !McpResponse {
+    const auth_header = try std.fmt.allocPrint(allocator, "Authorization: Bearer {s}", .{api_key});
+    defer allocator.free(auth_header);
+
+    var header_count: usize = 3;
+    var session_header: []const u8 = "";
+    defer if (session_id != null) allocator.free(session_header);
+
+    if (session_id) |sid| {
+        session_header = try std.fmt.allocPrint(allocator, "mcp-session-id: {s}", .{sid});
+        header_count = 4;
+    }
+
+    var headers_buf: [4][]const u8 = undefined;
+    headers_buf[0] = auth_header;
+    headers_buf[1] = "Content-Type: application/json";
+    headers_buf[2] = "Accept: application/json";
+    if (session_id != null) {
+        headers_buf[3] = session_header;
+    }
+
+    const result = curl.postCapturingHeaders(allocator, endpoint, headers_buf[0..header_count], body) catch {
+        printErr("error: failed to connect to MCP endpoint\n");
+        return error.Explained;
+    };
+    defer allocator.free(result.body);
+
+    // Extract mcp-session-id from response headers
+    var new_session_id: ?[]const u8 = null;
+    if (result.headers.len > 0) {
+        var lines = std.mem.splitScalar(u8, result.headers, '\n');
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, &[_]u8{ '\r', ' ', '\t' });
+            const prefix = "mcp-session-id:";
+            if (trimmed.len > prefix.len and std.ascii.startsWithIgnoreCase(trimmed, prefix)) {
+                const val = std.mem.trim(u8, trimmed[prefix.len..], &[_]u8{ ' ', '\t' });
+                if (val.len > 0) {
+                    new_session_id = try allocator.dupe(u8, val);
+                }
+                break;
+            }
+        }
+    }
+    allocator.free(result.headers);
+    errdefer if (new_session_id) |sid| allocator.free(sid);
+
+    if (result.status_code != 200) {
+        if (new_session_id) |sid| allocator.free(sid);
+        // Try to extract MCP error message
+        if (json.parseFromSlice(json.Value, allocator, result.body, .{})) |parsed| {
+            defer parsed.deinit();
+            if (parsed.value == .object) {
+                if (parsed.value.object.get("error")) |err_val| {
+                    if (err_val == .object) {
+                        if (err_val.object.get("message")) |msg| {
+                            if (msg == .string) {
+                                printErr("error: ");
+                                printErr(msg.string);
+                                printErr("\n");
+                                return error.Explained;
+                            }
+                        }
+                    }
+                }
+            }
+        } else |_| {}
+
+        var msg_buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "error: MCP HTTP status {d}\n", .{result.status_code}) catch "error: MCP HTTP error\n";
+        printErr(msg);
+        return error.Explained;
+    }
+
+    return .{
+        .body = try allocator.dupe(u8, result.body),
+        .session_id = new_session_id,
+    };
 }
 
 pub fn post(

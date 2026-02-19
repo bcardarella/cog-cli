@@ -4,6 +4,16 @@ zig-out/
 .cog/
 .env
 
+# Agent MCP/config files
+.mcp.json
+.gemini/
+.vscode/mcp.json
+.cursor/
+.codex/
+.amp/
+.roo/
+opencode.json
+
 # Build artifacts
 /root
 

@@ -184,7 +184,16 @@ fn debugServe(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         }
     }
 
-    var d = daemon.DaemonServer.init(allocator);
+    // Load session idle timeout from settings
+    const session_timeout: ?i64 = blk: {
+        const settings_mod = @import("settings.zig");
+        const settings = settings_mod.Settings.load(allocator) orelse break :blk null;
+        defer settings.deinit(allocator);
+        const debug_cfg = settings.debug orelse break :blk null;
+        break :blk debug_cfg.timeout;
+    };
+
+    var d = daemon.DaemonServer.init(allocator, session_timeout);
     defer d.deinit();
     try d.run();
 }

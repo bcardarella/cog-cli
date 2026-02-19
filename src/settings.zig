@@ -10,8 +10,13 @@ pub const BrainConfig = struct {
     url: []const u8,
 };
 
+pub const DebugConfig = struct {
+    timeout: ?i64 = null,
+};
+
 pub const Settings = struct {
     brain: ?BrainConfig = null,
+    debug: ?DebugConfig = null,
     indexer: ?ToolConfig = null,
     editor: ?ToolConfig = null,
     creator: ?ToolConfig = null,
@@ -31,6 +36,7 @@ pub const Settings = struct {
         const l = local orelse Settings{};
 
         result.brain = l.brain orelse g.brain;
+        result.debug = mergeDebugConfig(l.debug, g.debug);
         result.indexer = l.indexer orelse g.indexer;
         result.editor = l.editor orelse g.editor;
         result.creator = l.creator orelse g.creator;
@@ -107,6 +113,9 @@ pub const Settings = struct {
         if (obj.get("brain")) |v| {
             result.brain = parseBrainConfig(allocator, v) catch return null;
         }
+        if (obj.get("debug")) |v| {
+            result.debug = parseDebugConfig(v);
+        }
         if (obj.get("indexer")) |v| {
             result.indexer = parseToolConfig(allocator, v) catch return null;
         }
@@ -182,6 +191,25 @@ fn parseBrainConfig(allocator: std.mem.Allocator, value: std.json.Value) !BrainC
 
 fn freeBrainConfig(allocator: std.mem.Allocator, config: *const BrainConfig) void {
     allocator.free(config.url);
+}
+
+fn parseDebugConfig(value: std.json.Value) ?DebugConfig {
+    if (value != .object) return null;
+    const obj = value.object;
+
+    var result: DebugConfig = .{};
+    if (obj.get("timeout")) |v| {
+        if (v == .integer) result.timeout = v.integer;
+    }
+    return result;
+}
+
+fn mergeDebugConfig(local: ?DebugConfig, global: ?DebugConfig) ?DebugConfig {
+    const l = local orelse return global;
+    const g = global orelse return local;
+    return .{
+        .timeout = l.timeout orelse g.timeout,
+    };
 }
 
 fn freeToolConfig(allocator: std.mem.Allocator, config: *const ToolConfig) void {
@@ -365,6 +393,30 @@ test "substitutePlaceholder exact match" {
     const result = try substitutePlaceholder(allocator, "{file}", "{file}", "src/main.zig");
     defer allocator.free(result);
     try std.testing.expectEqualStrings("src/main.zig", result);
+}
+
+test "parse settings with debug timeout" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"debug":{"timeout":300000}}
+    ;
+    const settings = Settings.parse(allocator, json) orelse return error.ParseFailed;
+    defer settings.deinit(allocator);
+
+    try std.testing.expect(settings.debug != null);
+    try std.testing.expectEqual(@as(i64, 300000), settings.debug.?.timeout.?);
+}
+
+test "parse settings debug without timeout uses null" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"debug":{}}
+    ;
+    const settings = Settings.parse(allocator, json) orelse return error.ParseFailed;
+    defer settings.deinit(allocator);
+
+    try std.testing.expect(settings.debug != null);
+    try std.testing.expect(settings.debug.?.timeout == null);
 }
 
 test "substituteArgs multiple placeholders" {

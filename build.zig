@@ -46,9 +46,13 @@ pub fn build(b: *std.Build) void {
     addTreeSitter(b, mod);
     addCurl(b, mod, target, optimize);
 
-    // Build options (version)
+    // Build options (version + embedded prompts)
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", version);
+    build_options.addOption([]const u8, "prompt_md", @embedFile("priv/prompts/PROMPT.md"));
+    const build_options_mod = build_options.createModule();
+
+    mod.addImport("build_options", build_options_mod);
 
     // Executable
     const exe = b.addExecutable(.{
@@ -59,7 +63,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "cog", .module = mod },
-                .{ .name = "build_options", .module = build_options.createModule() },
+                .{ .name = "build_options", .module = build_options_mod },
             },
         }),
     });
@@ -225,6 +229,10 @@ fn addRelease(
 
     const release_options = b.addOptions();
     release_options.addOption([]const u8, "version", version);
+    release_options.addOption([]const u8, "prompt_md", @embedFile("priv/prompts/PROMPT.md"));
+    const release_options_mod = release_options.createModule();
+
+    release_mod.addImport("build_options", release_options_mod);
 
     const release_exe = b.addExecutable(.{
         .name = "cog",
@@ -234,7 +242,7 @@ fn addRelease(
             .optimize = .ReleaseSafe,
             .imports = &.{
                 .{ .name = "cog", .module = release_mod },
-                .{ .name = "build_options", .module = release_options.createModule() },
+                .{ .name = "build_options", .module = release_options_mod },
             },
         }),
     });

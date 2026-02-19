@@ -58,49 +58,6 @@ fn readCwdFile(allocator: std.mem.Allocator, filename: []const u8) ?[]const u8 {
     return f.readToEndAlloc(allocator, 1048576) catch return null;
 }
 
-// ── Hook Scripts ────────────────────────────────────────────────────────
-
-const block_native_tools_sh =
-    \\#!/bin/bash
-    \\# Cog: Block native file mutation tools — use cog MCP tools instead
-    \\INPUT=$(cat)
-    \\TOOL=$(echo "$INPUT" | jq -r '.tool_name // .tool_info.tool_name // empty' 2>/dev/null)
-    \\case "$TOOL" in
-    \\  Write|Edit|write_file|edit_file)
-    \\    echo "Use cog MCP tools (cog_code_edit, cog_code_create) instead of $TOOL. This keeps the code index in sync." >&2
-    \\    exit 2 ;;
-    \\  *) exit 0 ;;
-    \\esac
-    \\
-;
-
-const reindex_on_change_sh =
-    \\#!/bin/bash
-    \\# Cog: Auto-reindex files after mutations
-    \\INPUT=$(cat)
-    \\FILE=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty' 2>/dev/null)
-    \\if [ -n "$FILE" ] && [ -f "$FILE" ]; then
-    \\  cog code/index "$FILE" 2>/dev/null
-    \\fi
-    \\exit 0
-    \\
-;
-
-pub fn generateHookScripts() !void {
-    try ensureDir(".cog/hooks");
-
-    try writeCwdFile(".cog/hooks/block-native-tools.sh", block_native_tools_sh);
-    // Make executable
-    const f1 = std.fs.cwd().openFile(".cog/hooks/block-native-tools.sh", .{ .mode = .read_write }) catch return;
-    defer f1.close();
-    f1.chmod(0o755) catch {};
-
-    try writeCwdFile(".cog/hooks/reindex-on-change.sh", reindex_on_change_sh);
-    const f2 = std.fs.cwd().openFile(".cog/hooks/reindex-on-change.sh", .{ .mode = .read_write }) catch return;
-    defer f2.close();
-    f2.chmod(0o755) catch {};
-}
-
 // ── MCP Config Generation ───────────────────────────────────────────────
 
 pub fn configureMcp(allocator: std.mem.Allocator, agent: agents_mod.Agent) !void {
@@ -210,7 +167,6 @@ fn writeJsonAmp(allocator: std.mem.Allocator, path: []const u8) !void {
                 var iter = parsed.value.object.iterator();
                 while (iter.next()) |entry| {
                     if (std.mem.eql(u8, entry.key_ptr.*, "amp.mcpServers")) continue;
-                    if (std.mem.eql(u8, entry.key_ptr.*, "amp.tools.disable")) continue;
                     try s.objectField(entry.key_ptr.*);
                     try s.write(entry.value_ptr.*);
                 }
@@ -230,12 +186,6 @@ fn writeJsonAmp(allocator: std.mem.Allocator, path: []const u8) !void {
     try s.endArray();
     try s.endObject();
     try s.endObject();
-
-    try s.objectField("amp.tools.disable");
-    try s.beginArray();
-    try s.write("builtin:write_file");
-    try s.write("builtin:edit_file");
-    try s.endArray();
 
     try s.endObject();
 
@@ -322,25 +272,21 @@ fn printGlobalMcpInstructions(agent: agents_mod.Agent) void {
     }
 }
 
-// ── Hooks Config Generation ─────────────────────────────────────────────
+// ── Tool Permissions ────────────────────────────────────────────────────
 
-pub fn configureHooks(allocator: std.mem.Allocator, agent: agents_mod.Agent) !void {
-    const hooks_path = agent.hooks_path orelse return;
-
-    switch (agent.hooks_format) {
-        .claude_code => try writeClaudeCodeHooks(allocator, hooks_path),
-        .gemini => try writeGeminiHooks(allocator, hooks_path),
-        .windsurf => try writeWindsurfHooks(allocator, hooks_path),
-        .cursor => try writeCursorHooks(allocator, hooks_path),
-        .amp => try writeAmpHooks(allocator, hooks_path),
-        .none => {},
+pub fn configureToolPermissions(allocator: std.mem.Allocator, agent: agents_mod.Agent) !void {
+    if (std.mem.eql(u8, agent.id, "claude_code")) {
+        try writeClaudePermissions(allocator);
+    } else if (std.mem.eql(u8, agent.id, "gemini")) {
+        try writeGeminiTrust(allocator, agent.mcp_path.?);
+    } else if (std.mem.eql(u8, agent.id, "amp")) {
+        try writeAmpPermissions(allocator, agent.mcp_path.?);
     }
 }
 
-fn writeClaudeCodeHooks(allocator: std.mem.Allocator, path: []const u8) !void {
-    if (std.fs.path.dirname(path)) |parent| {
-        try ensureDir(parent);
-    }
+fn writeClaudePermissions(allocator: std.mem.Allocator) !void {
+    const path = ".claude/settings.json";
+    try ensureDir(".claude");
 
     const existing = readCwdFile(allocator, path);
     defer if (existing) |e| allocator.free(e);
@@ -350,59 +296,76 @@ fn writeClaudeCodeHooks(allocator: std.mem.Allocator, path: []const u8) !void {
     var s: Stringify = .{ .writer = &aw.writer };
     try s.beginObject();
 
-    // Preserve existing non-hooks keys
+    var existing_allow: ?json.Value = null;
+    var existing_perms: ?json.Value = null;
+    var parsed_holder: ?json.Parsed(json.Value) = null;
+    defer if (parsed_holder) |p| p.deinit();
+
     if (existing) |content| {
         if (json.parseFromSlice(json.Value, allocator, content, .{})) |parsed| {
-            defer parsed.deinit();
+            parsed_holder = parsed;
             if (parsed.value == .object) {
+                // Copy all non-permissions top-level keys
                 var iter = parsed.value.object.iterator();
                 while (iter.next()) |entry| {
-                    if (std.mem.eql(u8, entry.key_ptr.*, "hooks")) continue;
+                    if (std.mem.eql(u8, entry.key_ptr.*, "permissions")) continue;
                     try s.objectField(entry.key_ptr.*);
                     try s.write(entry.value_ptr.*);
+                }
+                // Capture existing permissions
+                if (parsed.value.object.get("permissions")) |perms| {
+                    existing_perms = perms;
+                    if (perms == .object) {
+                        if (perms.object.get("allow")) |allow| {
+                            existing_allow = allow;
+                        }
+                    }
                 }
             }
         } else |_| {}
     }
 
-    try s.objectField("hooks");
+    try s.objectField("permissions");
     try s.beginObject();
 
-    try s.objectField("PreToolUse");
-    try s.beginArray();
-    try s.beginObject();
-    try s.objectField("matcher");
-    try s.write("Write|Edit");
-    try s.objectField("hooks");
-    try s.beginArray();
-    try s.beginObject();
-    try s.objectField("type");
-    try s.write("command");
-    try s.objectField("command");
-    try s.write(".cog/hooks/block-native-tools.sh");
-    try s.endObject();
-    try s.endArray();
-    try s.endObject();
-    try s.endArray();
+    // Copy non-allow keys from existing permissions (e.g. deny)
+    if (existing_perms) |perms| {
+        if (perms == .object) {
+            var iter = perms.object.iterator();
+            while (iter.next()) |entry| {
+                if (std.mem.eql(u8, entry.key_ptr.*, "allow")) continue;
+                try s.objectField(entry.key_ptr.*);
+                try s.write(entry.value_ptr.*);
+            }
+        }
+    }
 
-    try s.objectField("PostToolUse");
+    // Write allow array, preserving existing entries + adding mcp__cog__*
+    try s.objectField("allow");
     try s.beginArray();
-    try s.beginObject();
-    try s.objectField("matcher");
-    try s.write("Write|Edit|Bash");
-    try s.objectField("hooks");
-    try s.beginArray();
-    try s.beginObject();
-    try s.objectField("type");
-    try s.write("command");
-    try s.objectField("command");
-    try s.write(".cog/hooks/reindex-on-change.sh");
-    try s.endObject();
-    try s.endArray();
-    try s.endObject();
-    try s.endArray();
 
-    try s.endObject(); // hooks
+    const cog_pattern = "mcp__cog__*";
+    var already_has_cog = false;
+
+    if (existing_allow) |allow| {
+        if (allow == .array) {
+            for (allow.array.items) |item| {
+                if (item == .string) {
+                    if (std.mem.eql(u8, item.string, cog_pattern)) {
+                        already_has_cog = true;
+                    }
+                }
+                try s.write(item);
+            }
+        }
+    }
+
+    if (!already_has_cog) {
+        try s.write(cog_pattern);
+    }
+
+    try s.endArray();
+    try s.endObject(); // permissions
     try s.endObject(); // root
 
     const new_content = try aw.toOwnedSlice();
@@ -410,177 +373,131 @@ fn writeClaudeCodeHooks(allocator: std.mem.Allocator, path: []const u8) !void {
     try writeCwdFile(path, new_content);
 }
 
-fn writeGeminiHooks(allocator: std.mem.Allocator, path: []const u8) !void {
-    if (std.fs.path.dirname(path)) |parent| {
-        try ensureDir(parent);
-    }
+fn writeGeminiTrust(allocator: std.mem.Allocator, mcp_path: []const u8) !void {
+    const existing = readCwdFile(allocator, mcp_path) orelse return;
+    defer allocator.free(existing);
 
-    const existing = readCwdFile(allocator, path);
-    defer if (existing) |e| allocator.free(e);
+    const parsed = json.parseFromSlice(json.Value, allocator, existing, .{}) catch return;
+    defer parsed.deinit();
+
+    if (parsed.value != .object) return;
 
     var aw: Writer.Allocating = .init(allocator);
     defer aw.deinit();
     var s: Stringify = .{ .writer = &aw.writer };
     try s.beginObject();
 
-    // Preserve existing non-hooks/non-mcpServers keys
-    if (existing) |content| {
-        if (json.parseFromSlice(json.Value, allocator, content, .{})) |parsed| {
-            defer parsed.deinit();
-            if (parsed.value == .object) {
-                var iter = parsed.value.object.iterator();
-                while (iter.next()) |entry| {
-                    if (std.mem.eql(u8, entry.key_ptr.*, "hooks")) continue;
-                    // Keep mcpServers if already written by configureMcp
-                    try s.objectField(entry.key_ptr.*);
-                    try s.write(entry.value_ptr.*);
+    var iter = parsed.value.object.iterator();
+    while (iter.next()) |entry| {
+        if (std.mem.eql(u8, entry.key_ptr.*, "mcpServers")) {
+            // Rewrite mcpServers with trust on cog entry
+            try s.objectField("mcpServers");
+            try s.beginObject();
+
+            if (entry.value_ptr.* == .object) {
+                var srv_iter = entry.value_ptr.object.iterator();
+                while (srv_iter.next()) |srv| {
+                    try s.objectField(srv.key_ptr.*);
+                    if (std.mem.eql(u8, srv.key_ptr.*, "cog") and srv.value_ptr.* == .object) {
+                        // Rewrite cog entry with trust: true
+                        try s.beginObject();
+                        var cog_iter = srv.value_ptr.object.iterator();
+                        while (cog_iter.next()) |cog_entry| {
+                            if (std.mem.eql(u8, cog_entry.key_ptr.*, "trust")) continue;
+                            try s.objectField(cog_entry.key_ptr.*);
+                            try s.write(cog_entry.value_ptr.*);
+                        }
+                        try s.objectField("trust");
+                        try s.write(true);
+                        try s.endObject();
+                    } else {
+                        try s.write(srv.value_ptr.*);
+                    }
                 }
             }
-        } else |_| {}
+
+            try s.endObject();
+        } else {
+            try s.objectField(entry.key_ptr.*);
+            try s.write(entry.value_ptr.*);
+        }
     }
 
-    try s.objectField("hooks");
-    try s.beginObject();
-
-    try s.objectField("BeforeTool");
-    try s.beginArray();
-    try s.beginObject();
-    try s.objectField("matcher");
-    try s.write("write_file|edit_file");
-    try s.objectField("hooks");
-    try s.beginArray();
-    try s.beginObject();
-    try s.objectField("type");
-    try s.write("command");
-    try s.objectField("command");
-    try s.write(".cog/hooks/block-native-tools.sh");
-    try s.endObject();
-    try s.endArray();
-    try s.endObject();
-    try s.endArray();
-
-    try s.objectField("AfterTool");
-    try s.beginArray();
-    try s.beginObject();
-    try s.objectField("hooks");
-    try s.beginArray();
-    try s.beginObject();
-    try s.objectField("type");
-    try s.write("command");
-    try s.objectField("command");
-    try s.write(".cog/hooks/reindex-on-change.sh");
-    try s.endObject();
-    try s.endArray();
-    try s.endObject();
-    try s.endArray();
-
-    try s.endObject(); // hooks
-    try s.endObject(); // root
-
-    const new_content = try aw.toOwnedSlice();
-    defer allocator.free(new_content);
-    try writeCwdFile(path, new_content);
-}
-
-fn writeWindsurfHooks(allocator: std.mem.Allocator, path: []const u8) !void {
-    if (std.fs.path.dirname(path)) |parent| {
-        try ensureDir(parent);
-    }
-
-    var aw: Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    var s: Stringify = .{ .writer = &aw.writer };
-
-    try s.beginObject();
-    try s.objectField("hooks");
-    try s.beginObject();
-
-    try s.objectField("pre_write_code");
-    try s.beginArray();
-    try s.beginObject();
-    try s.objectField("command");
-    try s.write(".cog/hooks/block-native-tools.sh");
-    try s.endObject();
-    try s.endArray();
-
-    try s.objectField("post_write_code");
-    try s.beginArray();
-    try s.beginObject();
-    try s.objectField("command");
-    try s.write(".cog/hooks/reindex-on-change.sh");
-    try s.endObject();
-    try s.endArray();
-
-    try s.endObject();
     try s.endObject();
 
     const new_content = try aw.toOwnedSlice();
     defer allocator.free(new_content);
-    try writeCwdFile(path, new_content);
+    try writeCwdFile(mcp_path, new_content);
 }
 
-fn writeCursorHooks(allocator: std.mem.Allocator, path: []const u8) !void {
-    if (std.fs.path.dirname(path)) |parent| {
-        try ensureDir(parent);
-    }
+fn writeAmpPermissions(allocator: std.mem.Allocator, mcp_path: []const u8) !void {
+    const existing = readCwdFile(allocator, mcp_path) orelse return;
+    defer allocator.free(existing);
 
-    var aw: Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    var s: Stringify = .{ .writer = &aw.writer };
+    const parsed = json.parseFromSlice(json.Value, allocator, existing, .{}) catch return;
+    defer parsed.deinit();
 
-    try s.beginObject();
-    try s.objectField("version");
-    try s.write(@as(i64, 1));
-    try s.objectField("hooks");
-    try s.beginObject();
-    try s.objectField("afterFileEdit");
-    try s.beginArray();
-    try s.beginObject();
-    try s.objectField("command");
-    try s.write(".cog/hooks/reindex-on-change.sh");
-    try s.endObject();
-    try s.endArray();
-    try s.endObject();
-    try s.endObject();
-
-    const new_content = try aw.toOwnedSlice();
-    defer allocator.free(new_content);
-    try writeCwdFile(path, new_content);
-}
-
-fn writeAmpHooks(allocator: std.mem.Allocator, path: []const u8) !void {
-    // Amp hooks are in the same file as MCP config — merge
-    if (std.fs.path.dirname(path)) |parent| {
-        try ensureDir(parent);
-    }
-
-    const existing = readCwdFile(allocator, path);
-    defer if (existing) |e| allocator.free(e);
+    if (parsed.value != .object) return;
 
     var aw: Writer.Allocating = .init(allocator);
     defer aw.deinit();
     var s: Stringify = .{ .writer = &aw.writer };
     try s.beginObject();
 
-    // Preserve existing keys except amp.tools.disable (already set by configureMcp)
-    if (existing) |content| {
-        if (json.parseFromSlice(json.Value, allocator, content, .{})) |parsed| {
-            defer parsed.deinit();
-            if (parsed.value == .object) {
-                var iter = parsed.value.object.iterator();
-                while (iter.next()) |entry| {
-                    try s.objectField(entry.key_ptr.*);
-                    try s.write(entry.value_ptr.*);
+    // Check if amp.permissions already exists and has our rule
+    var existing_perms: ?json.Value = null;
+    var already_has_cog = false;
+
+    if (parsed.value.object.get("amp.permissions")) |perms| {
+        existing_perms = perms;
+        if (perms == .array) {
+            for (perms.array.items) |item| {
+                if (item == .object) {
+                    const tool = item.object.get("tool") orelse continue;
+                    if (tool == .string and std.mem.eql(u8, tool.string, "mcp__cog__*")) {
+                        already_has_cog = true;
+                        break;
+                    }
                 }
             }
-        } else |_| {}
+        }
     }
 
+    // Copy all non-permissions top-level keys
+    var iter = parsed.value.object.iterator();
+    while (iter.next()) |entry| {
+        if (std.mem.eql(u8, entry.key_ptr.*, "amp.permissions")) continue;
+        try s.objectField(entry.key_ptr.*);
+        try s.write(entry.value_ptr.*);
+    }
+
+    // Write amp.permissions
+    try s.objectField("amp.permissions");
+    try s.beginArray();
+
+    if (existing_perms) |perms| {
+        if (perms == .array) {
+            for (perms.array.items) |item| {
+                try s.write(item);
+            }
+        }
+    }
+
+    if (!already_has_cog) {
+        try s.beginObject();
+        try s.objectField("tool");
+        try s.write("mcp__cog__*");
+        try s.objectField("action");
+        try s.write("allow");
+        try s.endObject();
+    }
+
+    try s.endArray();
     try s.endObject();
 
     const new_content = try aw.toOwnedSlice();
     defer allocator.free(new_content);
-    try writeCwdFile(path, new_content);
+    try writeCwdFile(mcp_path, new_content);
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────
@@ -687,6 +604,177 @@ test "writeTomlMcp appends once and is idempotent" {
             const first = std.mem.indexOf(u8, updated, marker) orelse return error.TestUnexpectedResult;
             const second = std.mem.indexOfPos(u8, updated, first + marker.len, marker);
             try std.testing.expect(second == null);
+        }
+    }.run);
+}
+
+test "writeClaudePermissions creates correct JSON" {
+    try withTempCwd(struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            try writeClaudePermissions(allocator);
+
+            const content = readCwdFile(allocator, ".claude/settings.json") orelse return error.TestUnexpectedResult;
+            defer allocator.free(content);
+
+            const parsed = try json.parseFromSlice(json.Value, allocator, content, .{});
+            defer parsed.deinit();
+
+            const perms = parsed.value.object.get("permissions") orelse return error.TestUnexpectedResult;
+            try std.testing.expect(perms == .object);
+            const allow = perms.object.get("allow") orelse return error.TestUnexpectedResult;
+            try std.testing.expect(allow == .array);
+            try std.testing.expectEqual(@as(usize, 1), allow.array.items.len);
+            try std.testing.expectEqualStrings("mcp__cog__*", allow.array.items[0].string);
+        }
+    }.run);
+}
+
+test "writeClaudePermissions merges with existing permissions" {
+    try withTempCwd(struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            std.fs.cwd().makeDir(".claude") catch {};
+            const existing =
+                \\{"other_key":"value","permissions":{"allow":["Bash(*)"],"deny":["Write(~/)"]}}
+            ;
+            try writeCwdFile(".claude/settings.json", existing);
+
+            try writeClaudePermissions(allocator);
+
+            const content = readCwdFile(allocator, ".claude/settings.json") orelse return error.TestUnexpectedResult;
+            defer allocator.free(content);
+
+            const parsed = try json.parseFromSlice(json.Value, allocator, content, .{});
+            defer parsed.deinit();
+
+            // Preserved other_key
+            const other = parsed.value.object.get("other_key") orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqualStrings("value", other.string);
+
+            const perms = parsed.value.object.get("permissions") orelse return error.TestUnexpectedResult;
+
+            // Preserved deny
+            const deny = perms.object.get("deny") orelse return error.TestUnexpectedResult;
+            try std.testing.expect(deny == .array);
+            try std.testing.expectEqual(@as(usize, 1), deny.array.items.len);
+
+            // allow has both original + cog
+            const allow = perms.object.get("allow") orelse return error.TestUnexpectedResult;
+            try std.testing.expect(allow == .array);
+            try std.testing.expectEqual(@as(usize, 2), allow.array.items.len);
+            try std.testing.expectEqualStrings("Bash(*)", allow.array.items[0].string);
+            try std.testing.expectEqualStrings("mcp__cog__*", allow.array.items[1].string);
+        }
+    }.run);
+}
+
+test "writeClaudePermissions is idempotent" {
+    try withTempCwd(struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            try writeClaudePermissions(allocator);
+            try writeClaudePermissions(allocator);
+
+            const content = readCwdFile(allocator, ".claude/settings.json") orelse return error.TestUnexpectedResult;
+            defer allocator.free(content);
+
+            const parsed = try json.parseFromSlice(json.Value, allocator, content, .{});
+            defer parsed.deinit();
+
+            const allow = parsed.value.object.get("permissions").?.object.get("allow").?;
+            try std.testing.expectEqual(@as(usize, 1), allow.array.items.len);
+        }
+    }.run);
+}
+
+test "writeGeminiTrust adds trust field to cog entry" {
+    try withTempCwd(struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            std.fs.cwd().makeDir(".gemini") catch {};
+            const existing =
+                \\{"mcpServers":{"cog":{"command":"cog","args":["mcp"]},"other":{"command":"other"}}}
+            ;
+            try writeCwdFile(".gemini/settings.json", existing);
+
+            try writeGeminiTrust(allocator, ".gemini/settings.json");
+
+            const content = readCwdFile(allocator, ".gemini/settings.json") orelse return error.TestUnexpectedResult;
+            defer allocator.free(content);
+
+            const parsed = try json.parseFromSlice(json.Value, allocator, content, .{});
+            defer parsed.deinit();
+
+            const servers = parsed.value.object.get("mcpServers") orelse return error.TestUnexpectedResult;
+            const cog = servers.object.get("cog") orelse return error.TestUnexpectedResult;
+
+            // Has trust: true
+            const trust = cog.object.get("trust") orelse return error.TestUnexpectedResult;
+            try std.testing.expect(trust == .bool);
+            try std.testing.expect(trust.bool);
+
+            // Preserved command
+            const cmd = cog.object.get("command") orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqualStrings("cog", cmd.string);
+
+            // Other server untouched
+            try std.testing.expect(servers.object.get("other") != null);
+        }
+    }.run);
+}
+
+test "writeAmpPermissions adds permissions array" {
+    try withTempCwd(struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            std.fs.cwd().makeDir(".amp") catch {};
+            const existing =
+                \\{"amp.mcpServers":{"cog":{"command":"cog","args":["mcp"]}}}
+            ;
+            try writeCwdFile(".amp/settings.json", existing);
+
+            try writeAmpPermissions(allocator, ".amp/settings.json");
+
+            const content = readCwdFile(allocator, ".amp/settings.json") orelse return error.TestUnexpectedResult;
+            defer allocator.free(content);
+
+            const parsed = try json.parseFromSlice(json.Value, allocator, content, .{});
+            defer parsed.deinit();
+
+            // Preserved mcpServers
+            try std.testing.expect(parsed.value.object.get("amp.mcpServers") != null);
+
+            // Has amp.permissions
+            const perms = parsed.value.object.get("amp.permissions") orelse return error.TestUnexpectedResult;
+            try std.testing.expect(perms == .array);
+            try std.testing.expectEqual(@as(usize, 1), perms.array.items.len);
+
+            const rule = perms.array.items[0];
+            try std.testing.expect(rule == .object);
+            const tool = rule.object.get("tool") orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqualStrings("mcp__cog__*", tool.string);
+            const action = rule.object.get("action") orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqualStrings("allow", action.string);
+        }
+    }.run);
+}
+
+test "writeAmpPermissions is idempotent" {
+    try withTempCwd(struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            std.fs.cwd().makeDir(".amp") catch {};
+            const existing =
+                \\{"amp.mcpServers":{"cog":{"command":"cog","args":["mcp"]}}}
+            ;
+            try writeCwdFile(".amp/settings.json", existing);
+
+            try writeAmpPermissions(allocator, ".amp/settings.json");
+            try writeAmpPermissions(allocator, ".amp/settings.json");
+
+            const content = readCwdFile(allocator, ".amp/settings.json") orelse return error.TestUnexpectedResult;
+            defer allocator.free(content);
+
+            const parsed = try json.parseFromSlice(json.Value, allocator, content, .{});
+            defer parsed.deinit();
+
+            const perms = parsed.value.object.get("amp.permissions").?;
+            try std.testing.expectEqual(@as(usize, 1), perms.array.items.len);
         }
     }.run);
 }
