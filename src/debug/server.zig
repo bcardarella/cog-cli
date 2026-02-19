@@ -198,6 +198,16 @@ pub const tool_definitions = [_]ToolDef{
         .description = "Poll for pending debug events and notifications",
         .input_schema = debug_poll_events_schema,
     },
+    .{
+        .name = "debug_load_core",
+        .description = "Load a core dump for post-mortem debugging",
+        .input_schema = debug_load_core_schema,
+    },
+    .{
+        .name = "debug_dap_request",
+        .description = "Send a raw DAP request to the debug adapter (DAP sessions only)",
+        .input_schema = debug_dap_request_schema,
+    },
 };
 
 const ToolDef = struct {
@@ -338,10 +348,16 @@ pub const debug_variable_location_schema =
     \\{"type":"object","properties":{"session_id":{"type":"string"},"name":{"type":"string"},"frame_id":{"type":"integer","default":0}},"required":["session_id","name"]}
 ;
 
-
-
 pub const debug_poll_events_schema =
     \\{"type":"object","properties":{"session_id":{"type":"string","description":"Poll specific session, or omit for all sessions"}}}
+;
+
+pub const debug_load_core_schema =
+    \\{"type":"object","properties":{"core_path":{"type":"string","description":"Path to core dump file"},"executable":{"type":"string","description":"Path to the executable that generated the core dump"}},"required":["core_path"]}
+;
+
+pub const debug_dap_request_schema =
+    \\{"type":"object","properties":{"session_id":{"type":"string"},"command":{"type":"string","description":"DAP command name (e.g. evaluate, threads)"},"arguments":{"type":"object","description":"DAP request arguments"}},"required":["session_id","command"]}
 ;
 
 // ── Tool Result Type ────────────────────────────────────────────────────
@@ -458,6 +474,10 @@ pub const DebugServer = struct {
             return self.toolVariableLocation(allocator, tool_args);
         } else if (std.mem.eql(u8, tool_name, "debug_poll_events")) {
             return self.toolPollEvents(allocator, tool_args);
+        } else if (std.mem.eql(u8, tool_name, "debug_load_core")) {
+            return self.toolLoadCore(allocator, tool_args);
+        } else if (std.mem.eql(u8, tool_name, "debug_dap_request")) {
+            return self.toolDapRequest(allocator, tool_args);
         } else {
             return .{ .err = .{ .code = METHOD_NOT_FOUND, .message = "Unknown tool" } };
         }
@@ -473,6 +493,11 @@ pub const DebugServer = struct {
             return .{ .err = .{ .code = INVALID_PARAMS, .message = "Invalid launch config: program is required" } };
         };
         defer config.deinit(allocator);
+
+        const client_pid: ?std.posix.pid_t = if (a.object.get("client_pid")) |v|
+            (if (v == .integer) @as(std.posix.pid_t, @intCast(v.integer)) else null)
+        else
+            null;
 
         // Determine driver type from language hint or file extension
         const use_dap = blk: {
@@ -506,7 +531,7 @@ pub const DebugServer = struct {
                 return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
             };
 
-            const session_id = try self.session_manager.createSession(driver);
+            const session_id = try self.session_manager.createSession(driver, client_pid, .terminate);
             if (self.session_manager.getSession(session_id)) |s| {
                 s.status = .stopped;
             }
@@ -539,7 +564,7 @@ pub const DebugServer = struct {
                 return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
             };
 
-            const session_id = try self.session_manager.createSession(driver);
+            const session_id = try self.session_manager.createSession(driver, client_pid, .terminate);
             if (self.session_manager.getSession(session_id)) |ss| {
                 ss.status = .stopped;
             }
@@ -792,7 +817,7 @@ pub const DebugServer = struct {
             session_id_val.string,
             if (request.expression) |e| e else "(scope)",
             result_val.result,
-            result_val.@"type",
+            result_val.type,
         );
 
         var aw: Writer.Allocating = .init(allocator);
@@ -823,8 +848,7 @@ pub const DebugServer = struct {
                     session.driver.stop(allocator) catch {};
                 };
                 // Fall through to destroy session below
-            } else
-            if (detach) {
+            } else if (detach) {
                 // Detach without killing the debuggee
                 session.driver.detach(allocator) catch {
                     // Fall back to full stop if detach not supported
@@ -1035,8 +1059,7 @@ pub const DebugServer = struct {
                     break :blk ri.value;
                 }
             }
-            break :blk if (reg_infos.len > 0) reg_infos[0].value else
-                return .{ .err = .{ .code = INVALID_PARAMS, .message = "Missing address and unable to read PC" } };
+            break :blk if (reg_infos.len > 0) reg_infos[0].value else return .{ .err = .{ .code = INVALID_PARAMS, .message = "Missing address and unable to read PC" } };
         };
 
         const count: u32 = if (a.object.get("instruction_count")) |v| (if (v == .integer) @intCast(v.integer) else 10) else 10;
@@ -1073,6 +1096,11 @@ pub const DebugServer = struct {
 
         const pid_val = a.object.get("pid") orelse return .{ .err = .{ .code = INVALID_PARAMS, .message = "Missing pid" } };
         if (pid_val != .integer) return .{ .err = .{ .code = INVALID_PARAMS, .message = "pid must be integer" } };
+
+        const client_pid: ?std.posix.pid_t = if (a.object.get("client_pid")) |v|
+            (if (v == .integer) @as(std.posix.pid_t, @intCast(v.integer)) else null)
+        else
+            null;
 
         // Determine driver type from language hint
         const use_dap = if (a.object.get("language")) |lang_val| blk: {
@@ -1121,7 +1149,7 @@ pub const DebugServer = struct {
             driver_type_name = "native";
         }
 
-        const session_id = try self.session_manager.createSession(driver);
+        const session_id = try self.session_manager.createSession(driver, client_pid, .detach);
         if (self.session_manager.getSession(session_id)) |s| {
             s.status = .stopped;
         }
@@ -1938,6 +1966,91 @@ pub const DebugServer = struct {
         return .{ .ok = result };
     }
 
+    fn toolLoadCore(self: *DebugServer, allocator: std.mem.Allocator, args: ?json.Value) !ToolResult {
+        const a = args orelse return .{ .err = .{ .code = INVALID_PARAMS, .message = "Missing arguments" } };
+        if (a != .object) return .{ .err = .{ .code = INVALID_PARAMS, .message = "Arguments must be object" } };
+
+        const core_path_val = a.object.get("core_path") orelse return .{ .err = .{ .code = INVALID_PARAMS, .message = "Missing core_path" } };
+        if (core_path_val != .string) return .{ .err = .{ .code = INVALID_PARAMS, .message = "core_path must be string" } };
+
+        const executable_val = a.object.get("executable");
+        const executable: ?[]const u8 = if (executable_val) |v| (if (v == .string) v.string else null) else null;
+        const client_pid: ?std.posix.pid_t = if (a.object.get("client_pid")) |v|
+            (if (v == .integer) @as(std.posix.pid_t, @intCast(v.integer)) else null)
+        else
+            null;
+
+        // Core dumps always use the native engine
+        const dwarf_engine = @import("dwarf/engine.zig");
+        var engine = try allocator.create(dwarf_engine.DwarfEngine);
+        engine.* = dwarf_engine.DwarfEngine.init(allocator);
+        errdefer {
+            engine.deinit();
+            allocator.destroy(engine);
+        }
+
+        var driver = engine.activeDriver();
+        driver.loadCore(allocator, core_path_val.string, executable) catch |err| {
+            self.dashboard.onError("debug_load_core", @errorName(err));
+            return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
+        };
+
+        const session_id = try self.session_manager.createSession(driver, client_pid, .terminate);
+        if (self.session_manager.getSession(session_id)) |s| {
+            s.status = .stopped;
+        }
+        self.dashboard.onLaunch(session_id, "core_dump", "native");
+        self.emitLaunchEvent(session_id, "core_dump", "native");
+
+        var aw: Writer.Allocating = .init(allocator);
+        defer aw.deinit();
+        var s: Stringify = .{ .writer = &aw.writer };
+        try s.beginObject();
+        try s.objectField("session_id");
+        try s.write(session_id);
+        try s.objectField("status");
+        try s.write("stopped");
+        try s.objectField("mode");
+        try s.write("core_dump");
+        try s.endObject();
+        const result = try aw.toOwnedSlice();
+        return .{ .ok = result };
+    }
+
+    fn toolDapRequest(self: *DebugServer, allocator: std.mem.Allocator, args: ?json.Value) !ToolResult {
+        const a = args orelse return .{ .err = .{ .code = INVALID_PARAMS, .message = "Missing arguments" } };
+        if (a != .object) return .{ .err = .{ .code = INVALID_PARAMS, .message = "Arguments must be object" } };
+
+        const session_id_val = a.object.get("session_id") orelse return .{ .err = .{ .code = INVALID_PARAMS, .message = "Missing session_id" } };
+        if (session_id_val != .string) return .{ .err = .{ .code = INVALID_PARAMS, .message = "session_id must be string" } };
+
+        const command_val = a.object.get("command") orelse return .{ .err = .{ .code = INVALID_PARAMS, .message = "Missing command" } };
+        if (command_val != .string) return .{ .err = .{ .code = INVALID_PARAMS, .message = "command must be string" } };
+
+        const session = self.session_manager.getSession(session_id_val.string) orelse
+            return .{ .err = .{ .code = INVALID_PARAMS, .message = "Unknown session" } };
+
+        // Serialize arguments to JSON string if present
+        const arguments_str: ?[]const u8 = if (a.object.get("arguments")) |args_val| blk: {
+            if (args_val == .object or args_val == .array) {
+                var aw: Writer.Allocating = .init(allocator);
+                defer aw.deinit();
+                var jw: Stringify = .{ .writer = &aw.writer };
+                args_val.jsonStringify(&jw) catch break :blk null;
+                break :blk aw.toOwnedSlice() catch null;
+            }
+            break :blk null;
+        } else null;
+        defer if (arguments_str) |s| allocator.free(s);
+
+        const response = session.driver.rawRequest(allocator, command_val.string, arguments_str) catch |err| {
+            self.dashboard.onError("debug_dap_request", @errorName(err));
+            return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
+        };
+
+        return .{ .ok = response };
+    }
+
     // ── Prompts ──────────────────────────────────────────────────────────
 
     // ── Dashboard Socket ────────────────────────────────────────────────
@@ -2115,7 +2228,7 @@ pub const DebugServer = struct {
                 jw.objectField("value") catch return;
                 jw.write(v.value) catch return;
                 jw.objectField("type") catch return;
-                jw.write(v.@"type") catch return;
+                jw.write(v.type) catch return;
                 jw.endObject() catch return;
             }
             jw.endArray() catch return;
@@ -2182,7 +2295,6 @@ pub const DebugServer = struct {
         , .{ truncateStr(session_id, 32), truncateStr(action, 32) }) catch return;
         self.pushDashboardEvent(event);
     }
-
 };
 
 fn truncateStr(s: []const u8, max: usize) []const u8 {
@@ -2191,8 +2303,8 @@ fn truncateStr(s: []const u8, max: usize) []const u8 {
 
 // ── Tests ───────────────────────────────────────────────────────────────
 
-test "tool_definitions has 34 entries" {
-    try std.testing.expectEqual(@as(usize, 34), tool_definitions.len);
+test "tool_definitions has 36 entries" {
+    try std.testing.expectEqual(@as(usize, 36), tool_definitions.len);
 }
 
 test "callTool returns error for unknown tool" {

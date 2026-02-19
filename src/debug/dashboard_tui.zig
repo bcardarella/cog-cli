@@ -1610,21 +1610,29 @@ pub const DashboardTui = struct {
         _ = self;
         // Each ─ is 3 bytes
         var buf: [256 * 3]u8 = undefined;
-        const actual = @min(count, 256);
-        for (0..actual) |i| {
-            @memcpy(buf[i * hh.len ..][0..hh.len], hh);
+        var remaining = count;
+        while (remaining > 0) {
+            const chunk = @min(remaining, @as(usize, 256));
+            for (0..chunk) |i| {
+                @memcpy(buf[i * hh.len ..][0..hh.len], hh);
+            }
+            stderrWrite(buf[0 .. chunk * hh.len]);
+            remaining -= chunk;
         }
-        stderrWrite(buf[0 .. actual * hh.len]);
     }
 
     fn writeHorizontalDim(_: *const DashboardTui, count: usize) void {
         // Already in dim context
         var buf: [256 * 3]u8 = undefined;
-        const actual = @min(count, 256);
-        for (0..actual) |i| {
-            @memcpy(buf[i * hh.len ..][0..hh.len], hh);
+        var remaining = count;
+        while (remaining > 0) {
+            const chunk = @min(remaining, @as(usize, 256));
+            for (0..chunk) |i| {
+                @memcpy(buf[i * hh.len ..][0..hh.len], hh);
+            }
+            stderrWrite(buf[0 .. chunk * hh.len]);
+            remaining -= chunk;
         }
-        stderrWrite(buf[0 .. actual * hh.len]);
     }
 };
 

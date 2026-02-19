@@ -9,6 +9,7 @@ const binary_elf = @import("binary_elf.zig");
 const parser = @import("parser.zig");
 const location = @import("location.zig");
 const unwind = @import("unwind.zig");
+const core_dump_mod = @import("core_dump.zig");
 
 const ProcessControl = process_mod.ProcessControl;
 const StopState = types.StopState;
@@ -70,6 +71,8 @@ pub const DwarfEngine = struct {
     cu_index: []parser.CuIndexEntry = &.{},
     /// Type DIE cache per compilation unit
     type_die_cache: ?parser.TypeDieCache = null,
+    /// Core dump for post-mortem debugging (no live process)
+    core_dump: ?core_dump_mod.CoreDump = null,
 
     pub fn init(allocator: std.mem.Allocator) DwarfEngine {
         return .{
@@ -79,7 +82,8 @@ pub const DwarfEngine = struct {
     }
 
     pub fn deinit(self: *DwarfEngine) void {
-        self.process.kill() catch {};
+        if (self.core_dump) |*cd| cd.deinit();
+        if (self.core_dump == null) self.process.kill() catch {};
         if (self.program_path) |p| self.allocator.free(p);
         self.bp_manager.deinit();
         if (self.line_entries.len > 0) self.allocator.free(self.line_entries);
@@ -160,6 +164,7 @@ pub const DwarfEngine = struct {
         .writeRegistersFn = engineWriteRegisters,
         .variableLocationFn = engineVariableLocation,
         .drainNotificationsFn = engineDrainNotifications,
+        .loadCoreFn = engineLoadCore,
     };
 
     // ── Launch ──────────────────────────────────────────────────────
@@ -632,6 +637,7 @@ pub const DwarfEngine = struct {
 
     fn engineRun(ctx: *anyopaque, _: std.mem.Allocator, action: RunAction, options: types.RunOptions) anyerror!StopState {
         const self: *DwarfEngine = @ptrCast(@alignCast(ctx));
+        if (self.core_dump != null) return error.NotSupported; // core dumps are read-only
         // Track step operations for stop_reason reporting
         self.step_in_progress = switch (action) {
             .step_into, .step_over, .step_out, .step_back => true,
@@ -1686,6 +1692,7 @@ pub const DwarfEngine = struct {
 
     fn engineSetBreakpoint(ctx: *anyopaque, _: std.mem.Allocator, file: []const u8, line: u32, condition: ?[]const u8, hit_condition: ?[]const u8, log_message: ?[]const u8) anyerror!BreakpointInfo {
         const self: *DwarfEngine = @ptrCast(@alignCast(ctx));
+        if (self.core_dump != null) return error.NotSupported; // core dumps are read-only
 
         if (self.line_entries.len > 0) {
             // Resolve file:line to address via DWARF line table
@@ -2715,7 +2722,10 @@ pub const DwarfEngine = struct {
 
     fn engineReadMemory(ctx: *anyopaque, allocator: std.mem.Allocator, address: u64, size: u64) anyerror![]const u8 {
         const self: *DwarfEngine = @ptrCast(@alignCast(ctx));
-        const data = try self.process.readMemory(address, @intCast(size), allocator);
+        const data = if (self.core_dump) |*cd|
+            try cd.readMemory(address, @intCast(size), allocator)
+        else
+            try self.process.readMemory(address, @intCast(size), allocator);
         // Convert to hex string
         const hex = try allocator.alloc(u8, data.len * 2);
         for (data, 0..) |byte, i| {
@@ -2729,6 +2739,7 @@ pub const DwarfEngine = struct {
 
     fn engineWriteMemory(ctx: *anyopaque, _: std.mem.Allocator, address: u64, data: []const u8) anyerror!void {
         const self: *DwarfEngine = @ptrCast(@alignCast(ctx));
+        if (self.core_dump != null) return error.NotSupported; // core dumps are read-only
         try self.process.writeMemory(address, data);
     }
 
@@ -2915,6 +2926,7 @@ pub const DwarfEngine = struct {
 
     fn engineSetVariable(ctx: *anyopaque, allocator: std.mem.Allocator, name: []const u8, value: []const u8, _: u32) anyerror!InspectResult {
         const self: *DwarfEngine = @ptrCast(@alignCast(ctx));
+        if (self.core_dump != null) return error.NotSupported; // core dumps are read-only
         const regs = try self.process.readRegisters();
 
         // Find debug binary
@@ -3131,6 +3143,19 @@ pub const DwarfEngine = struct {
 
         // Try to find binary path from /proc or lsof for debug info
         // For now, debug info loading requires explicit program path
+    }
+
+    // ── Core Dump ──────────────────────────────────────────────────
+
+    fn engineLoadCore(ctx: *anyopaque, allocator: std.mem.Allocator, core_path: []const u8, executable_path: ?[]const u8) anyerror!void {
+        const self: *DwarfEngine = @ptrCast(@alignCast(ctx));
+        self.core_dump = try core_dump_mod.CoreDump.load(allocator, core_path);
+        self.launched = true;
+        if (executable_path) |exe| {
+            self.program_path = try allocator.dupe(u8, exe);
+            self.loadDebugInfo(exe) catch {};
+            // No ASLR slide for core dumps — addresses in core match the process at crash time
+        }
     }
 
     // ── Scopes ──────────────────────────────────────────────────────
@@ -3488,7 +3513,10 @@ pub const DwarfEngine = struct {
     fn engineReadRegisters(ctx: *anyopaque, allocator: std.mem.Allocator, _: u32) anyerror![]const types.RegisterInfo {
         const self: *DwarfEngine = @ptrCast(@alignCast(ctx));
 
-        const regs = try self.process.readRegisters();
+        const regs = if (self.core_dump) |*cd|
+            cd.readRegisters()
+        else
+            try self.process.readRegisters();
         const is_arm = builtin.cpu.arch == .aarch64;
 
         var items = std.ArrayListUnmanaged(types.RegisterInfo).empty;
@@ -3803,6 +3831,7 @@ pub const DwarfEngine = struct {
         _ = allocator;
         _ = thread_id;
         if (!self.launched) return error.NotLaunched;
+        if (self.core_dump != null) return error.NotSupported; // core dumps are read-only
 
         // Read current register state, modify the target register, write back
         var regs = try self.process.readRegisters();

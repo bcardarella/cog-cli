@@ -174,7 +174,7 @@ fn parseResponse(allocator: std.mem.Allocator, body: []const u8) ![]const u8 {
     return writeJsonValue(allocator, data_val);
 }
 
-fn writeJsonValue(allocator: std.mem.Allocator, value: json.Value) ![]const u8 {
+pub fn writeJsonValue(allocator: std.mem.Allocator, value: json.Value) ![]const u8 {
     var aw: Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
 

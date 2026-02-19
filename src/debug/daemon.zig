@@ -77,6 +77,9 @@ pub const DaemonServer = struct {
 
         // Accept loop with idle timeout
         while (!g_shutdown_requested) {
+            // Reap sessions whose owner process no longer exists.
+            self.reapOrphanedSessions();
+
             // Check idle timeout
             const now = std.time.milliTimestamp();
             if (now - self.last_activity > IDLE_TIMEOUT_MS) {
@@ -108,6 +111,58 @@ pub const DaemonServer = struct {
             self.last_activity = std.time.milliTimestamp();
             self.handleConnection(client_fd);
         }
+    }
+
+    fn reapOrphanedSessions(self: *DaemonServer) void {
+        if (self.server.session_manager.sessionCount() == 0) return;
+
+        var ids = std.ArrayListUnmanaged([]const u8).empty;
+        defer {
+            for (ids.items) |id| self.allocator.free(id);
+            ids.deinit(self.allocator);
+        }
+
+        var iter = self.server.session_manager.sessions.iterator();
+        while (iter.next()) |entry| {
+            if (entry.value_ptr.orphan_action == .none) continue;
+            const owner_pid = entry.value_ptr.owner_pid orelse continue;
+            if (!isProcessAlive(owner_pid)) {
+                const id_copy = self.allocator.dupe(u8, entry.key_ptr.*) catch continue;
+                ids.append(self.allocator, id_copy) catch {
+                    self.allocator.free(id_copy);
+                    continue;
+                };
+            }
+        }
+
+        for (ids.items) |id| {
+            if (self.server.session_manager.getSession(id)) |session| {
+                switch (session.orphan_action) {
+                    .terminate => {
+                        session.driver.stop(self.allocator) catch {
+                            session.driver.terminate(self.allocator) catch {};
+                        };
+                    },
+                    .detach => {
+                        session.driver.detach(self.allocator) catch {};
+                    },
+                    .none => {},
+                }
+                self.server.dashboard.onStop(id);
+            }
+            _ = self.server.session_manager.destroySession(id);
+        }
+    }
+
+    fn isProcessAlive(pid: posix.pid_t) bool {
+        posix.kill(pid, 0) catch |err| {
+            return switch (err) {
+                error.PermissionDenied => true,
+                error.ProcessNotFound => false,
+                else => true,
+            };
+        };
+        return true;
     }
 
     fn handleConnection(self: *DaemonServer, client_fd: posix.socket_t) void {

@@ -48,6 +48,7 @@ const cli_tools = [_]CliToolDef{
             .{ .kind = .positional_string, .flag = null, .json_name = "program", .description = "Path to executable" },
             .{ .kind = .flag_string, .flag = "--cwd", .json_name = "cwd", .description = "Working directory" },
             .{ .kind = .flag_string, .flag = "--language", .json_name = "language", .description = "Language hint (c, zig, etc.)" },
+            .{ .kind = .flag_int, .flag = "--owner-pid", .json_name = "client_pid", .description = "Owner PID for orphan cleanup" },
             .{ .kind = .flag_bool, .flag = "--stop-on-entry", .json_name = "stop_on_entry", .description = "Stop at program entry point" },
             .{ .kind = .collect_strings, .flag = null, .json_name = "args", .description = "Program arguments (after --)" },
         },
@@ -71,6 +72,7 @@ const cli_tools = [_]CliToolDef{
         .args = &.{
             .{ .kind = .positional_int, .flag = null, .json_name = "pid", .description = "Process ID" },
             .{ .kind = .flag_string, .flag = "--language", .json_name = "language", .description = "Language hint" },
+            .{ .kind = .flag_int, .flag = "--owner-pid", .json_name = "client_pid", .description = "Owner PID for orphan cleanup" },
         },
     },
     .{
@@ -454,6 +456,29 @@ const cli_tools = [_]CliToolDef{
         .args = &.{
             .{ .kind = .flag_string, .flag = "--session", .json_name = "session_id", .description = "Session ID" },
             .{ .kind = .collect_ints, .flag = null, .json_name = "thread_ids", .description = "Thread IDs to terminate" },
+        },
+    },
+    // ── Core Dump & DAP Passthrough ────────────────────────────────────
+    .{
+        .cli_name = "load_core",
+        .server_tool = "debug_load_core",
+        .inject_action = null,
+        .description = "Load a core dump for post-mortem debugging",
+        .args = &.{
+            .{ .kind = .positional_string, .flag = null, .json_name = "core_path", .description = "Path to core dump file" },
+            .{ .kind = .flag_string, .flag = "--executable", .json_name = "executable", .description = "Path to executable" },
+            .{ .kind = .flag_int, .flag = "--owner-pid", .json_name = "client_pid", .description = "Owner PID for orphan cleanup" },
+        },
+    },
+    .{
+        .cli_name = "dap_request",
+        .server_tool = "debug_dap_request",
+        .inject_action = null,
+        .description = "Send a raw DAP request (DAP sessions only)",
+        .args = &.{
+            .{ .kind = .positional_string, .flag = null, .json_name = "command", .description = "DAP command name" },
+            .{ .kind = .flag_string, .flag = "--session", .json_name = "session_id", .description = "Session ID" },
+            .{ .kind = .flag_string, .flag = "--args", .json_name = "arguments", .description = "JSON arguments" },
         },
     },
 };
@@ -1060,6 +1085,7 @@ fn startDaemon(allocator: std.mem.Allocator) !void {
     child.stdin_behavior = .Close;
     child.stdout_behavior = .Close;
     child.stderr_behavior = .Close;
+    child.pgid = 0;
 
     try child.spawn();
     // Don't wait — the daemon runs in the background
@@ -1182,8 +1208,8 @@ fn writeStdout(msg: []const u8) void {
 
 // ── Tests ───────────────────────────────────────────────────────────────
 
-test "cli tool table has 38 entries" {
-    try std.testing.expectEqual(@as(usize, 38), cli_tools.len);
+test "cli tool table has 40 entries" {
+    try std.testing.expectEqual(@as(usize, 40), cli_tools.len);
 }
 
 test "findTool returns correct definitions" {

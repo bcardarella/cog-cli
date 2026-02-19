@@ -15,6 +15,18 @@ pub const SelectResult = union(enum) {
     cancelled: void,
 };
 
+pub const MultiSelectResult = union(enum) {
+    selected: []const usize, // caller must free
+    back: void,
+    cancelled: void,
+};
+
+pub const MultiSelectOptions = struct {
+    prompt: []const u8,
+    items: []const MenuItem,
+    initial_selected: ?[]const bool = null,
+};
+
 pub const InputValidator = *const fn ([]const u8) ?[]const u8;
 
 pub const SelectOptions = struct {
@@ -591,6 +603,182 @@ fn readLine(allocator: std.mem.Allocator) ![]const u8 {
     if (line.len > 0 and line[line.len - 1] == '\n') line = line[0 .. line.len - 1];
     if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
     return allocator.dupe(u8, line);
+}
+
+// ── Multi-Select (TTY) ──────────────────────────────────────────────────
+
+pub fn multiSelect(allocator: std.mem.Allocator, options: MultiSelectOptions) !MultiSelectResult {
+    if (!posix.isatty(std.fs.File.stdin().handle)) {
+        return multiSelectFallback(allocator, options);
+    }
+
+    const fd = std.fs.File.stdin().handle;
+    var term = try RawTerminal.enter(fd);
+    defer term.leave();
+
+    // Hide terminal cursor during menu interaction
+    stderrWrite("\x1B[?25l");
+    defer stderrWrite("\x1B[?25h");
+
+    var cursor: usize = 0;
+    const item_count = options.items.len;
+    const total_lines = item_count + 2; // prompt + items + hint
+
+    // Selection state
+    var selected: [16]bool = .{false} ** 16;
+    if (options.initial_selected) |init| {
+        const copy_len = @min(init.len, 16);
+        @memcpy(selected[0..copy_len], init[0..copy_len]);
+    }
+
+    // Initial render
+    renderPrompt(options.prompt);
+    renderMultiSelectMenu(options.items, cursor, &selected);
+    stderrWrite(dim ++ "    (space to toggle, enter to confirm)" ++ reset ++ "\n");
+
+    while (true) {
+        const event = try term.readInputEvent();
+        switch (event) {
+            .arrow_up => {
+                if (cursor > 0) cursor -= 1 else cursor = item_count - 1;
+                clearLines(total_lines);
+                renderPrompt(options.prompt);
+                renderMultiSelectMenu(options.items, cursor, &selected);
+                stderrWrite(dim ++ "    (space to toggle, enter to confirm)" ++ reset ++ "\n");
+            },
+            .arrow_down => {
+                if (cursor < item_count - 1) cursor += 1 else cursor = 0;
+                clearLines(total_lines);
+                renderPrompt(options.prompt);
+                renderMultiSelectMenu(options.items, cursor, &selected);
+                stderrWrite(dim ++ "    (space to toggle, enter to confirm)" ++ reset ++ "\n");
+            },
+            .char => |c| {
+                if (c == ' ') {
+                    selected[cursor] = !selected[cursor];
+                    clearLines(total_lines);
+                    renderPrompt(options.prompt);
+                    renderMultiSelectMenu(options.items, cursor, &selected);
+                    stderrWrite(dim ++ "    (space to toggle, enter to confirm)" ++ reset ++ "\n");
+                }
+            },
+            .enter => {
+                // Count selected
+                var count: usize = 0;
+                for (options.items, 0..) |_, i| {
+                    if (selected[i]) count += 1;
+                }
+                if (count == 0) continue; // require at least one selection
+
+                // Build result array
+                var result = try allocator.alloc(usize, count);
+                var idx: usize = 0;
+                for (options.items, 0..) |_, i| {
+                    if (selected[i]) {
+                        result[idx] = i;
+                        idx += 1;
+                    }
+                }
+
+                // Final render: show only selected items
+                clearLines(total_lines);
+                renderPrompt(options.prompt);
+                for (options.items, 0..) |item, i| {
+                    if (selected[i]) {
+                        stderrWrite("    " ++ cyan ++ indicator_on ++ reset ++ " " ++ bold);
+                        stderrWrite(item.label);
+                        stderrWrite(reset ++ "\n");
+                    }
+                }
+
+                return .{ .selected = result };
+            },
+            .escape => {
+                clearLines(total_lines);
+                return .back;
+            },
+            .ctrl_c => {
+                clearLines(total_lines);
+                return .cancelled;
+            },
+            else => {},
+        }
+    }
+}
+
+fn renderMultiSelectMenu(items: []const MenuItem, cursor: usize, selected: *const [16]bool) void {
+    for (items, 0..) |item, i| {
+        if (i == cursor) {
+            if (selected[i]) {
+                stderrWrite("    " ++ cyan ++ indicator_on ++ reset ++ " " ++ bold);
+            } else {
+                stderrWrite("    " ++ dim ++ indicator_off ++ reset ++ " " ++ bold);
+            }
+            stderrWrite(item.label);
+            stderrWrite(reset ++ "\n");
+        } else {
+            if (selected[i]) {
+                stderrWrite("    " ++ cyan ++ indicator_on ++ reset ++ " ");
+            } else {
+                stderrWrite("    " ++ dim ++ indicator_off ++ reset ++ " ");
+            }
+            stderrWrite(item.label);
+            stderrWrite("\n");
+        }
+    }
+}
+
+fn multiSelectFallback(allocator: std.mem.Allocator, options: MultiSelectOptions) !MultiSelectResult {
+    stderrWrite("  ");
+    stderrWrite(options.prompt);
+    stderrWrite("\n");
+    for (options.items, 0..) |item, i| {
+        var buf: [16]u8 = undefined;
+        const num = std.fmt.bufPrint(&buf, "{d}", .{i + 1}) catch "?";
+        stderrWrite("    ");
+        stderrWrite(num);
+        stderrWrite(". ");
+        stderrWrite(item.label);
+        stderrWrite("\n");
+    }
+    stderrWrite("  Enter numbers separated by commas: ");
+
+    var input_buf: [256]u8 = undefined;
+    const n = posix.read(std.fs.File.stdin().handle, &input_buf) catch return .cancelled;
+    if (n == 0) return .cancelled;
+
+    var line = input_buf[0..n];
+    if (line.len > 0 and line[line.len - 1] == '\n') line = line[0 .. line.len - 1];
+    if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
+
+    // Parse comma-separated numbers
+    var indices: std.ArrayListUnmanaged(usize) = .empty;
+    defer indices.deinit(allocator);
+
+    var iter = std.mem.splitScalar(u8, line, ',');
+    while (iter.next()) |part| {
+        const trimmed = std.mem.trim(u8, part, " ");
+        if (trimmed.len == 0) continue;
+        const num = std.fmt.parseInt(usize, trimmed, 10) catch continue;
+        if (num >= 1 and num <= options.items.len) {
+            // Check for duplicates
+            var dupe = false;
+            for (indices.items) |existing| {
+                if (existing == num - 1) {
+                    dupe = true;
+                    break;
+                }
+            }
+            if (!dupe) {
+                try indices.append(allocator, num - 1);
+            }
+        }
+    }
+
+    if (indices.items.len == 0) return .cancelled;
+
+    const result = try allocator.dupe(usize, indices.items);
+    return .{ .selected = result };
 }
 
 // ── Confirm ─────────────────────────────────────────────────────────────

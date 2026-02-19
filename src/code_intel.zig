@@ -83,7 +83,7 @@ const RefInfo = struct {
     roles: []const u8,
 };
 
-const CodeIndex = struct {
+pub const CodeIndex = struct {
     index: scip.Index,
     symbol_to_defs: std.StringHashMapUnmanaged(DefInfo),
     symbol_to_refs: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(RefInfo)),
@@ -156,7 +156,7 @@ const CodeIndex = struct {
         };
     }
 
-    fn deinit(self: *CodeIndex, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *CodeIndex, allocator: std.mem.Allocator) void {
         self.symbol_to_defs.deinit(allocator);
         var ref_iter = self.symbol_to_refs.iterator();
         while (ref_iter.next()) |entry| {
@@ -224,14 +224,14 @@ const CodeIndex = struct {
     /// Check if a path appears to be a test file.
     fn pathIsTest(path: []const u8) bool {
         return std.mem.indexOf(u8, path, "test") != null or
-               std.mem.indexOf(u8, path, "__tests__") != null or
-               std.mem.indexOf(u8, path, "spec") != null or
-               std.mem.endsWith(u8, path, ".test.js") or
-               std.mem.endsWith(u8, path, ".test.ts") or
-               std.mem.endsWith(u8, path, ".spec.js") or
-               std.mem.endsWith(u8, path, ".spec.ts") or
-               std.mem.endsWith(u8, path, "_test.go") or
-               std.mem.endsWith(u8, path, "_test.py");
+            std.mem.indexOf(u8, path, "__tests__") != null or
+            std.mem.indexOf(u8, path, "spec") != null or
+            std.mem.endsWith(u8, path, ".test.js") or
+            std.mem.endsWith(u8, path, ".test.ts") or
+            std.mem.endsWith(u8, path, ".spec.js") or
+            std.mem.endsWith(u8, path, ".spec.ts") or
+            std.mem.endsWith(u8, path, "_test.go") or
+            std.mem.endsWith(u8, path, "_test.py");
     }
 
     /// Count path separators to estimate nesting depth.
@@ -297,16 +297,29 @@ fn loadIndex(allocator: std.mem.Allocator) !CodeIndex {
     return ci;
 }
 
+/// Load and decode the SCIP index for long-lived runtime use.
+pub fn loadIndexForRuntime(allocator: std.mem.Allocator) !CodeIndex {
+    return loadIndex(allocator);
+}
+
 // ── Commands ────────────────────────────────────────────────────────────
 
 pub fn dispatch(allocator: std.mem.Allocator, subcmd: []const u8, args: []const [:0]const u8) !void {
     if (std.mem.eql(u8, subcmd, "code/index")) return codeIndex(allocator, args);
-    if (std.mem.eql(u8, subcmd, "code/query")) return codeQuery(allocator, args);
-    if (std.mem.eql(u8, subcmd, "code/status")) return codeStatus(allocator, args);
-    if (std.mem.eql(u8, subcmd, "code/edit")) return codeEdit(allocator, args);
-    if (std.mem.eql(u8, subcmd, "code/create")) return codeCreate(allocator, args);
-    if (std.mem.eql(u8, subcmd, "code/delete")) return codeDelete(allocator, args);
-    if (std.mem.eql(u8, subcmd, "code/rename")) return codeRename(allocator, args);
+
+    if (std.mem.eql(u8, subcmd, "code/query") or
+        std.mem.eql(u8, subcmd, "code/status") or
+        std.mem.eql(u8, subcmd, "code/edit") or
+        std.mem.eql(u8, subcmd, "code/create") or
+        std.mem.eql(u8, subcmd, "code/delete") or
+        std.mem.eql(u8, subcmd, "code/rename"))
+    {
+        printErr("error: '");
+        printErr(subcmd);
+        printErr("' has been removed from CLI. Use the MCP tools instead (cog_code_*).\n");
+        printErr("Run " ++ dim ++ "cog mcp --help" ++ reset ++ " for MCP server usage.\n");
+        return error.Explained;
+    }
 
     printErr("error: unknown command '");
     printErr(subcmd);
@@ -994,10 +1007,7 @@ fn reindexFile(allocator: std.mem.Allocator, file_path: []const u8) bool {
         allocator.free(result.string_data);
         defer allocator.free(encoded);
 
-        const out_file = std.fs.createFileAbsolute(index_path, .{}) catch return false;
-        defer out_file.close();
-        out_file.writeAll(encoded) catch return false;
-        return true;
+        return writeEncodedIndexAtomically(allocator, index_path, encoded);
     } else {
         // Fall back to external indexer
         const extension = extensions.resolveByExtension(allocator, ext_str) orelse return false;
@@ -1013,10 +1023,7 @@ fn reindexFile(allocator: std.mem.Allocator, file_path: []const u8) bool {
         allocator.free(file_result.backing_data);
         defer allocator.free(encoded);
 
-        const out_file = std.fs.createFileAbsolute(index_path, .{}) catch return false;
-        defer out_file.close();
-        out_file.writeAll(encoded) catch return false;
-        return true;
+        return writeEncodedIndexAtomically(allocator, index_path, encoded);
     }
 }
 
@@ -1025,9 +1032,29 @@ fn saveIndex(allocator: std.mem.Allocator, index: scip.Index, index_path: []cons
     const encoded = scip_encode.encodeIndex(allocator, index) catch return false;
     defer allocator.free(encoded);
 
-    const out_file = std.fs.createFileAbsolute(index_path, .{}) catch return false;
-    defer out_file.close();
-    out_file.writeAll(encoded) catch return false;
+    return writeEncodedIndexAtomically(allocator, index_path, encoded);
+}
+
+fn writeEncodedIndexAtomically(allocator: std.mem.Allocator, index_path: []const u8, encoded: []const u8) bool {
+    const parent = std.fs.path.dirname(index_path) orelse return false;
+    const basename = std.fs.path.basename(index_path);
+    const tmp_name = std.fmt.allocPrint(allocator, "{s}.tmp-{d}", .{ basename, std.time.nanoTimestamp() }) catch return false;
+    defer allocator.free(tmp_name);
+
+    var dir = std.fs.openDirAbsolute(parent, .{}) catch return false;
+    defer dir.close();
+
+    var tmp_file = dir.createFile(tmp_name, .{}) catch return false;
+    var renamed = false;
+    defer {
+        tmp_file.close();
+        if (!renamed) dir.deleteFile(tmp_name) catch {};
+    }
+
+    tmp_file.writeAll(encoded) catch return false;
+    tmp_file.sync() catch return false;
+    dir.rename(tmp_name, basename) catch return false;
+    renamed = true;
     return true;
 }
 
@@ -1397,7 +1424,8 @@ fn querySymbols(allocator: std.mem.Allocator, args: []const [:0]const u8, file_p
             const indexed_path = entry.key_ptr.*;
             // Check if query path ends with indexed path or vice versa
             if (std.mem.endsWith(u8, file_path, indexed_path) or
-                std.mem.endsWith(u8, indexed_path, file_path)) {
+                std.mem.endsWith(u8, indexed_path, file_path))
+            {
                 doc_idx_opt = entry.value_ptr.*;
                 break;
             }
@@ -1899,6 +1927,670 @@ fn codeStatus(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     const result = try aw.toOwnedSlice();
     defer allocator.free(result);
     printStdout(result);
+}
+
+// ── Public Inner API (for MCP server) ───────────────────────────────────
+
+pub const QueryMode = enum { find, refs, symbols, structure };
+
+pub const QueryParams = struct {
+    mode: QueryMode,
+    name: ?[]const u8 = null,
+    file: ?[]const u8 = null,
+    kind: ?[]const u8 = null,
+    limit: ?usize = null,
+};
+
+pub fn codeQueryInner(allocator: std.mem.Allocator, params: QueryParams) ![]const u8 {
+    var ci = try loadIndex(allocator);
+    defer ci.deinit(allocator);
+
+    return codeQueryWithLoadedIndex(allocator, &ci, params);
+}
+
+pub fn codeQueryWithLoadedIndex(allocator: std.mem.Allocator, ci: *CodeIndex, params: QueryParams) ![]const u8 {
+    return switch (params.mode) {
+        .find => try queryFindInner(allocator, ci, params.name orelse return error.MissingName, params.kind, params.limit orelse 1),
+        .refs => try queryRefsInner(allocator, ci, params.name orelse return error.MissingName, params.kind, params.limit orelse 100),
+        .symbols => try querySymbolsInner(allocator, ci, params.file orelse return error.MissingFile, params.kind),
+        .structure => try queryStructureInner(allocator, ci),
+    };
+}
+
+fn queryFindInner(allocator: std.mem.Allocator, ci: *CodeIndex, name: []const u8, kind_filter: ?[]const u8, limit: usize) ![]const u8 {
+    const matches = ci.findSymbol(name, kind_filter);
+    if (matches.len == 0) return error.SymbolNotFound;
+
+    var aw: Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    var s: Stringify = .{ .writer = &aw.writer };
+
+    if (limit == 1) {
+        const match = matches.items[0];
+        try s.beginObject();
+        try s.objectField("symbol");
+        try s.write(match.symbol);
+        try s.objectField("path");
+        try s.write(match.def.path);
+        try s.objectField("line");
+        try s.write(match.def.line);
+        try s.objectField("kind");
+        try s.write(scip.kindName(match.def.kind));
+        if (match.def.display_name.len > 0) {
+            try s.objectField("display_name");
+            try s.write(match.def.display_name);
+        }
+        if (match.def.documentation.len > 0) {
+            try s.objectField("documentation");
+            try s.write(match.def.documentation[0]);
+        }
+        try s.endObject();
+    } else {
+        try s.beginArray();
+        const count = @min(matches.len, limit);
+        for (matches.items[0..count]) |match| {
+            try s.beginObject();
+            try s.objectField("symbol");
+            try s.write(match.symbol);
+            try s.objectField("path");
+            try s.write(match.def.path);
+            try s.objectField("line");
+            try s.write(match.def.line);
+            try s.objectField("kind");
+            try s.write(scip.kindName(match.def.kind));
+            if (match.def.display_name.len > 0) {
+                try s.objectField("display_name");
+                try s.write(match.def.display_name);
+            }
+            if (match.def.documentation.len > 0) {
+                try s.objectField("documentation");
+                try s.write(match.def.documentation[0]);
+            }
+            try s.endObject();
+        }
+        try s.endArray();
+    }
+
+    return aw.toOwnedSlice();
+}
+
+fn queryRefsInner(allocator: std.mem.Allocator, ci: *CodeIndex, name: []const u8, kind_filter: ?[]const u8, limit: usize) ![]const u8 {
+    const matches = ci.findSymbol(name, kind_filter);
+    if (matches.len == 0) return error.SymbolNotFound;
+
+    const match = matches.items[0];
+    var aw: Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    var s: Stringify = .{ .writer = &aw.writer };
+    try s.beginObject();
+    try s.objectField("symbol");
+    try s.write(match.symbol);
+    try s.objectField("definition");
+    try s.beginObject();
+    try s.objectField("path");
+    try s.write(match.def.path);
+    try s.objectField("line");
+    try s.write(match.def.line);
+    try s.endObject();
+    try s.objectField("references");
+    try s.beginArray();
+
+    if (ci.symbol_to_refs.get(match.symbol)) |refs| {
+        const count = @min(refs.items.len, limit);
+        for (refs.items[0..count]) |ref| {
+            try s.beginObject();
+            try s.objectField("path");
+            try s.write(ref.path);
+            try s.objectField("line");
+            try s.write(ref.line);
+            try s.objectField("roles");
+            try s.write(ref.roles);
+            try s.endObject();
+        }
+    }
+
+    try s.endArray();
+    try s.endObject();
+    return aw.toOwnedSlice();
+}
+
+fn querySymbolsInner(allocator: std.mem.Allocator, ci: *CodeIndex, file_path: []const u8, kind_filter: ?[]const u8) ![]const u8 {
+    // Try exact match first
+    var doc_idx_opt = ci.path_to_doc_idx.get(file_path);
+    if (doc_idx_opt == null) {
+        var iter = ci.path_to_doc_idx.iterator();
+        while (iter.next()) |entry| {
+            const indexed_path = entry.key_ptr.*;
+            if (std.mem.endsWith(u8, file_path, indexed_path) or
+                std.mem.endsWith(u8, indexed_path, file_path))
+            {
+                doc_idx_opt = entry.value_ptr.*;
+                break;
+            }
+        }
+    }
+    const doc_idx = doc_idx_opt orelse return error.FileNotFound;
+    const doc = ci.index.documents[doc_idx];
+
+    var aw: Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    var s: Stringify = .{ .writer = &aw.writer };
+    try s.beginObject();
+    try s.objectField("path");
+    try s.write(doc.relative_path);
+    try s.objectField("symbols");
+    try s.beginArray();
+
+    for (doc.symbols) |sym| {
+        const k = scip.kindName(sym.kind);
+        if (kind_filter) |kf| {
+            if (!std.ascii.eqlIgnoreCase(k, kf)) continue;
+        }
+        var def_line: i32 = 0;
+        for (doc.occurrences) |occ| {
+            if (std.mem.eql(u8, occ.symbol, sym.symbol) and scip.SymbolRole.isDefinition(occ.symbol_roles)) {
+                def_line = occ.range.start_line;
+                break;
+            }
+        }
+        try s.beginObject();
+        const display = if (sym.display_name.len > 0) sym.display_name else scip.extractSymbolName(sym.symbol);
+        try s.objectField("name");
+        try s.write(display);
+        try s.objectField("kind");
+        try s.write(k);
+        try s.objectField("line");
+        try s.write(def_line);
+        if (sym.documentation.len > 0) {
+            try s.objectField("documentation");
+            const doc_str = sym.documentation[0];
+            if (doc_str.len > 200) {
+                try s.write(doc_str[0..200]);
+            } else {
+                try s.write(doc_str);
+            }
+        }
+        try s.endObject();
+    }
+
+    try s.endArray();
+    try s.endObject();
+    return aw.toOwnedSlice();
+}
+
+fn queryStructureInner(allocator: std.mem.Allocator, ci: *CodeIndex) ![]const u8 {
+    var aw: Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    var s: Stringify = .{ .writer = &aw.writer };
+    try s.beginObject();
+    try s.objectField("files");
+    try s.beginArray();
+
+    for (ci.index.documents) |doc| {
+        try s.beginObject();
+        try s.objectField("path");
+        try s.write(doc.relative_path);
+        if (doc.language.len > 0) {
+            try s.objectField("language");
+            try s.write(doc.language);
+        }
+        try s.objectField("symbols");
+        try s.beginArray();
+
+        for (doc.symbols) |sym| {
+            var def_line: i32 = 0;
+            for (doc.occurrences) |occ| {
+                if (std.mem.eql(u8, occ.symbol, sym.symbol) and scip.SymbolRole.isDefinition(occ.symbol_roles)) {
+                    def_line = occ.range.start_line;
+                    break;
+                }
+            }
+            const display = if (sym.display_name.len > 0) sym.display_name else scip.extractSymbolName(sym.symbol);
+            try s.beginObject();
+            try s.objectField("name");
+            try s.write(display);
+            try s.objectField("kind");
+            try s.write(scip.kindName(sym.kind));
+            try s.objectField("line");
+            try s.write(def_line);
+            try s.endObject();
+        }
+
+        try s.endArray();
+        try s.endObject();
+    }
+
+    try s.endArray();
+    try s.endObject();
+    return aw.toOwnedSlice();
+}
+
+pub fn codeEditInner(allocator: std.mem.Allocator, file_path: []const u8, old_text: []const u8, new_text: []const u8) ![]const u8 {
+    const s = settings_mod.Settings.load(allocator);
+    defer if (s) |ss| ss.deinit(allocator);
+
+    const use_external = if (s) |ss| ss.editor != null else false;
+    if (use_external) {
+        const editor_cfg = s.?.editor.?;
+        const subs: []const settings_mod.Substitution = &.{
+            .{ .key = "{file}", .value = file_path },
+            .{ .key = "{old}", .value = old_text },
+            .{ .key = "{new}", .value = new_text },
+        };
+        try runExternalTool(allocator, editor_cfg, subs);
+    } else {
+        try builtinEdit(allocator, file_path, old_text, new_text);
+    }
+
+    const reindexed = reindexFile(allocator, file_path);
+
+    var aw: Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    var st: Stringify = .{ .writer = &aw.writer };
+    try st.beginObject();
+    try st.objectField("file");
+    try st.write(file_path);
+    try st.objectField("edited");
+    try st.write(true);
+    try st.objectField("reindexed");
+    try st.write(reindexed);
+    try st.endObject();
+    return aw.toOwnedSlice();
+}
+
+pub fn codeCreateInner(allocator: std.mem.Allocator, file_path: []const u8, content: []const u8) ![]const u8 {
+    const s = settings_mod.Settings.load(allocator);
+    defer if (s) |ss| ss.deinit(allocator);
+
+    if (s) |ss| {
+        if (ss.creator) |cfg| {
+            const subs: []const settings_mod.Substitution = &.{
+                .{ .key = "{file}", .value = file_path },
+                .{ .key = "{content}", .value = content },
+            };
+            try runExternalTool(allocator, cfg, subs);
+        } else {
+            try builtinCreate(file_path, content);
+        }
+    } else {
+        try builtinCreate(file_path, content);
+    }
+
+    const reindexed = reindexFile(allocator, file_path);
+
+    var aw: Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    var st: Stringify = .{ .writer = &aw.writer };
+    try st.beginObject();
+    try st.objectField("file");
+    try st.write(file_path);
+    try st.objectField("created");
+    try st.write(true);
+    try st.objectField("reindexed");
+    try st.write(reindexed);
+    try st.endObject();
+    return aw.toOwnedSlice();
+}
+
+pub fn codeDeleteInner(allocator: std.mem.Allocator, file_path: []const u8) ![]const u8 {
+    const s = settings_mod.Settings.load(allocator);
+    defer if (s) |ss| ss.deinit(allocator);
+
+    if (s) |ss| {
+        if (ss.deleter) |cfg| {
+            const subs: []const settings_mod.Substitution = &.{
+                .{ .key = "{file}", .value = file_path },
+            };
+            try runExternalTool(allocator, cfg, subs);
+        } else {
+            try builtinDelete(file_path);
+        }
+    } else {
+        try builtinDelete(file_path);
+    }
+
+    const removed = removeFromIndex(allocator, file_path);
+
+    var aw: Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    var st: Stringify = .{ .writer = &aw.writer };
+    try st.beginObject();
+    try st.objectField("file");
+    try st.write(file_path);
+    try st.objectField("deleted");
+    try st.write(true);
+    try st.objectField("index_updated");
+    try st.write(removed);
+    try st.endObject();
+    return aw.toOwnedSlice();
+}
+
+pub fn codeRenameInner(allocator: std.mem.Allocator, old_path: []const u8, new_path: []const u8) ![]const u8 {
+    const s = settings_mod.Settings.load(allocator);
+    defer if (s) |ss| ss.deinit(allocator);
+
+    if (s) |ss| {
+        if (ss.renamer) |cfg| {
+            const subs: []const settings_mod.Substitution = &.{
+                .{ .key = "{old}", .value = old_path },
+                .{ .key = "{new}", .value = new_path },
+            };
+            try runExternalTool(allocator, cfg, subs);
+        } else {
+            try builtinRename(old_path, new_path);
+        }
+    } else {
+        try builtinRename(old_path, new_path);
+    }
+
+    // Update index
+    const cog_dir = paths.findCogDir(allocator) catch {
+        var aw: Writer.Allocating = .init(allocator);
+        errdefer aw.deinit();
+        var st: Stringify = .{ .writer = &aw.writer };
+        try st.beginObject();
+        try st.objectField("old");
+        try st.write(old_path);
+        try st.objectField("new");
+        try st.write(new_path);
+        try st.objectField("renamed");
+        try st.write(true);
+        try st.objectField("reindexed");
+        try st.write(false);
+        try st.endObject();
+        return aw.toOwnedSlice();
+    };
+    defer allocator.free(cog_dir);
+
+    const index_path = try std.fmt.allocPrint(allocator, "{s}/index.scip", .{cog_dir});
+    defer allocator.free(index_path);
+
+    const loaded = loadExistingIndex(allocator, index_path);
+    var master_index = loaded.index;
+    defer scip.freeIndex(allocator, &master_index);
+    defer if (loaded.backing_data) |data| allocator.free(data);
+
+    removeDocument(allocator, &master_index, old_path);
+
+    var reindexed = false;
+    var reindex_backing: ?[]const u8 = null;
+    var reindex_string_data: ?[]const u8 = null;
+    defer if (reindex_backing) |data| allocator.free(data);
+    defer if (reindex_string_data) |data| allocator.free(data);
+    const ext_str = std.fs.path.extension(new_path);
+    if (ext_str.len > 0) {
+        if (tree_sitter_indexer.detectLanguage(ext_str)) |lang| {
+            if (readFileContents(allocator, new_path)) |source| {
+                defer allocator.free(source);
+                var indexer = tree_sitter_indexer.Indexer.init();
+                defer indexer.deinit();
+                if (indexer.indexFile(allocator, source, new_path, lang)) |result| {
+                    reindex_string_data = result.string_data;
+                    mergeDocument(allocator, &master_index, result.doc);
+                    reindexed = true;
+                } else |_| {}
+            }
+        } else if (extensions.resolveByExtension(allocator, ext_str)) |extension| {
+            if (invokeIndexerForFile(allocator, new_path, &extension)) |file_result| {
+                reindex_backing = file_result.backing_data;
+                mergeDocument(allocator, &master_index, file_result.doc);
+                reindexed = true;
+            } else |_| {}
+        }
+    }
+    _ = saveIndex(allocator, master_index, index_path);
+
+    var aw: Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    var st: Stringify = .{ .writer = &aw.writer };
+    try st.beginObject();
+    try st.objectField("old");
+    try st.write(old_path);
+    try st.objectField("new");
+    try st.write(new_path);
+    try st.objectField("renamed");
+    try st.write(true);
+    try st.objectField("reindexed");
+    try st.write(reindexed);
+    try st.endObject();
+    return aw.toOwnedSlice();
+}
+
+pub fn codeStatusInner(allocator: std.mem.Allocator) ![]const u8 {
+    const index_path = getIndexPath(allocator) catch {
+        var aw: Writer.Allocating = .init(allocator);
+        errdefer aw.deinit();
+        var st: Stringify = .{ .writer = &aw.writer };
+        try st.beginObject();
+        try st.objectField("exists");
+        try st.write(false);
+        try st.endObject();
+        return aw.toOwnedSlice();
+    };
+    defer allocator.free(index_path);
+
+    const file = std.fs.openFileAbsolute(index_path, .{}) catch {
+        var aw: Writer.Allocating = .init(allocator);
+        errdefer aw.deinit();
+        var st: Stringify = .{ .writer = &aw.writer };
+        try st.beginObject();
+        try st.objectField("exists");
+        try st.write(false);
+        try st.endObject();
+        return aw.toOwnedSlice();
+    };
+    defer file.close();
+
+    const data = file.readToEndAlloc(allocator, 256 * 1024 * 1024) catch return error.ReadFailed;
+    defer allocator.free(data);
+
+    var index = scip.decode(allocator, data) catch return error.DecodeFailed;
+    defer scip.freeIndex(allocator, &index);
+
+    var total_symbols: usize = 0;
+    for (index.documents) |doc| {
+        total_symbols += doc.symbols.len;
+    }
+    total_symbols += index.external_symbols.len;
+
+    var aw: Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    var st: Stringify = .{ .writer = &aw.writer };
+    try st.beginObject();
+    try st.objectField("exists");
+    try st.write(true);
+    try st.objectField("path");
+    try st.write(index_path);
+    try st.objectField("documents");
+    try st.write(index.documents.len);
+    try st.objectField("symbols");
+    try st.write(total_symbols);
+    if (index.metadata.tool_info.name.len > 0) {
+        try st.objectField("indexer");
+        try st.write(index.metadata.tool_info.name);
+    }
+    if (index.metadata.project_root.len > 0) {
+        try st.objectField("project_root");
+        try st.write(index.metadata.project_root);
+    }
+    try st.endObject();
+    return aw.toOwnedSlice();
+}
+
+pub fn codeStatusFromLoadedIndex(allocator: std.mem.Allocator, ci: *const CodeIndex) ![]const u8 {
+    var total_symbols: usize = 0;
+    for (ci.index.documents) |doc| {
+        total_symbols += doc.symbols.len;
+    }
+    total_symbols += ci.index.external_symbols.len;
+
+    const index_path = getIndexPath(allocator) catch null;
+    defer if (index_path) |p| allocator.free(p);
+
+    var aw: Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    var st: Stringify = .{ .writer = &aw.writer };
+    try st.beginObject();
+    try st.objectField("exists");
+    try st.write(true);
+    if (index_path) |p| {
+        try st.objectField("path");
+        try st.write(p);
+    }
+    try st.objectField("documents");
+    try st.write(ci.index.documents.len);
+    try st.objectField("symbols");
+    try st.write(total_symbols);
+    if (ci.index.metadata.tool_info.name.len > 0) {
+        try st.objectField("indexer");
+        try st.write(ci.index.metadata.tool_info.name);
+    }
+    if (ci.index.metadata.project_root.len > 0) {
+        try st.objectField("project_root");
+        try st.write(ci.index.metadata.project_root);
+    }
+    try st.endObject();
+    return aw.toOwnedSlice();
+}
+
+pub fn codeIndexInner(allocator: std.mem.Allocator, pattern_list: ?[]const []const u8) ![]const u8 {
+    var patterns_buf: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer patterns_buf.deinit(allocator);
+
+    if (pattern_list) |pl| {
+        for (pl) |p| try patterns_buf.append(allocator, p);
+    }
+    if (patterns_buf.items.len == 0) {
+        try patterns_buf.append(allocator, "**/*");
+    }
+
+    const cog_dir = paths.findOrCreateCogDir(allocator) catch return error.NoCogDir;
+    defer allocator.free(cog_dir);
+
+    const index_path = try std.fmt.allocPrint(allocator, "{s}/index.scip", .{cog_dir});
+    defer allocator.free(index_path);
+
+    std.fs.makeDirAbsolute(cog_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return error.MkdirFailed,
+    };
+
+    var backing_buffers: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer {
+        for (backing_buffers.items) |buf| allocator.free(buf);
+        backing_buffers.deinit(allocator);
+    }
+
+    const loaded = loadExistingIndex(allocator, index_path);
+    var master_index = loaded.index;
+    defer scip.freeIndex(allocator, &master_index);
+    if (loaded.backing_data) |data| {
+        backing_buffers.append(allocator, data) catch {};
+    }
+
+    var files: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer {
+        for (files.items) |f| allocator.free(f);
+        files.deinit(allocator);
+    }
+    for (patterns_buf.items) |pattern| {
+        collectGlobFiles(allocator, pattern, &files) catch continue;
+    }
+
+    if (files.items.len == 0) return error.NoFilesMatched;
+
+    var indexed_count: usize = 0;
+    var total_symbols: usize = 0;
+
+    var indexer = tree_sitter_indexer.Indexer.init();
+    defer indexer.deinit();
+
+    var seen_names: [16][]const u8 = undefined;
+    var unique_exts: [16]extensions.Extension = undefined;
+    var ext_files: [16]std.ArrayListUnmanaged([]const u8) = [_]std.ArrayListUnmanaged([]const u8){.empty} ** 16;
+    var num_unique: usize = 0;
+
+    for (files.items) |file_path| {
+        const ext = std.fs.path.extension(file_path);
+        if (ext.len == 0) continue;
+        if (tree_sitter_indexer.detectLanguage(ext)) |lang| {
+            const source = readFileContents(allocator, file_path) orelse continue;
+            defer allocator.free(source);
+            if (indexer.indexFile(allocator, source, file_path, lang)) |result| {
+                backing_buffers.append(allocator, result.string_data) catch {};
+                mergeDocument(allocator, &master_index, result.doc);
+                indexed_count += 1;
+                total_symbols += result.doc.symbols.len;
+            } else |_| {
+                mergeDocument(allocator, &master_index, .{
+                    .language = lang.scipName(),
+                    .relative_path = file_path,
+                    .occurrences = &.{},
+                    .symbols = &.{},
+                });
+                indexed_count += 1;
+            }
+        } else {
+            var extension = extensions.resolveByExtension(allocator, ext) orelse continue;
+            var found = false;
+            var found_idx: usize = 0;
+            for (seen_names[0..num_unique], 0..) |name, idx| {
+                if (std.mem.eql(u8, name, extension.name)) {
+                    found = true;
+                    found_idx = idx;
+                    break;
+                }
+            }
+            if (!found and num_unique < 16) {
+                seen_names[num_unique] = extension.name;
+                unique_exts[num_unique] = extension;
+                ext_files[num_unique].append(allocator, file_path) catch {};
+                num_unique += 1;
+            } else if (found) {
+                ext_files[found_idx].append(allocator, file_path) catch {};
+                extensions.freeExtension(allocator, &extension);
+            } else {
+                extensions.freeExtension(allocator, &extension);
+            }
+        }
+    }
+
+    for (0..num_unique) |ext_idx| {
+        for (ext_files[ext_idx].items) |ext_file_path| {
+            const result = invokeIndexerForFile(allocator, ext_file_path, &unique_exts[ext_idx]) catch continue;
+            backing_buffers.append(allocator, result.backing_data) catch {};
+            mergeDocument(allocator, &master_index, result.doc);
+            indexed_count += 1;
+            total_symbols += result.doc.symbols.len;
+        }
+    }
+
+    for (0..num_unique) |ext_idx| {
+        extensions.freeExtension(allocator, &unique_exts[ext_idx]);
+        ext_files[ext_idx].deinit(allocator);
+    }
+
+    const encoded = scip_encode.encodeIndex(allocator, master_index) catch return error.EncodeFailed;
+    defer allocator.free(encoded);
+
+    if (!writeEncodedIndexAtomically(allocator, index_path, encoded)) return error.WriteFailed;
+
+    total_symbols += master_index.external_symbols.len;
+
+    var aw: Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    var st: Stringify = .{ .writer = &aw.writer };
+    try st.beginObject();
+    try st.objectField("files_indexed");
+    try st.write(indexed_count);
+    try st.objectField("documents");
+    try st.write(master_index.documents.len);
+    try st.objectField("symbols");
+    try st.write(total_symbols);
+    try st.objectField("path");
+    try st.write(index_path);
+    try st.endObject();
+    return aw.toOwnedSlice();
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────

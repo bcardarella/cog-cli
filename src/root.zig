@@ -13,6 +13,9 @@ pub const help_text = @import("help_text.zig");
 pub const debug = @import("debug.zig");
 pub const curl = @import("curl.zig");
 pub const tree_sitter_indexer = @import("tree_sitter_indexer.zig");
+pub const agents = @import("agents.zig");
+pub const mcp = @import("mcp.zig");
+pub const hooks = @import("hooks.zig");
 
 test {
     _ = config;
@@ -30,4 +33,7 @@ test {
     _ = debug;
     _ = curl;
     _ = tree_sitter_indexer;
+    _ = agents;
+    _ = mcp;
+    _ = hooks;
 }

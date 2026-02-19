@@ -6,6 +6,8 @@ const Writer = std.io.Writer;
 const config_mod = @import("config.zig");
 const client = @import("client.zig");
 const tui = @import("tui.zig");
+const agents_mod = @import("agents.zig");
+const hooks_mod = @import("hooks.zig");
 
 const Config = config_mod.Config;
 const help = @import("help_text.zig");
@@ -17,14 +19,6 @@ const dim = "\x1B[2m";
 const reset = "\x1B[0m";
 
 // ── Helpers ─────────────────────────────────────────────────────────────
-
-fn printStdout(text: []const u8) void {
-    var buf: [8192]u8 = undefined;
-    var w = std.fs.File.stdout().writer(&buf);
-    w.interface.writeAll(text) catch {};
-    w.interface.writeByte('\n') catch {};
-    w.interface.flush() catch {};
-}
 
 fn printErr(msg: []const u8) void {
     var buf: [4096]u8 = undefined;
@@ -43,42 +37,11 @@ fn findFlag(args: []const [:0]const u8, flag: []const u8) ?[:0]const u8 {
     return null;
 }
 
-fn findRepeatedFlag(allocator: std.mem.Allocator, args: []const [:0]const u8, flag: []const u8) !std.ArrayListUnmanaged([:0]const u8) {
-    var list: std.ArrayListUnmanaged([:0]const u8) = .empty;
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], flag)) {
-            if (i + 1 < args.len) {
-                i += 1;
-                try list.append(allocator, args[i]);
-            }
-        }
-    }
-    return list;
-}
-
 fn hasFlag(args: []const [:0]const u8, flag: []const u8) bool {
     for (args) |arg| {
         if (std.mem.eql(u8, arg, flag)) return true;
     }
     return false;
-}
-
-/// Parse a compound value like "target:foo,predicate:bar" into key-value pairs.
-/// Returns a list of key=value pairs split on ',' then on first ':'.
-const KV = struct { key: []const u8, value: []const u8 };
-
-fn parseCompoundValue(value: []const u8, out: []KV) usize {
-    var count: usize = 0;
-    var iter = std.mem.splitScalar(u8, value, ',');
-    while (iter.next()) |part| {
-        if (count >= out.len) break;
-        if (std.mem.indexOfScalar(u8, part, ':')) |colon| {
-            out[count] = .{ .key = part[0..colon], .value = part[colon + 1 ..] };
-            count += 1;
-        }
-    }
-    return count;
 }
 
 fn printErrFmt(comptime fmt: []const u8, args: anytype) void {
@@ -152,797 +115,6 @@ fn processCogMemTags(allocator: std.mem.Allocator, content: []const u8, keep_con
     return try result.toOwnedSlice(allocator);
 }
 
-fn callAndPrint(allocator: std.mem.Allocator, cfg: Config, tool_name: []const u8, args_json: []const u8) !void {
-    const result = try client.call(allocator, cfg.url, cfg.api_key, tool_name, args_json);
-    defer allocator.free(result);
-    printStdout(result);
-}
-
-// ── JSON building helpers ───────────────────────────────────────────────
-
-fn jsonEmpty(allocator: std.mem.Allocator) ![]const u8 {
-    return allocator.dupe(u8, "{}");
-}
-
-const JsonBuilder = struct {
-    aw: Writer.Allocating,
-    s: Stringify,
-
-    fn init(allocator: std.mem.Allocator) JsonBuilder {
-        return .{
-            .aw = .init(allocator),
-            .s = undefined,
-        };
-    }
-
-    fn deinit(self: *JsonBuilder) void {
-        self.aw.deinit();
-    }
-
-    fn begin(self: *JsonBuilder) !void {
-        // Fix writer pointer now that self is at its final address
-        self.s = .{ .writer = &self.aw.writer };
-        try self.s.beginObject();
-    }
-
-    fn end(self: *JsonBuilder) !void {
-        try self.s.endObject();
-    }
-
-    fn field(self: *JsonBuilder, name: []const u8) !void {
-        try self.s.objectField(name);
-    }
-
-    fn string(self: *JsonBuilder, value: []const u8) !void {
-        try self.s.write(value);
-    }
-
-    fn int(self: *JsonBuilder, value: i64) !void {
-        try self.s.write(value);
-    }
-
-    fn boolean(self: *JsonBuilder, value: bool) !void {
-        try self.s.write(value);
-    }
-
-    fn toOwnedSlice(self: *JsonBuilder) ![]const u8 {
-        return self.aw.toOwnedSlice();
-    }
-};
-
-// ── Read Commands ───────────────────────────────────────────────────────
-
-pub fn recall(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (hasFlag(args, "--help")) {
-        printCommandHelp(help.recall);
-        return;
-    }
-    if (args.len == 0) {
-        printErr("error: query is required\nRun " ++ dim ++ "cog mem/recall --help" ++ reset ++ " for usage.\n");
-        return error.Explained;
-    }
-
-    const query: []const u8 = args[0];
-    const limit = findFlag(args[1..], "--limit");
-    const created_after = findFlag(args[1..], "--created-after");
-    const created_before = findFlag(args[1..], "--created-before");
-    const no_strengthen = hasFlag(args[1..], "--no-strengthen");
-
-    var pred_filters = try findRepeatedFlag(allocator, args[1..], "--predicate-filter");
-    defer pred_filters.deinit(allocator);
-
-    var exclude_preds = try findRepeatedFlag(allocator, args[1..], "--exclude-predicate");
-    defer exclude_preds.deinit(allocator);
-
-    var aw: Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    var s: Stringify = .{ .writer = &aw.writer };
-
-    try s.beginObject();
-    try s.objectField("query");
-    try s.write(query);
-
-    if (limit) |l| {
-        try s.objectField("limit");
-        const n = std.fmt.parseInt(i64, l, 10) catch {
-            printErr("error: --limit must be a number\n");
-            return error.Explained;
-        };
-        try s.write(n);
-    }
-
-    if (pred_filters.items.len > 0) {
-        try s.objectField("predicate_filter");
-        try s.beginArray();
-        for (pred_filters.items) |p| {
-            try s.write(@as([]const u8, p));
-        }
-        try s.endArray();
-    }
-
-    if (exclude_preds.items.len > 0) {
-        try s.objectField("exclude_predicates");
-        try s.beginArray();
-        for (exclude_preds.items) |p| {
-            try s.write(@as([]const u8, p));
-        }
-        try s.endArray();
-    }
-
-    if (created_after) |d| {
-        try s.objectField("created_after");
-        try s.write(@as([]const u8, d));
-    }
-
-    if (created_before) |d| {
-        try s.objectField("created_before");
-        try s.write(@as([]const u8, d));
-    }
-
-    if (no_strengthen) {
-        try s.objectField("strengthen");
-        try s.write(false);
-    }
-
-    try s.endObject();
-    const args_json = try aw.toOwnedSlice();
-    defer allocator.free(args_json);
-
-    try callAndPrint(allocator, cfg, "recall", args_json);
-}
-
-pub fn get(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (hasFlag(args, "--help")) {
-        printCommandHelp(help.get);
-        return;
-    }
-    if (args.len == 0) {
-        printErr("error: engram-id is required\nRun " ++ dim ++ "cog mem/get --help" ++ reset ++ " for usage.\n");
-        return error.Explained;
-    }
-
-    var aw: Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    var s: Stringify = .{ .writer = &aw.writer };
-    try s.beginObject();
-    try s.objectField("engram_id");
-    try s.write(@as([]const u8, args[0]));
-    try s.endObject();
-    const args_json = try aw.toOwnedSlice();
-    defer allocator.free(args_json);
-
-    try callAndPrint(allocator, cfg, "get", args_json);
-}
-
-pub fn connections(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (hasFlag(args, "--help")) {
-        printCommandHelp(help.connections);
-        return;
-    }
-    if (args.len == 0) {
-        printErr("error: engram-id is required\nRun " ++ dim ++ "cog mem/connections --help" ++ reset ++ " for usage.\n");
-        return error.Explained;
-    }
-
-    const direction = findFlag(args[1..], "--direction");
-
-    var aw: Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    var s: Stringify = .{ .writer = &aw.writer };
-    try s.beginObject();
-    try s.objectField("engram_id");
-    try s.write(@as([]const u8, args[0]));
-    if (direction) |d| {
-        try s.objectField("direction");
-        try s.write(@as([]const u8, d));
-    }
-    try s.endObject();
-    const args_json = try aw.toOwnedSlice();
-    defer allocator.free(args_json);
-
-    try callAndPrint(allocator, cfg, "connections", args_json);
-}
-
-pub fn trace(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (hasFlag(args, "--help")) {
-        printCommandHelp(help.trace);
-        return;
-    }
-    if (args.len < 2) {
-        printErr("error: from-id and to-id are required\nRun " ++ dim ++ "cog mem/trace --help" ++ reset ++ " for usage.\n");
-        return error.Explained;
-    }
-
-    var aw: Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    var s: Stringify = .{ .writer = &aw.writer };
-    try s.beginObject();
-    try s.objectField("from_id");
-    try s.write(@as([]const u8, args[0]));
-    try s.objectField("to_id");
-    try s.write(@as([]const u8, args[1]));
-    try s.endObject();
-    const args_json = try aw.toOwnedSlice();
-    defer allocator.free(args_json);
-
-    try callAndPrint(allocator, cfg, "trace", args_json);
-}
-
-pub fn bulkRecall(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (hasFlag(args, "--help")) {
-        printCommandHelp(help.bulk_recall);
-        return;
-    }
-    if (args.len == 0) {
-        printErr("error: at least one query is required\nRun " ++ dim ++ "cog mem/bulk-recall --help" ++ reset ++ " for usage.\n");
-        return error.Explained;
-    }
-
-    const limit = findFlag(args, "--limit");
-
-    var aw: Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    var s: Stringify = .{ .writer = &aw.writer };
-    try s.beginObject();
-    try s.objectField("queries");
-    try s.beginArray();
-    for (args) |arg| {
-        const a: []const u8 = arg;
-        if (std.mem.eql(u8, a, "--limit")) continue;
-        // skip the value after --limit
-        if (limit) |l| {
-            if (std.mem.eql(u8, a, l)) continue;
-        }
-        if (std.mem.startsWith(u8, a, "--")) continue;
-        try s.write(a);
-    }
-    try s.endArray();
-    if (limit) |l| {
-        try s.objectField("limit");
-        const n = std.fmt.parseInt(i64, l, 10) catch {
-            printErr("error: --limit must be a number\n");
-            return error.Explained;
-        };
-        try s.write(n);
-    }
-    try s.endObject();
-    const args_json = try aw.toOwnedSlice();
-    defer allocator.free(args_json);
-
-    try callAndPrint(allocator, cfg, "bulk_recall", args_json);
-}
-
-pub fn listShortTerm(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (hasFlag(args, "--help")) {
-        printCommandHelp(help.list_short_term);
-        return;
-    }
-    const limit = findFlag(args, "--limit");
-
-    var aw: Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    var s: Stringify = .{ .writer = &aw.writer };
-    try s.beginObject();
-    if (limit) |l| {
-        try s.objectField("limit");
-        const n = std.fmt.parseInt(i64, l, 10) catch {
-            printErr("error: --limit must be a number\n");
-            return error.Explained;
-        };
-        try s.write(n);
-    }
-    try s.endObject();
-    const args_json = try aw.toOwnedSlice();
-    defer allocator.free(args_json);
-
-    try callAndPrint(allocator, cfg, "list_short_term", args_json);
-}
-
-pub fn stale(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (hasFlag(args, "--help")) {
-        printCommandHelp(help.stale);
-        return;
-    }
-    const level = findFlag(args, "--level");
-    const limit = findFlag(args, "--limit");
-
-    var aw: Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    var s: Stringify = .{ .writer = &aw.writer };
-    try s.beginObject();
-    if (level) |l| {
-        try s.objectField("level");
-        try s.write(@as([]const u8, l));
-    }
-    if (limit) |l| {
-        try s.objectField("limit");
-        const n = std.fmt.parseInt(i64, l, 10) catch {
-            printErr("error: --limit must be a number\n");
-            return error.Explained;
-        };
-        try s.write(n);
-    }
-    try s.endObject();
-    const args_json = try aw.toOwnedSlice();
-    defer allocator.free(args_json);
-
-    try callAndPrint(allocator, cfg, "stale", args_json);
-}
-
-pub fn stats(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (hasFlag(args, "--help")) {
-        printCommandHelp(help.stats);
-        return;
-    }
-    const args_json = try jsonEmpty(allocator);
-    defer allocator.free(args_json);
-    try callAndPrint(allocator, cfg, "stats", args_json);
-}
-
-pub fn orphans(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (hasFlag(args, "--help")) {
-        printCommandHelp(help.orphans);
-        return;
-    }
-    const limit = findFlag(args, "--limit");
-
-    var aw: Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    var s: Stringify = .{ .writer = &aw.writer };
-    try s.beginObject();
-    if (limit) |l| {
-        try s.objectField("limit");
-        const n = std.fmt.parseInt(i64, l, 10) catch {
-            printErr("error: --limit must be a number\n");
-            return error.Explained;
-        };
-        try s.write(n);
-    }
-    try s.endObject();
-    const args_json = try aw.toOwnedSlice();
-    defer allocator.free(args_json);
-
-    try callAndPrint(allocator, cfg, "orphans", args_json);
-}
-
-pub fn connectivity(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (hasFlag(args, "--help")) {
-        printCommandHelp(help.connectivity);
-        return;
-    }
-    const args_json = try jsonEmpty(allocator);
-    defer allocator.free(args_json);
-    try callAndPrint(allocator, cfg, "connectivity", args_json);
-}
-
-pub fn listTerms(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (hasFlag(args, "--help")) {
-        printCommandHelp(help.list_terms);
-        return;
-    }
-    const limit = findFlag(args, "--limit");
-
-    var aw: Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    var s: Stringify = .{ .writer = &aw.writer };
-    try s.beginObject();
-    if (limit) |l| {
-        try s.objectField("limit");
-        const n = std.fmt.parseInt(i64, l, 10) catch {
-            printErr("error: --limit must be a number\n");
-            return error.Explained;
-        };
-        try s.write(n);
-    }
-    try s.endObject();
-    const args_json = try aw.toOwnedSlice();
-    defer allocator.free(args_json);
-
-    try callAndPrint(allocator, cfg, "list_terms", args_json);
-}
-
-// ── Write Commands ──────────────────────────────────────────────────────
-
-pub fn learn(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (hasFlag(args, "--help")) {
-        printCommandHelp(help.learn);
-        return;
-    }
-    const term = findFlag(args, "--term") orelse {
-        printErr("error: --term is required\n");
-        return error.Explained;
-    };
-    const definition = findFlag(args, "--definition") orelse {
-        printErr("error: --definition is required\n");
-        return error.Explained;
-    };
-    const long_term = hasFlag(args, "--long-term");
-
-    var associates = try findRepeatedFlag(allocator, args, "--associate");
-    defer associates.deinit(allocator);
-
-    var chains = try findRepeatedFlag(allocator, args, "--chain");
-    defer chains.deinit(allocator);
-
-    var aw: Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    var s: Stringify = .{ .writer = &aw.writer };
-    try s.beginObject();
-    try s.objectField("term");
-    try s.write(@as([]const u8, term));
-    try s.objectField("definition");
-    try s.write(@as([]const u8, definition));
-
-    if (long_term) {
-        try s.objectField("long_term");
-        try s.write(true);
-    }
-
-    if (associates.items.len > 0) {
-        try s.objectField("associations");
-        try s.beginArray();
-        for (associates.items) |assoc_str| {
-            var kvs: [4]KV = undefined;
-            const count = parseCompoundValue(assoc_str, &kvs);
-            try s.beginObject();
-            for (kvs[0..count]) |kv| {
-                try s.objectField(kv.key);
-                try s.write(kv.value);
-            }
-            try s.endObject();
-        }
-        try s.endArray();
-    }
-
-    if (chains.items.len > 0) {
-        try s.objectField("chain_to");
-        try s.beginArray();
-        for (chains.items) |chain_str| {
-            var kvs: [4]KV = undefined;
-            const count = parseCompoundValue(chain_str, &kvs);
-            try s.beginObject();
-            for (kvs[0..count]) |kv| {
-                try s.objectField(kv.key);
-                try s.write(kv.value);
-            }
-            try s.endObject();
-        }
-        try s.endArray();
-    }
-
-    try s.endObject();
-    const args_json = try aw.toOwnedSlice();
-    defer allocator.free(args_json);
-
-    try callAndPrint(allocator, cfg, "learn", args_json);
-}
-
-pub fn associate(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (hasFlag(args, "--help")) {
-        printCommandHelp(help.associate);
-        return;
-    }
-    const source = findFlag(args, "--source") orelse {
-        printErr("error: --source is required\n");
-        return error.Explained;
-    };
-    const target = findFlag(args, "--target") orelse {
-        printErr("error: --target is required\n");
-        return error.Explained;
-    };
-    const predicate = findFlag(args, "--predicate");
-
-    var aw: Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    var s: Stringify = .{ .writer = &aw.writer };
-    try s.beginObject();
-    try s.objectField("source_term");
-    try s.write(@as([]const u8, source));
-    try s.objectField("target_term");
-    try s.write(@as([]const u8, target));
-    if (predicate) |p| {
-        try s.objectField("predicate");
-        try s.write(@as([]const u8, p));
-    }
-    try s.endObject();
-    const args_json = try aw.toOwnedSlice();
-    defer allocator.free(args_json);
-
-    try callAndPrint(allocator, cfg, "associate", args_json);
-}
-
-pub fn bulkLearn(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (hasFlag(args, "--help")) {
-        printCommandHelp(help.bulk_learn);
-        return;
-    }
-    var items = try findRepeatedFlag(allocator, args, "--item");
-    defer items.deinit(allocator);
-
-    if (items.items.len == 0) {
-        printErr("error: at least one --item is required\n");
-        return error.Explained;
-    }
-
-    const memory = findFlag(args, "--memory");
-
-    var aw: Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    var s: Stringify = .{ .writer = &aw.writer };
-    try s.beginObject();
-    try s.objectField("items");
-    try s.beginArray();
-    for (items.items) |item_str| {
-        var kvs: [4]KV = undefined;
-        const count = parseCompoundValue(item_str, &kvs);
-        try s.beginObject();
-        for (kvs[0..count]) |kv| {
-            try s.objectField(kv.key);
-            try s.write(kv.value);
-        }
-        try s.endObject();
-    }
-    try s.endArray();
-    if (memory) |m| {
-        try s.objectField("memory_term");
-        try s.write(@as([]const u8, m));
-    }
-    try s.endObject();
-    const args_json = try aw.toOwnedSlice();
-    defer allocator.free(args_json);
-
-    try callAndPrint(allocator, cfg, "bulk_learn", args_json);
-}
-
-pub fn bulkAssociate(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (hasFlag(args, "--help")) {
-        printCommandHelp(help.bulk_associate);
-        return;
-    }
-    var links = try findRepeatedFlag(allocator, args, "--link");
-    defer links.deinit(allocator);
-
-    if (links.items.len == 0) {
-        printErr("error: at least one --link is required\n");
-        return error.Explained;
-    }
-
-    var aw: Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    var s: Stringify = .{ .writer = &aw.writer };
-    try s.beginObject();
-    try s.objectField("associations");
-    try s.beginArray();
-    for (links.items) |link_str| {
-        var kvs: [4]KV = undefined;
-        const count = parseCompoundValue(link_str, &kvs);
-        try s.beginObject();
-        for (kvs[0..count]) |kv| {
-            if (std.mem.eql(u8, kv.key, "source")) {
-                try s.objectField("source_term");
-            } else if (std.mem.eql(u8, kv.key, "target")) {
-                try s.objectField("target_term");
-            } else {
-                try s.objectField(kv.key);
-            }
-            try s.write(kv.value);
-        }
-        try s.endObject();
-    }
-    try s.endArray();
-    try s.endObject();
-    const args_json = try aw.toOwnedSlice();
-    defer allocator.free(args_json);
-
-    try callAndPrint(allocator, cfg, "bulk_associate", args_json);
-}
-
-pub fn update(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (hasFlag(args, "--help")) {
-        printCommandHelp(help.update);
-        return;
-    }
-    if (args.len == 0) {
-        printErr("error: engram-id is required\nRun " ++ dim ++ "cog mem/update --help" ++ reset ++ " for usage.\n");
-        return error.Explained;
-    }
-
-    const term = findFlag(args[1..], "--term");
-    const definition = findFlag(args[1..], "--definition");
-
-    var aw: Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    var s: Stringify = .{ .writer = &aw.writer };
-    try s.beginObject();
-    try s.objectField("engram_id");
-    try s.write(@as([]const u8, args[0]));
-    if (term) |t| {
-        try s.objectField("term");
-        try s.write(@as([]const u8, t));
-    }
-    if (definition) |d| {
-        try s.objectField("definition");
-        try s.write(@as([]const u8, d));
-    }
-    try s.endObject();
-    const args_json = try aw.toOwnedSlice();
-    defer allocator.free(args_json);
-
-    try callAndPrint(allocator, cfg, "update", args_json);
-}
-
-pub fn unlink(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (hasFlag(args, "--help")) {
-        printCommandHelp(help.unlink);
-        return;
-    }
-    if (args.len == 0) {
-        printErr("error: synapse-id is required\nRun " ++ dim ++ "cog mem/unlink --help" ++ reset ++ " for usage.\n");
-        return error.Explained;
-    }
-
-    var aw: Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    var s: Stringify = .{ .writer = &aw.writer };
-    try s.beginObject();
-    try s.objectField("synapse_id");
-    try s.write(@as([]const u8, args[0]));
-    try s.endObject();
-    const args_json = try aw.toOwnedSlice();
-    defer allocator.free(args_json);
-
-    try callAndPrint(allocator, cfg, "unlink", args_json);
-}
-
-pub fn refactor(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (hasFlag(args, "--help")) {
-        printCommandHelp(help.refactor);
-        return;
-    }
-    const term = findFlag(args, "--term") orelse {
-        printErr("error: --term is required\n");
-        return error.Explained;
-    };
-    const definition = findFlag(args, "--definition") orelse {
-        printErr("error: --definition is required\n");
-        return error.Explained;
-    };
-
-    var aw: Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    var s: Stringify = .{ .writer = &aw.writer };
-    try s.beginObject();
-    try s.objectField("term");
-    try s.write(@as([]const u8, term));
-    try s.objectField("definition");
-    try s.write(@as([]const u8, definition));
-    try s.endObject();
-    const args_json = try aw.toOwnedSlice();
-    defer allocator.free(args_json);
-
-    try callAndPrint(allocator, cfg, "refactor", args_json);
-}
-
-pub fn deprecate(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (hasFlag(args, "--help")) {
-        printCommandHelp(help.deprecate);
-        return;
-    }
-    const term = findFlag(args, "--term") orelse {
-        printErr("error: --term is required\n");
-        return error.Explained;
-    };
-
-    var aw: Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    var s: Stringify = .{ .writer = &aw.writer };
-    try s.beginObject();
-    try s.objectField("term");
-    try s.write(@as([]const u8, term));
-    try s.endObject();
-    const args_json = try aw.toOwnedSlice();
-    defer allocator.free(args_json);
-
-    try callAndPrint(allocator, cfg, "deprecate", args_json);
-}
-
-pub fn reinforce(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (hasFlag(args, "--help")) {
-        printCommandHelp(help.reinforce);
-        return;
-    }
-    if (args.len == 0) {
-        printErr("error: engram-id is required\nRun " ++ dim ++ "cog mem/reinforce --help" ++ reset ++ " for usage.\n");
-        return error.Explained;
-    }
-
-    var aw: Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    var s: Stringify = .{ .writer = &aw.writer };
-    try s.beginObject();
-    try s.objectField("engram_id");
-    try s.write(@as([]const u8, args[0]));
-    try s.endObject();
-    const args_json = try aw.toOwnedSlice();
-    defer allocator.free(args_json);
-
-    try callAndPrint(allocator, cfg, "reinforce", args_json);
-}
-
-pub fn flush(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (hasFlag(args, "--help")) {
-        printCommandHelp(help.flush);
-        return;
-    }
-    if (args.len == 0) {
-        printErr("error: engram-id is required\nRun " ++ dim ++ "cog mem/flush --help" ++ reset ++ " for usage.\n");
-        return error.Explained;
-    }
-
-    var aw: Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    var s: Stringify = .{ .writer = &aw.writer };
-    try s.beginObject();
-    try s.objectField("engram_id");
-    try s.write(@as([]const u8, args[0]));
-    try s.endObject();
-    const args_json = try aw.toOwnedSlice();
-    defer allocator.free(args_json);
-
-    try callAndPrint(allocator, cfg, "flush", args_json);
-}
-
-pub fn verify(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (hasFlag(args, "--help")) {
-        printCommandHelp(help.verify);
-        return;
-    }
-    if (args.len == 0) {
-        printErr("error: synapse-id is required\nRun " ++ dim ++ "cog mem/verify --help" ++ reset ++ " for usage.\n");
-        return error.Explained;
-    }
-
-    var aw: Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    var s: Stringify = .{ .writer = &aw.writer };
-    try s.beginObject();
-    try s.objectField("synapse_id");
-    try s.write(@as([]const u8, args[0]));
-    try s.endObject();
-    const args_json = try aw.toOwnedSlice();
-    defer allocator.free(args_json);
-
-    try callAndPrint(allocator, cfg, "verify", args_json);
-}
-
-pub fn meld(allocator: std.mem.Allocator, args: []const [:0]const u8, cfg: Config) !void {
-    if (hasFlag(args, "--help")) {
-        printCommandHelp(help.meld);
-        return;
-    }
-    const target = findFlag(args, "--target") orelse {
-        printErr("error: --target is required\n");
-        return error.Explained;
-    };
-    const description = findFlag(args, "--description");
-
-    var aw: Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    var s: Stringify = .{ .writer = &aw.writer };
-    try s.beginObject();
-    try s.objectField("target");
-    try s.write(@as([]const u8, target));
-    if (description) |d| {
-        try s.objectField("description");
-        try s.write(@as([]const u8, d));
-    }
-    try s.endObject();
-    const args_json = try aw.toOwnedSlice();
-    defer allocator.free(args_json);
-
-    try callAndPrint(allocator, cfg, "meld", args_json);
-}
-
 // ── Init Command ────────────────────────────────────────────────────────
 
 pub fn init(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
@@ -985,12 +157,171 @@ pub fn init(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
 
     tui.separator();
 
-    // Set up system prompt (memory content stripped if tools-only)
-    try setupSystemPrompt(allocator, host, setup_mem);
-    tui.separator();
+    // Agent multi-select
+    var agent_menu_items = agents_mod.toMenuItems();
+    const agent_result = try tui.multiSelect(allocator, .{
+        .prompt = "Select your AI coding agents:",
+        .items = &agent_menu_items,
+    });
+    const selected_indices = switch (agent_result) {
+        .selected => |indices| indices,
+        .back, .cancelled => {
+            printErr("  Aborted.\n");
+            return;
+        },
+    };
+    defer allocator.free(selected_indices);
 
-    // Install agent skill (memory content stripped if tools-only)
-    try installSkill(allocator, host, setup_mem);
+    // Fetch PROMPT.md + SKILL.md once
+    printErr("  Fetching system prompt... ");
+    const prompt_url = try std.fmt.allocPrint(allocator, "https://{s}/PROMPT.md", .{host});
+    defer allocator.free(prompt_url);
+    const raw_prompt = client.httpGetPublic(allocator, prompt_url) catch {
+        printErr("\n  error: failed to fetch system prompt\n");
+        return error.Explained;
+    };
+    defer allocator.free(raw_prompt);
+    const prompt_content = try processCogMemTags(allocator, raw_prompt, setup_mem);
+    defer allocator.free(prompt_content);
+    tui.checkmark();
+    printErr("\n");
+
+    printErr("  Fetching skill... ");
+    const skill_url = try std.fmt.allocPrint(allocator, "https://{s}/SKILL.md", .{host});
+    defer allocator.free(skill_url);
+    const raw_skill = client.httpGetPublic(allocator, skill_url) catch {
+        printErr("\n  error: failed to fetch SKILL.md\n");
+        return error.Explained;
+    };
+    defer allocator.free(raw_skill);
+    const skill_content = try processCogMemTags(allocator, raw_skill, setup_mem);
+    defer allocator.free(skill_content);
+    tui.checkmark();
+    printErr("\n");
+
+    // Track which config files have been written (for dedup)
+    // Separate arrays for MCP and hooks because some agents share the same
+    // file for both (e.g. Gemini uses .gemini/settings.json for MCP + hooks).
+    var written_mcp: [16][]const u8 = undefined;
+    var written_mcp_count: usize = 0;
+    var written_hooks: [16][]const u8 = undefined;
+    var written_hooks_count: usize = 0;
+    var hook_scripts_generated = false;
+
+    // Track which prompt targets have been written (for dedup)
+    var written_prompts: [4]agents_mod.PromptTarget = undefined;
+    var written_prompts_count: usize = 0;
+
+    const home = std.posix.getenv("HOME") orelse "";
+
+    for (selected_indices) |idx| {
+        const agent = agents_mod.agents[idx];
+
+        tui.separator();
+        printErr("  Setting up ");
+        printErr(agent.display_name);
+        printErr("...\n");
+
+        // a. Write system prompt to agent's prompt file (dedup by target)
+        const prompt_target = agent.prompt_target;
+        var prompt_already_written = false;
+        for (written_prompts[0..written_prompts_count]) |wt| {
+            if (wt == prompt_target) { prompt_already_written = true; break; }
+        }
+        if (!prompt_already_written) {
+            const filename = prompt_target.filename();
+            // Ensure parent dir for copilot
+            if (prompt_target == .copilot_instructions) {
+                std.fs.cwd().makeDir(".github") catch |err| switch (err) {
+                    error.PathAlreadyExists => {},
+                    else => {},
+                };
+            }
+            try updateFileWithPrompt(allocator, filename, prompt_content);
+            printErr("    ");
+            tui.checkmark();
+            printErr(" ");
+            printErr(filename);
+            printErr("\n");
+            if (written_prompts_count < 4) {
+                written_prompts[written_prompts_count] = prompt_target;
+                written_prompts_count += 1;
+            }
+        }
+
+        // b. Install skill (if agent has skill_dir)
+        if (agent.skill_dir) |skill_rel_dir| {
+            if (home.len > 0) {
+                const base_dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ home, skill_rel_dir });
+                defer allocator.free(base_dir);
+                const skill_dir = try std.fmt.allocPrint(allocator, "{s}/cog", .{base_dir});
+                defer allocator.free(skill_dir);
+                const skill_path = try std.fmt.allocPrint(allocator, "{s}/cog/SKILL.md", .{base_dir});
+                defer allocator.free(skill_path);
+
+                makeDirsAbsolute(skill_dir) catch {};
+                writeAbsoluteFile(skill_path, skill_content) catch {};
+                printErr("    ");
+                tui.checkmark();
+                printErr(" ");
+                printErr(skill_path);
+                printErr("\n");
+            }
+        }
+
+        // c. Configure MCP server (dedup by path)
+        if (agent.mcp_path) |mcp_path| {
+            var mcp_already_written = false;
+            for (written_mcp[0..written_mcp_count]) |wc| {
+                if (std.mem.eql(u8, wc, mcp_path)) { mcp_already_written = true; break; }
+            }
+            if (!mcp_already_written) {
+                hooks_mod.configureMcp(allocator, agent) catch {};
+                if (agent.mcp_format != .global_only) {
+                    printErr("    ");
+                    tui.checkmark();
+                    printErr(" ");
+                    printErr(mcp_path);
+                    printErr("\n");
+                }
+                if (written_mcp_count < 16) {
+                    written_mcp[written_mcp_count] = mcp_path;
+                    written_mcp_count += 1;
+                }
+            }
+        } else if (agent.mcp_format == .global_only) {
+            hooks_mod.configureMcp(allocator, agent) catch {};
+        }
+
+        // d. Configure hooks (dedup by path)
+        if (agent.hooks_path) |hooks_path| {
+            var hooks_already_written = false;
+            for (written_hooks[0..written_hooks_count]) |wc| {
+                if (std.mem.eql(u8, wc, hooks_path)) { hooks_already_written = true; break; }
+            }
+            if (!hooks_already_written) {
+                hooks_mod.configureHooks(allocator, agent) catch {};
+                printErr("    ");
+                tui.checkmark();
+                printErr(" ");
+                printErr(hooks_path);
+                printErr("\n");
+                if (written_hooks_count < 16) {
+                    written_hooks[written_hooks_count] = hooks_path;
+                    written_hooks_count += 1;
+                }
+            }
+        }
+
+        // e. Generate hook scripts (once, first agent with hooks)
+        if (!hook_scripts_generated and agent.hooks_format != .none) {
+            hooks_mod.generateHookScripts() catch {};
+            printErr("    ");
+            tui.checkmark();
+            printErr(" .cog/hooks/\n");
+            hook_scripts_generated = true;
+        }
+    }
 
     // Code-sign for debug server on macOS
     if (builtin.os.tag == .macos) {
@@ -1294,15 +625,16 @@ fn promptCreateBrain(
 
     printErr("  Creating brain... ");
 
-    var jb = JsonBuilder.init(allocator);
-    defer jb.deinit();
-    try jb.begin();
-    try jb.field("namespace");
-    try jb.string(account_slug);
-    try jb.field("name");
-    try jb.string(brain_name);
-    try jb.end();
-    const create_args = try jb.toOwnedSlice();
+    var aw: Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    var s_json: Stringify = .{ .writer = &aw.writer };
+    try s_json.beginObject();
+    try s_json.objectField("namespace");
+    try s_json.write(@as([]const u8, account_slug));
+    try s_json.objectField("name");
+    try s_json.write(@as([]const u8, brain_name));
+    try s_json.endObject();
+    const create_args = try aw.toOwnedSlice();
     defer allocator.free(create_args);
 
     const create_url = try std.fmt.allocPrint(allocator, "https://{s}/api/v1/brains/create", .{host});
@@ -1926,22 +1258,3 @@ fn showDiff(allocator: std.mem.Allocator, old_content: []const u8, new_content: 
     printErr("\n");
 }
 
-// ── Tests ───────────────────────────────────────────────────────────────
-
-test "parseCompoundValue basic" {
-    var kvs: [4]KV = undefined;
-    const count = parseCompoundValue("target:foo,predicate:bar", &kvs);
-    try std.testing.expectEqual(@as(usize, 2), count);
-    try std.testing.expectEqualStrings("target", kvs[0].key);
-    try std.testing.expectEqualStrings("foo", kvs[0].value);
-    try std.testing.expectEqualStrings("predicate", kvs[1].key);
-    try std.testing.expectEqualStrings("bar", kvs[1].value);
-}
-
-test "parseCompoundValue single" {
-    var kvs: [4]KV = undefined;
-    const count = parseCompoundValue("term:hello world", &kvs);
-    try std.testing.expectEqual(@as(usize, 1), count);
-    try std.testing.expectEqualStrings("term", kvs[0].key);
-    try std.testing.expectEqualStrings("hello world", kvs[0].value);
-}

@@ -223,6 +223,7 @@ pub const DapProxy = struct {
         .gotoTargetsFn = proxyGotoTargets,
         .findSymbolFn = proxyFindSymbol,
         .drainNotificationsFn = proxyDrainNotifications,
+        .rawRequestFn = proxyRawRequest,
     };
 
     fn nextSeq(self: *DapProxy) i64 {
@@ -2239,6 +2240,34 @@ pub const DapProxy = struct {
     fn proxyDrainNotifications(ctx: *anyopaque, allocator: std.mem.Allocator) []const types.DebugNotification {
         const self: *DapProxy = @ptrCast(@alignCast(ctx));
         return self.drainNotifications(allocator);
+    }
+
+    fn proxyRawRequest(ctx: *anyopaque, allocator: std.mem.Allocator, command: []const u8, arguments: ?[]const u8) anyerror![]const u8 {
+        const self: *DapProxy = @ptrCast(@alignCast(ctx));
+        const seq = self.nextSeq();
+
+        // Build DAP request JSON
+        var aw: Writer.Allocating = .init(allocator);
+        defer aw.deinit();
+        var s: Stringify = .{ .writer = &aw.writer };
+
+        try s.beginObject();
+        try s.objectField("seq");
+        try s.write(seq);
+        try s.objectField("type");
+        try s.write("request");
+        try s.objectField("command");
+        try s.write(command);
+        if (arguments) |args_json| {
+            try s.objectField("arguments");
+            try s.writer.writeAll(args_json);
+        }
+        try s.endObject();
+
+        const msg = try aw.toOwnedSlice();
+        defer allocator.free(msg);
+
+        return self.sendRequest(allocator, msg);
     }
 
     fn proxyDeinit(ctx: *anyopaque) void {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const posix = std.posix;
 const driver_mod = @import("driver.zig");
 const ActiveDriver = driver_mod.ActiveDriver;
 
@@ -6,12 +7,20 @@ pub const Session = struct {
     id: []const u8,
     driver: ActiveDriver,
     status: Status,
+    owner_pid: ?posix.pid_t = null,
+    orphan_action: OrphanAction = .none,
 
     pub const Status = enum {
         launching,
         running,
         stopped,
         terminated,
+    };
+
+    pub const OrphanAction = enum {
+        none,
+        terminate,
+        detach,
     };
 };
 
@@ -36,7 +45,7 @@ pub const SessionManager = struct {
         self.sessions.deinit();
     }
 
-    pub fn createSession(self: *SessionManager, driver: ActiveDriver) ![]const u8 {
+    pub fn createSession(self: *SessionManager, driver: ActiveDriver, owner_pid: ?posix.pid_t, orphan_action: Session.OrphanAction) ![]const u8 {
         const id_num = self.next_id;
         self.next_id += 1;
 
@@ -47,6 +56,8 @@ pub const SessionManager = struct {
             .id = id,
             .driver = driver,
             .status = .launching,
+            .owner_pid = owner_pid,
+            .orphan_action = orphan_action,
         });
 
         return id;
@@ -102,8 +113,8 @@ test "SessionManager creates session with incrementing IDs" {
     var mock1 = driver_mod.MockDriver{};
     var mock2 = driver_mod.MockDriver{};
 
-    const id1 = try mgr.createSession(mock1.activeDriver());
-    const id2 = try mgr.createSession(mock2.activeDriver());
+    const id1 = try mgr.createSession(mock1.activeDriver(), null, .none);
+    const id2 = try mgr.createSession(mock2.activeDriver(), null, .none);
 
     try std.testing.expectEqualStrings("session-1", id1);
     try std.testing.expectEqualStrings("session-2", id2);
@@ -115,7 +126,7 @@ test "SessionManager retrieves session by ID" {
     defer mgr.deinit();
 
     var mock = driver_mod.MockDriver{};
-    const id = try mgr.createSession(mock.activeDriver());
+    const id = try mgr.createSession(mock.activeDriver(), null, .none);
 
     const session = mgr.getSession(id);
     try std.testing.expect(session != null);
@@ -137,7 +148,7 @@ test "SessionManager destroys session and frees resources" {
     defer mgr.deinit();
 
     var mock = driver_mod.MockDriver{};
-    const id = try mgr.createSession(mock.activeDriver());
+    const id = try mgr.createSession(mock.activeDriver(), null, .none);
 
     // Copy the id since it will be freed
     const id_copy = try allocator.dupe(u8, id);
@@ -157,7 +168,7 @@ test "SessionManager handles multiple concurrent sessions" {
     var ids: [5][]const u8 = undefined;
 
     for (&mocks, 0..) |*m, i| {
-        ids[i] = try mgr.createSession(m.activeDriver());
+        ids[i] = try mgr.createSession(m.activeDriver(), null, .none);
     }
 
     try std.testing.expectEqual(@as(usize, 5), mgr.sessionCount());

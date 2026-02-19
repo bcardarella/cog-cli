@@ -76,6 +76,9 @@ pub const DriverVTable = struct {
     drainNotificationsFn: ?*const fn (ctx: *anyopaque, allocator: std.mem.Allocator) []const types.DebugNotification = null,
     writeRegistersFn: ?*const fn (ctx: *anyopaque, allocator: std.mem.Allocator, thread_id: u32, name: []const u8, value: u64) anyerror!void = null,
     variableLocationFn: ?*const fn (ctx: *anyopaque, allocator: std.mem.Allocator, name: []const u8, frame_id: u32) anyerror!types.VariableLocationInfo = null,
+    // Core dump loading and DAP passthrough
+    loadCoreFn: ?*const fn (ctx: *anyopaque, allocator: std.mem.Allocator, core_path: []const u8, executable_path: ?[]const u8) anyerror!void = null,
+    rawRequestFn: ?*const fn (ctx: *anyopaque, allocator: std.mem.Allocator, command: []const u8, arguments: ?[]const u8) anyerror![]const u8 = null,
 };
 
 /// Runtime-polymorphic debug driver.
@@ -308,6 +311,16 @@ pub const ActiveDriver = struct {
     pub fn variableLocation(self: *ActiveDriver, allocator: std.mem.Allocator, name: []const u8, frame_id: u32) !types.VariableLocationInfo {
         const f = self.vtable.variableLocationFn orelse return error.NotSupported;
         return f(self.ptr, allocator, name, frame_id);
+    }
+
+    pub fn loadCore(self: *ActiveDriver, allocator: std.mem.Allocator, core_path: []const u8, executable_path: ?[]const u8) !void {
+        const f = self.vtable.loadCoreFn orelse return error.NotSupported;
+        return f(self.ptr, allocator, core_path, executable_path);
+    }
+
+    pub fn rawRequest(self: *ActiveDriver, allocator: std.mem.Allocator, command: []const u8, arguments: ?[]const u8) ![]const u8 {
+        const f = self.vtable.rawRequestFn orelse return error.NotSupported;
+        return f(self.ptr, allocator, command, arguments);
     }
 
 };

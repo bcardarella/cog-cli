@@ -2,6 +2,16 @@
 
 ## How the Debug CLI Works
 
+You have direct access to the `cog` CLI in this environment.
+
+Top-level `cog` commands available:
+- `init`
+- `update`
+- `mem`
+- `code`
+- `debug`
+- `install`
+
 Each debug tool is a subcommand of `cog debug/send`. An agent calls
 `cog debug/send launch /tmp/test --stop-on-entry --language c` via Bash and gets clean JSON back.
 No JSON arguments, no coprocess, no protocol management.
@@ -38,6 +48,86 @@ cog debug/send stop --session session-1
 
 The daemon maintains state (sessions, breakpoints) across calls. On error, the command exits
 with code 1 and prints the error to stderr.
+
+### Command Syntax Reference (Do Not Guess)
+
+Use this section as the source of truth for command shape. Do not invent JSON transport, and do
+not infer flag names from the logical JSON examples below.
+
+Do not run generic help discovery commands at startup. Use the canonical command patterns
+below directly.
+
+Only query help for a specific subcommand if execution fails due to actual argument mismatch.
+
+#### Canonical command patterns
+
+```bash
+# Session lifecycle
+cog debug/send launch <program> [-- args...] [--cwd <dir>] [--language <lang>] [--stop-on-entry]
+cog debug/send attach <pid> [--language <lang>]
+cog debug/send sessions
+cog debug/send restart --session <session_id>
+cog debug/send stop --session <session_id> [--detach] [--terminate-only]
+
+# Breakpoints
+cog debug/send breakpoint_set <file:line> --session <session_id> [--condition <expr>] [--hit-condition <cond>] [--log-message <msg>]
+cog debug/send breakpoint_set_function <function> --session <session_id>
+cog debug/send breakpoint_set_exception --session <session_id> --filters <csv_filters>
+cog debug/send breakpoint_remove <breakpoint_id> --session <session_id>
+cog debug/send breakpoint_list --session <session_id>
+cog debug/send breakpoint_locations <file:line> --session <session_id> [--end-line <line>]
+cog debug/send instruction_breakpoint <instruction_reference> --session <session_id> [--offset <bytes>] [--condition <expr>] [--hit-condition <cond>]
+cog debug/send watchpoint <variable> --session <session_id> [--access-type read|write|readWrite] [--frame <frame_id>]
+
+# Execution control
+cog debug/send run continue --session <session_id>
+cog debug/send run step_into --session <session_id>
+cog debug/send run step_over --session <session_id> [--granularity statement|line|instruction]
+cog debug/send run step_out --session <session_id>
+cog debug/send run pause --session <session_id>
+cog debug/send run restart --session <session_id>
+cog debug/send run goto --session <session_id> --file <file> --line <line>
+
+# Inspect / mutate state
+cog debug/send inspect <expression> --session <session_id> [--frame <frame_id>] [--context watch|repl|hover]
+cog debug/send inspect --scope locals|globals|arguments --session <session_id> [--frame <frame_id>]
+cog debug/send inspect --variable-ref <variablesReference> --session <session_id>
+cog debug/send set_variable <variable> <value> --session <session_id> [--frame <frame_id>]
+cog debug/send set_expression <expression> <value> --session <session_id> [--frame <frame_id>]
+
+# Threads / stack / scopes
+cog debug/send threads --session <session_id>
+cog debug/send stacktrace --session <session_id> [--thread <thread_id>] [--start-frame <n>] [--levels <n>]
+cog debug/send scopes --session <session_id> [--frame <frame_id>]
+
+# Memory / low-level
+cog debug/send memory read <address> --session <session_id> --size <bytes> [--offset <bytes>]
+cog debug/send memory write <address> --session <session_id> --data <hex> [--offset <bytes>]
+cog debug/send disassemble <address> --session <session_id> [--count <n>] [--offset <bytes>] [--no-symbols]
+cog debug/send registers --session <session_id> [--thread <thread_id>]
+cog debug/send write_register <name> <value> --session <session_id> [--thread <thread_id>]
+cog debug/send find_symbol <name> --session <session_id>
+cog debug/send variable_location <name> --session <session_id> [--frame <frame_id>]
+
+# Navigation / metadata / events
+cog debug/send goto_targets <file:line> --session <session_id>
+cog debug/send step_in_targets --session <session_id> [--frame <frame_id>]
+cog debug/send restart_frame --session <session_id> [--frame <frame_id>]
+cog debug/send capabilities --session <session_id>
+cog debug/send modules --session <session_id>
+cog debug/send loaded_sources --session <session_id>
+cog debug/send source <source_reference> --session <session_id>
+cog debug/send completions <text> --session <session_id> [--column <n>] [--frame <frame_id>]
+cog debug/send exception_info --session <session_id> [--thread <thread_id>]
+cog debug/send poll_events [--session <session_id>]
+cog debug/send cancel [--session <session_id>] [--request-id <id>] [--progress-id <token>]
+cog debug/send terminate_threads [thread_ids...] --session <session_id>
+```
+
+Execution rules:
+- Store and reuse `session_id` and breakpoint IDs from actual responses.
+- If a step fails, include the raw error output and mark that scenario step as failed.
+- Continue to the next scenario unless the current one cannot proceed safely.
 
 ### Debug tools (38 total)
 
@@ -327,14 +417,15 @@ This copies the source files from `prompts/fixtures/` to `/tmp/` and compiles th
 **Do NOT kill any running processes.** The daemon auto-starts on first `debug/send` use.
 Killing processes (e.g., `pkill`) can destroy the user's running dashboard or other sessions.
 
+**Do NOT use sleep-based programs in this E2E.** Never launch `/tmp/debug_sleep`, never run `/usr/bin/sleep`, and never add waits via sleep commands.
+
 ### Programs
 
 | Program | Source | Binary | Used by |
 |---------|--------|--------|---------|
 | A: Basic | `/tmp/debug_test.c` | `/tmp/debug_test` | Scenarios 1-11, 14-18, 20-28, 30-33 |
 | B: Crasher | `/tmp/debug_crash.c` | `/tmp/debug_crash` | Scenario 19 |
-| C: Sleeper | `/tmp/debug_sleep.c` | `/tmp/debug_sleep` | Attach testing |
-| D: Multi-variable | `/tmp/debug_vars.c` | `/tmp/debug_vars` | Scenarios 12-13, 29 |
+| C: Multi-variable | `/tmp/debug_vars.c` | `/tmp/debug_vars` | Scenarios 12-13, 29 |
 
 ### Key Line References
 

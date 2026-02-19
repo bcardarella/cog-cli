@@ -53,8 +53,12 @@ pub fn dispatch(allocator: std.mem.Allocator, subcmd: []const u8, args: []const 
     if (std.mem.eql(u8, subcmd, "debug/status")) return debugStatus(allocator, args);
     if (std.mem.eql(u8, subcmd, "debug/kill")) return debugKill(args);
 
-    // Route debug/send to CLI dispatch
-    if (std.mem.eql(u8, subcmd, "debug/send")) return cli.dispatch(allocator, args);
+    // debug/send moved to MCP tools (debug_*).
+    if (std.mem.eql(u8, subcmd, "debug/send")) {
+        printErr("error: 'debug/send' has been removed from CLI. Use MCP debug_* tools instead.\n");
+        printErr("Run " ++ dim ++ "cog mcp --help" ++ reset ++ " for MCP server usage.\n");
+        return error.Explained;
+    }
 
     printErr("error: unknown command '");
     printErr(subcmd);
