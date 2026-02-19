@@ -163,7 +163,7 @@ fn printHelp(allocator: std.mem.Allocator) void {
 
 fn printCodeHelp() void {
     tui.header();
-    printErr(bold ++ "  cog code" ++ reset ++ " — Code indexing\n" ++ "\n" ++ cyan ++ bold ++ "  Commands" ++ reset ++ "\n" ++ "    " ++ bold ++ "code:index" ++ reset ++ "            " ++ dim ++ "Build SCIP code index (per-file incremental)" ++ reset ++ "\n" ++ "\n" ++ dim ++ "  code:query, code:status, code:edit, code:create, code:delete, and code:rename" ++ reset ++ "\n" ++ dim ++ "  moved to MCP tools (cog_code_*). Run 'cog mcp --help' for MCP usage." ++ reset ++ "\n" ++ "\n");
+    printErr(bold ++ "  cog code" ++ reset ++ " — Code indexing\n" ++ "\n" ++ cyan ++ bold ++ "  Commands" ++ reset ++ "\n" ++ "    " ++ bold ++ "code:index" ++ reset ++ "            " ++ dim ++ "Build SCIP code index (per-file incremental)" ++ reset ++ "\n" ++ "\n");
 }
 
 fn printDebugHelp(allocator: std.mem.Allocator) void {
@@ -178,8 +178,6 @@ fn printDebugHelp(allocator: std.mem.Allocator) void {
         ++ "\n"
         ++ cyan ++ bold ++ "  Built-in" ++ reset ++ "\n"
         ++ comptime code_intel.builtinDebugExtensionList()
-        ++ "\n"
-        ++ dim ++ "  debug:send moved to MCP tools (debug_*). Run 'cog mcp --help'." ++ reset ++ "\n"
         ++ "\n";
 
     const installed_block = code_intel.listInstalledDebugBlock(allocator);
