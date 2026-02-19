@@ -20,7 +20,7 @@ AI coding can feel fast but it's still limited by suboptimal methods and tooling
 
 We built Cog to fix that. It's a single native binary that runs as an MCP server and gives your agent three capabilities it doesn't have on its own:
 
-1. **Persistent memory** that carries across sessions. Your agent learns your architecture, remembers past bugs, and builds knowledge that compounds over time.
+1. **Persistent memory** that carries across sessions, hosted on [trycog.ai](https://trycog.ai). Your agent learns your architecture, remembers past bugs, and builds knowledge that compounds over time. Memory can be shared across your team so everyone benefits from what any one agent learns.
 2. **Structured code intelligence** that returns definitions, references, and symbols in one tool call instead of 15 rounds of grep and file reads.
 3. **An interactive debugger** your agent drives directly. Breakpoints, variable inspection, stepping through code. No more print statement debugging.
 
