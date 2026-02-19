@@ -88,7 +88,7 @@ That's it. The interactive setup walks you through everything:
 2. **Agent selection**: pick which AI coding agents you use
 3. **Tool permissions**: optionally auto-allow all Cog tools so your agent doesn't prompt you on every call
 
-For each agent you select, `cog init` writes the system prompt, configures the MCP server connection, and sets up hooks to keep the code index in sync.
+For each agent you select, `cog init` writes the system prompt, configures the MCP server connection, and optionally auto-allows tool permissions.
 
 ### Supported agents
 
@@ -121,8 +121,8 @@ Your Agent  <->  MCP (stdio)  <->  cog mcp
 Tool families your agent discovers:
 
 - `cog_mem_*` for memory operations (when configured)
-- `cog_code_*` for code intelligence (query, index status, file mutations)
-- `debug_*` for the debugger (launch, breakpoints, stepping, inspection)
+- `cog_code_*` for code intelligence (query, index status)
+- `cog_debug_*` for the debugger (launch, breakpoints, stepping, inspection)
 
 ---
 
@@ -234,6 +234,8 @@ cog code:index "**/*.ts"    # Specific pattern
 
 Results go into `.cog/index.scip`. Your agent searches it through the `cog_code_query` MCP tool.
 
+A built-in file watcher automatically keeps the index up to date as files are created, modified, deleted, or renamed. No manual re-indexing needed after the initial build.
+
 ### Built-in language support
 
 Go, TypeScript, TSX, JavaScript, Python, Java, Rust, C, C++
@@ -244,7 +246,7 @@ Additional languages are supported through [extensions](#extensions).
 
 ## Debug
 
-An interactive debugger your agent controls through MCP. It supports breakpoints, stepping, variable inspection, stack traces, memory reads, and disassembly. 37+ tools exposed through MCP.
+An interactive debugger your agent controls through MCP. It supports breakpoints, stepping, variable inspection, stack traces, memory reads, and disassembly. 36 tools exposed through MCP.
 
 Under the hood, a local daemon communicates with debug adapters (DAP). The daemon starts automatically when your agent launches its first debug session.
 

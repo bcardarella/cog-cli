@@ -6,9 +6,9 @@ You have code intelligence via Cog.
 
 Print an emoji before Cog tool calls to indicate the category:
 
-- 🔍 Code: all `cog:code.*` tools
-- 🧠 Memory: all `cog:mem.*` tools
-- 🐞 Debug: all `cog:debug.*` tools
+- 🔍 Code: all `cog_code_*` tools
+- 🧠 Memory: all `cog_mem_*` tools
+- 🐞 Debug: all `cog_debug_*` tools
 
 <cog:code>
 ## Code Intelligence
@@ -17,12 +17,12 @@ The code index updates automatically when files change. A file watcher detects e
 
 ### Query Rules
 
-- **Prefer `cog:code.query`** for symbol lookups (find definitions, references, file symbols, project structure)
+- **Prefer `cog_code_query`** for symbol lookups (find definitions, references, file symbols, project structure)
 - Use `mode: "find"` to locate symbol definitions by name
 - Use `mode: "refs"` to find all references to a symbol
 - Use `mode: "symbols"` with a file path to list all symbols in a file
 - Use `mode: "structure"` to see project-wide file/symbol overview
-- **`cog:code.status`** reports the current index state (files indexed, languages, etc.)
+- **`cog_code_status`** reports the current index state (files indexed, languages, etc.)
 - **Do not** try to index or remove files — the watcher handles all index maintenance automatically
 </cog:code>
 
@@ -35,8 +35,8 @@ You also have persistent associative memory. Checking memory before work and rec
 
 ### Announce Memory Operations
 
-- 🧠 Read: `cog:mem.recall`, `cog:mem.listShortTerm`
-- 🧠 Write: `cog:mem.learn`, `cog:mem.reinforce`, `cog:mem.update`, `cog:mem.flush`
+- 🧠 Read: `cog_mem_recall`, `cog_mem_list_short_term`
+- 🧠 Write: `cog_mem_learn`, `cog_mem_reinforce`, `cog_mem_update`, `cog_mem_flush`
 
 ### The Memory Lifecycle
 
@@ -52,16 +52,16 @@ Every task follows four steps. This is your operating procedure, not a guideline
 
 #### 1. RECALL — before reading code
 
-**CRITICAL: `cog:mem.recall` is an MCP tool. Call it directly — NEVER use the Skill tool to load `cog` for recall.** The `cog` skill only loads reference documentation. All memory MCP tools (`cog:mem.recall`, `cog:mem.learn`, etc.) are available directly when memory is configured.
+**CRITICAL: `cog_mem_recall` is an MCP tool. Call it directly — NEVER use the Skill tool to load `cog` for recall.** The `cog` skill only loads reference documentation. All memory MCP tools (`cog_mem_recall`, `cog_mem_learn`, etc.) are available directly when memory is configured.
 
-If `cog:mem.*` tools are missing, memory is not configured in this workspace (no brain URL in `.cog/settings.json`). In that case, run `cog init` and choose `Memory + Tools`. Do not use deprecated `cog mem:*` CLI commands.
+If `cog_mem_*` tools are missing, memory is not configured in this workspace (no brain URL in `.cog/settings.json`). In that case, run `cog init` and choose `Memory + Tools`. Do not use deprecated `cog mem:*` CLI commands.
 
 Your first action for any task is querying Cog. Before reading source files, before exploring, before planning — check what you already know. Do not formulate an approach before recalling. Plans made without Cog context miss known solutions and repeat past mistakes.
 
 The recall sequence has three visible steps:
 
 1. Print `🧠 Querying Cog...` as text to the user
-2. Call the `cog:mem.recall` MCP tool with a reformulated query (not the Skill tool, not Bash — the MCP tool directly)
+2. Call the `cog_mem_recall` MCP tool with a reformulated query (not the Skill tool, not Bash — the MCP tool directly)
 3. Report results: briefly tell the user what engrams Cog returned, or state "no relevant memories found"
 
 All three steps are mandatory. The user must see step 1 and step 3 as visible text in your response.
@@ -73,19 +73,19 @@ All three steps are mandatory. The user must see step 1 and step 3 as visible te
 | `"fix auth timeout"` | `"authentication session token expiration JWT refresh lifecycle race condition"` |
 | `"add validation"` | `"input validation boundary sanitization schema constraint defense in depth"` |
 
-If Cog returns results, follow the paths it reveals and read referenced components first. If Cog is wrong, correct it with `cog:mem.update`.
+If Cog returns results, follow the paths it reveals and read referenced components first. If Cog is wrong, correct it with `cog_mem_update`.
 
 #### 2. WORK + RECORD — learn, recall, and record continuously
 
-Work normally, guided by what Cog returned. **Recall during work, not just at the start.** When you encounter an unfamiliar concept, module, or pattern — query Cog before exploring the codebase. If you're about to read files to figure out how something works, `cog:mem.recall` first. Cog may already have the answer. Only explore code if Cog doesn't know.
+Work normally, guided by what Cog returned. **Recall during work, not just at the start.** When you encounter an unfamiliar concept, module, or pattern — query Cog before exploring the codebase. If you're about to read files to figure out how something works, `cog_mem_recall` first. Cog may already have the answer. Only explore code if Cog doesn't know.
 
-**Record any concept-shaped knowledge that Cog doesn't have.** If you produce, receive, or synthesize knowledge that has a nameable term, a definition, and potential relationships to other concepts — and recall didn't return it — record it immediately via `cog:mem.learn`. The source doesn't matter: code exploration, user explanation, answering a question, diagnosing a bug, or reasoning from context all qualify equally. The test is simple: *is this a concept Cog should know but doesn't?* If yes, record it now. After each learn call, briefly tell the user what concept was stored (e.g., "🧠 Stored: Session Expiry Clock Skew").
+**Record any concept-shaped knowledge that Cog doesn't have.** If you produce, receive, or synthesize knowledge that has a nameable term, a definition, and potential relationships to other concepts — and recall didn't return it — record it immediately via `cog_mem_learn`. The source doesn't matter: code exploration, user explanation, answering a question, diagnosing a bug, or reasoning from context all qualify equally. The test is simple: *is this a concept Cog should know but doesn't?* If yes, record it now. After each learn call, briefly tell the user what concept was stored (e.g., "🧠 Stored: Session Expiry Clock Skew").
 
 **Choose the right structure:**
 - Sequential knowledge (A enables B enables C) → use `chain_to`
 - Hub knowledge (A connects to B, C, D) → use `associations`
 
-Default to chains for dependencies, causation, and reasoning paths. Include all relationships in the single `cog:mem.learn` call.
+Default to chains for dependencies, causation, and reasoning paths. Include all relationships in the single `cog_mem_learn` call.
 
 **Predicates:**
 
@@ -101,7 +101,7 @@ Prefer `chain_to` with `leads_to`/`requires` for dependencies and reasoning path
 
 ```
 🧠 Recording to Cog...
-cog:mem.learn({
+cog_mem_learn({
   "term": "Auth Timeout Root Cause",
   "definition": "Refresh token checked after expiry window. Fix: add 30s buffer before window closes. Keywords: session, timeout, race condition.",
   "chain_to": [
@@ -118,22 +118,22 @@ When a unit of work is done, step back and reflect. Ask: *what's the higher-leve
 
 ```
 🧠 Recording to Cog...
-cog:mem.learn({
+cog_mem_learn({
   "term": "Clock Skew Session Management",
   "definition": "Never calculate token expiry locally. Always use server-issued timestamps. Local clocks drift across services.",
   "associations": [{"target": "Auth Timeout Root Cause", "predicate": "generalizes"}]
 })
 
 🧠 Reinforcing memory...
-cog:mem.reinforce({"engram_id": "..."})
+cog_mem_reinforce({"engram_id": "..."})
 ```
 
 #### 4. CONSOLIDATE — before your final response
 
 Short-term memories decay in 24 hours. Before ending, review and preserve what you learned.
 
-1. Call `cog:mem.listShortTerm` MCP tool to see pending short-term memories
-2. For each entry: call `cog:mem.reinforce` if valid and useful, `cog:mem.flush` if wrong or worthless
+1. Call `cog_mem_list_short_term` MCP tool to see pending short-term memories
+2. For each entry: call `cog_mem_reinforce` if valid and useful, `cog_mem_flush` if wrong or worthless
 3. **Print a visible summary** at the end of your response with these two lines:
    - `🧠 Cog recall:` what recall surfaced that was useful (or "nothing relevant" if it didn't help)
    - `🧠 Stored to Cog:` list the concept names you stored during this session (or "nothing new" if none)
@@ -150,11 +150,11 @@ In the example below: `[print]` = visible text you output, `[call]` = real MCP t
 User: "Fix login sessions expiring early"
 
 1. [print] 🧠 Querying Cog...
-   [call]  cog:mem.recall({...})
+   [call]  cog_mem_recall({...})
 2. [print] 🧠 Recording to Cog...
-   [call]  cog:mem.learn({...})
+   [call]  cog_mem_learn({...})
 3. Implement fix using code tools, then test.
-4. [call]  cog:mem.listShortTerm({...}) and reinforce/flush as needed.
+4. [call]  cog_mem_list_short_term({...}) and reinforce/flush as needed.
 5. Final response includes:
    [print] 🧠 Cog recall: ...
    [print] 🧠 Stored to Cog: ...
@@ -162,7 +162,7 @@ User: "Fix login sessions expiring early"
 
 ### Subagents
 
-Subagents follow the same memory lifecycle as the primary agent. Query Cog before exploring code — same recall-first rule, same query reformulation. Record any concept-shaped knowledge produced during subagent work via `cog:mem.learn`. If a subagent synthesizes, discovers, or receives knowledge that Cog doesn't have, it records it before returning results.
+Subagents follow the same memory lifecycle as the primary agent. Query Cog before exploring code — same recall-first rule, same query reformulation. Record any concept-shaped knowledge produced during subagent work via `cog_mem_learn`. If a subagent synthesizes, discovers, or receives knowledge that Cog doesn't have, it records it before returning results.
 
 ### Never Store
 
@@ -210,7 +210,7 @@ Do NOT use the debugger for problems that don't require runtime inspection: comp
 
 ### Runtime mutation
 
-Some languages and runtimes support modifying variables and re-executing frames at runtime. Others do not — compiled languages like Zig, Rust, and Go may not support meaningful runtime mutation. Call `cog:debug.capabilities` after launching a session to determine what the debug driver supports.
+Some languages and runtimes support modifying variables and re-executing frames at runtime. Others do not — compiled languages like Zig, Rust, and Go may not support meaningful runtime mutation. Call `cog_debug_capabilities` after launching a session to determine what the debug driver supports.
 
 If runtime mutation is supported, you may use it to test hypotheses — "if I change this value, does the bug disappear?" — but always fix the source code for the actual resolution. Runtime mutation is for diagnosis, not for fixes.
 
@@ -222,5 +222,5 @@ Debug sessions may terminate due to idle timeout. If a debug tool call fails bec
 
 ### Cleanup
 
-Always call `cog:debug.stop` when you are done investigating. Never leave debug sessions running.
+Always call `cog_debug_stop` when you are done investigating. Never leave debug sessions running.
 </cog:debug>

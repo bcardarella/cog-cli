@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-02-19
+
+### Added
+
+- File system watcher for automatic SCIP index maintenance (FSEvents on macOS, inotify on Linux)
+- Index updates automatically when files are created, modified, deleted, or renamed — no manual re-indexing needed
+
+### Changed
+
+- All MCP tool names normalized to `cog_<feature>_<snake_case>` format (e.g., `cog_code_query`, `cog_mem_recall`, `cog_debug_launch`)
+- Improved tool descriptions for all 38 MCP tools with actionable guidance for agents
+- Added parameter descriptions to debug tool schemas (session_id, action enums, frame_id, variable_ref, etc.)
+- Remote memory tool descriptions now rewrite `cog_*` references to `cog_mem_*` for consistency
+- Agent prompt updated with `<cog:code>` section documenting auto-indexing and query rules
+
+### Removed
+
+- `cog_code_index` MCP tool — indexing is CLI-only (`cog code:index`), watcher handles ongoing maintenance
+- `cog_code_remove` MCP tool — watcher handles file deletions automatically
+
 ## [0.3.0] - 2026-02-19
 
 ### Changed
@@ -93,6 +113,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GitHub Actions workflow for automated releases and Homebrew tap updates
 - Homebrew installation via `trycog/tap/cog`
 
+[0.4.0]: https://github.com/trycog/cog-cli/releases/tag/v0.4.0
 [0.3.0]: https://github.com/trycog/cog-cli/releases/tag/v0.3.0
 [0.2.2]: https://github.com/trycog/cog-cli/releases/tag/v0.2.2
 [0.2.1]: https://github.com/trycog/cog-cli/releases/tag/v0.2.1

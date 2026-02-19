@@ -20,7 +20,7 @@ var server_version: []const u8 = "0.0.0";
 var shutdown_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
 const RemoteTool = struct {
-    name: []const u8, // local name: "cog:mem.recall"
+    name: []const u8, // local name: "cog_mem_recall"
     remote_name: []const u8, // server name: "cog_recall"
     description: []const u8,
     input_schema: []const u8, // raw JSON string
@@ -753,15 +753,15 @@ fn buildToolCatalogResourceJson(runtime: *Runtime) ![]u8 {
 }
 
 fn writeToolCatalog(runtime: *Runtime, allocator: std.mem.Allocator, s: *Stringify) !void {
-    try writeToolDef(s, "cog:code.query", "Find symbol definitions, references, file symbols, or project structure", &.{
-        .{ .name = "mode", .typ = "string", .desc = "Query mode: find, refs, symbols, or structure", .required = true },
-        .{ .name = "name", .typ = "string", .desc = "Symbol name (for find/refs modes)", .required = false },
-        .{ .name = "file", .typ = "string", .desc = "File path (for symbols mode)", .required = false },
-        .{ .name = "kind", .typ = "string", .desc = "Filter by symbol kind", .required = false },
-        .{ .name = "limit", .typ = "integer", .desc = "Max results to return", .required = false },
+    try writeToolDef(s, "cog_code_query", "Query the SCIP code index for symbol information. Use mode 'find' to locate where a symbol is defined, 'refs' to find all references to a symbol, 'symbols' to list all symbols in a specific file, or 'structure' to get a project-wide overview of files and their symbols.", &.{
+        .{ .name = "mode", .typ = "string", .desc = "Query mode: 'find' (locate definition by name), 'refs' (find all references by name), 'symbols' (list symbols in a file), 'structure' (project-wide file/symbol overview)", .required = true },
+        .{ .name = "name", .typ = "string", .desc = "Symbol name to search for (required for find and refs modes)", .required = false },
+        .{ .name = "file", .typ = "string", .desc = "File path to list symbols from (required for symbols mode)", .required = false },
+        .{ .name = "kind", .typ = "string", .desc = "Filter results by symbol kind (e.g. function, class, method, variable)", .required = false },
+        .{ .name = "limit", .typ = "integer", .desc = "Max results to return (default: unlimited)", .required = false },
     });
 
-    try writeToolDef(s, "cog:code.status", "Report index status", &.{});
+    try writeToolDef(s, "cog_code_status", "Check whether the SCIP code index exists, how many files are indexed, and which languages are covered. Use this to verify the index is available before querying.", &.{});
 
     // Lazily discover remote memory tools on first tools/list
     if (runtime.hasMemory() and runtime.remote_tools == null) {
@@ -783,16 +783,16 @@ fn writeToolCatalog(runtime: *Runtime, allocator: std.mem.Allocator, s: *Stringi
 
 fn runtimeCallTool(runtime: *Runtime, tool_name: []const u8, arguments: ?json.Value) ![]const u8 {
     // Code tools
-    if (std.mem.eql(u8, tool_name, "cog:code.query")) {
+    if (std.mem.eql(u8, tool_name, "cog_code_query")) {
         return callCodeQuery(runtime, arguments);
-    } else if (std.mem.eql(u8, tool_name, "cog:code.status")) {
+    } else if (std.mem.eql(u8, tool_name, "cog_code_status")) {
         return callCodeStatus(runtime);
-    } else if (std.mem.startsWith(u8, tool_name, "cog:debug.")) {
+    } else if (std.mem.startsWith(u8, tool_name, "cog_debug_")) {
         return callDebugTool(runtime, tool_name, arguments);
     }
 
     // Memory tools — proxy to remote MCP server
-    if (std.mem.startsWith(u8, tool_name, "cog:mem.")) {
+    if (std.mem.startsWith(u8, tool_name, "cog_mem_")) {
         return callRemoteMcpTool(runtime, tool_name, arguments);
     }
 
@@ -801,33 +801,43 @@ fn runtimeCallTool(runtime: *Runtime, tool_name: []const u8, arguments: ?json.Va
 
 // ── Remote MCP Proxy ────────────────────────────────────────────────────
 
-/// Convert a snake_case suffix into "prefix.camelCase".
-/// e.g. snakeToDotCamel(alloc, "mem", "bulk_recall") → "mem.bulkRecall"
-fn snakeToDotCamel(allocator: std.mem.Allocator, prefix: []const u8, snake: []const u8) ![]const u8 {
-    // Count output length: prefix + '.' + camelCase(snake)
-    // camelCase removes underscores and capitalizes following chars
-    var len: usize = prefix.len + 1; // prefix + dot
-    for (snake) |c| {
-        if (c != '_') len += 1;
-    }
-
-    const buf = try allocator.alloc(u8, len);
+/// Prefix a remote tool suffix with "cog_mem_".
+/// e.g. prefixToolName(alloc, "recall") → "cog_mem_recall"
+///      prefixToolName(alloc, "bulk_recall") → "cog_mem_bulk_recall"
+fn prefixToolName(allocator: std.mem.Allocator, suffix: []const u8) ![]const u8 {
+    const prefix = "cog_mem_";
+    const buf = try allocator.alloc(u8, prefix.len + suffix.len);
     @memcpy(buf[0..prefix.len], prefix);
-    buf[prefix.len] = '.';
+    @memcpy(buf[prefix.len..], suffix);
+    return buf;
+}
 
-    var pos: usize = prefix.len + 1;
-    var prev_underscore = false;
-    for (snake) |c| {
-        if (c == '_') {
-            prev_underscore = true;
+/// Rewrite cog_xxx tool name references in descriptions to cog_mem_xxx format.
+/// e.g. "use cog_reinforce to..." → "use cog_mem_reinforce to..."
+///      "multiple cog_bulk_recall calls" → "multiple cog_mem_bulk_recall calls"
+fn rewriteToolReferences(allocator: std.mem.Allocator, desc: []const u8) ![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    const prefix = "cog_";
+    const replacement_prefix = "cog_mem_";
+    var i: usize = 0;
+    while (i < desc.len) {
+        if (desc.len - i >= prefix.len and std.mem.eql(u8, desc[i..][0..prefix.len], prefix)) {
+            // Find end of tool name token (alphanumeric + underscore)
+            var end = i + prefix.len;
+            while (end < desc.len and (std.ascii.isAlphanumeric(desc[end]) or desc[end] == '_')) : (end += 1) {}
+            // Write cog_mem_ + the suffix
+            try buf.appendSlice(allocator, replacement_prefix);
+            try buf.appendSlice(allocator, desc[i + prefix.len .. end]);
+            i = end;
         } else {
-            buf[pos] = if (prev_underscore) std.ascii.toUpper(c) else c;
-            prev_underscore = false;
-            pos += 1;
+            try buf.append(allocator, desc[i]);
+            i += 1;
         }
     }
 
-    return buf[0..pos];
+    return try buf.toOwnedSlice(allocator);
 }
 
 fn discoverRemoteTools(runtime: *Runtime) !void {
@@ -889,7 +899,7 @@ fn discoverRemoteTools(runtime: *Runtime) !void {
 
         // Rename cog_snake_case → cog:mem.camelCase
         const suffix = remote_name[cog_prefix.len..];
-        const local_name = try snakeToDotCamel(allocator, "cog:mem", suffix);
+        const local_name = try prefixToolName(allocator, suffix);
         errdefer allocator.free(local_name);
 
         const remote_name_dup = try allocator.dupe(u8, remote_name);
@@ -897,7 +907,7 @@ fn discoverRemoteTools(runtime: *Runtime) !void {
 
         const desc_val = item.object.get("description");
         const desc = if (desc_val) |d| (if (d == .string) d.string else "") else "";
-        const desc_dup = try allocator.dupe(u8, desc);
+        const desc_dup = try rewriteToolReferences(allocator, desc);
         errdefer allocator.free(desc_dup);
 
         // Serialize inputSchema back to JSON string
