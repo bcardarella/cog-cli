@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-02-19
+
+### Changed
+
+- Command namespace separator changed from `/` to `:` (e.g., `code/index` → `code:index`)
+- `code:index` now requires explicit glob patterns instead of defaulting to `**/*`
+- CLI help (`cog`, `cog code`, `cog debug`) now shows built-in and installed language extensions
+- `cog debug` help filters to only show extensions with debugger support
+- Agent prompt updated with category-specific emoji conventions and debugger workflow
+
+### Removed
+
+- `cog update` command (prompt updates are now version-aligned with the CLI)
+- Legacy `cog://` URL resolution from config
+- MCP migration notices from `cog code` and `cog debug` help output
+
+### Fixed
+
+- Multiple `printErr` calls causing garbled output when stderr is buffered — combined into single writes
+
+### Performance
+
+- Debug daemon: cached CU/FDE/abbreviation tables, binary search replacing linear scans
+- Debug daemon: cached macOS thread port, dual unwinding strategy, CU hint pass-through
+- Dashboard TUI: buffered writer with flicker-free rendering and connection backoff
+- MCP server: static response strings, CLI response extraction without full parse-reserialize
+- Runtime MCP proxy with auto-allow tool permissions
+
 ## [0.2.2] - 2026-02-18
 
 ### Fixed
@@ -65,6 +93,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GitHub Actions workflow for automated releases and Homebrew tap updates
 - Homebrew installation via `trycog/tap/cog`
 
+[0.3.0]: https://github.com/trycog/cog-cli/releases/tag/v0.3.0
 [0.2.2]: https://github.com/trycog/cog-cli/releases/tag/v0.2.2
 [0.2.1]: https://github.com/trycog/cog-cli/releases/tag/v0.2.1
 [0.2.0]: https://github.com/trycog/cog-cli/releases/tag/v0.2.0
