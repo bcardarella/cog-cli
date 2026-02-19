@@ -8,9 +8,6 @@
 
 **Memory, code intelligence, and debugging for AI agents.**
 
-A single native binary that gives your AI coding agent persistent memory across sessions,<br>
-structured code search that's 2.8x faster than grep/glob, and an interactive debugger.
-
 [Install](#install) · [How It Works](#how-it-works) · [Memory](#memory) · [Code Intelligence](#code-intelligence) · [Debug](#debug) · [Extensions](#extensions)
 
 </div>
@@ -19,26 +16,26 @@ structured code search that's 2.8x faster than grep/glob, and an interactive deb
 
 ## Why Cog?
 
-AI coding agents are powerful but forgetful. Every session starts from zero — no memory of past decisions, no understanding of your codebase structure, no way to set a breakpoint.
+AI coding agents start every session from scratch. They don't remember the architectural decisions from last week. They can't look up where a function is defined without grepping through your entire codebase. They can't set a breakpoint.
 
-Cog fixes that with three tools, delivered as a single MCP server:
+We built Cog to fix that. It's a single native binary that runs as an MCP server and gives your agent three capabilities it doesn't have on its own:
 
-**Memory** — A persistent knowledge graph your agent reads and writes across sessions. It learns your architecture, remembers past bugs, and builds institutional knowledge that compounds over time. Short-term memories decay in 24 hours unless reinforced, mimicking how real memory works.
+1. **Persistent memory** that carries across sessions. Your agent learns your architecture, remembers past bugs, and builds knowledge that compounds over time.
+2. **Structured code intelligence** that returns definitions, references, and symbols in one tool call instead of 15 rounds of grep and file reads.
+3. **An interactive debugger** your agent drives directly. Breakpoints, variable inspection, stepping through code. No more print statement debugging.
 
-**Code Intelligence** — SCIP-based symbol indexing that gives your agent structured answers in one tool call instead of 15 rounds of grep and file reads. Find definitions, references, and symbols across your entire codebase instantly.
+### The numbers
 
-**Debug** — An interactive debugger your agent drives directly. Set breakpoints, inspect variables, step through code, and test hypotheses — without littering your code with print statements.
+We benchmarked Cog's code intelligence against standard agent tools (grep, glob, read) on the React codebase:
 
-### Benchmarks
-
-Cog vs. standard agent tools (grep, glob, read) on the React codebase:
-
-| Task | Cog | Without Cog | Speedup |
+| Task | Cog | Without Cog | Savings |
 |------|-----|-------------|---------|
-| Find `createElement` definition | 3.7s · 1 call | 34.1s · 15 calls | **9.2x faster, 98% fewer tokens** |
-| Find `useState` references | 9.3s · 2 calls | 27.4s · 15 calls | **2.9x faster, 90% fewer tokens** |
-| List `ReactFiberWorkLoop` symbols | 10.8s · 1 call | 35.7s · 13 calls | **3.3x faster, 84% fewer tokens** |
-| Find `Component` class | 14.3s · 5 calls | 28.9s · 15 calls | **2.0x faster, 74% fewer tokens** |
+| Find `createElement` definition | 3.7s, 1 call | 34.1s, 15 calls | **9.2x faster, 98% fewer tokens** |
+| Find `useState` references | 9.3s, 2 calls | 27.4s, 15 calls | **2.9x faster, 90% fewer tokens** |
+| List `ReactFiberWorkLoop` symbols | 10.8s, 1 call | 35.7s, 13 calls | **3.3x faster, 84% fewer tokens** |
+| Find `Component` class | 14.3s, 5 calls | 28.9s, 15 calls | **2.0x faster, 74% fewer tokens** |
+
+On average, **2.8x faster with 89% fewer tokens**.
 
 ---
 
@@ -68,78 +65,80 @@ zig build
 cog init
 ```
 
-The interactive setup walks you through:
+That's it. The interactive setup walks you through everything:
 
-1. **Memory or Tools-only** — choose full setup (with a [trycog.ai](https://trycog.ai) brain) or local tools only
-2. **Agent selection** — pick which AI agents to configure
-3. **Tool permissions** — optionally auto-allow all Cog tools (Claude Code, Gemini CLI, Amp)
+1. **Memory or Tools-only**: full setup with a [trycog.ai](https://trycog.ai) brain, or just local code intelligence and debugging
+2. **Agent selection**: pick which AI coding agents you use
+3. **Tool permissions**: optionally auto-allow all Cog tools so your agent doesn't prompt you on every call
 
-For each selected agent, `cog init` writes the system prompt, configures the MCP server connection, and sets up hooks to keep the code index in sync.
+For each agent you select, `cog init` writes the system prompt, configures the MCP server connection, and sets up hooks to keep the code index in sync.
 
-### Supported Agents
+### Supported agents
 
 | Agent | MCP Config | Tool Permissions |
 |-------|------------|------------------|
 | Claude Code | `.mcp.json` | Auto-allow |
 | Gemini CLI | `.gemini/settings.json` | Auto-allow |
 | Amp | `.amp/settings.json` | Auto-allow |
-| GitHub Copilot | `.vscode/mcp.json` | — |
-| Cursor | `.cursor/mcp.json` | — |
-| OpenAI Codex CLI | `.codex/config.toml` | — |
-| Roo Code | `.roo/mcp.json` | — |
-| OpenCode | `opencode.json` | — |
-| Windsurf | Global config | — |
-| Goose | Global config | — |
+| GitHub Copilot | `.vscode/mcp.json` | |
+| Cursor | `.cursor/mcp.json` | |
+| OpenAI Codex CLI | `.codex/config.toml` | |
+| Roo Code | `.roo/mcp.json` | |
+| OpenCode | `opencode.json` | |
+| Windsurf | Global config | |
+| Goose | Global config | |
 
 ---
 
 ## How It Works
 
-Cog runs as an [MCP server](https://modelcontextprotocol.io/) over stdio. Your AI agent connects to it and discovers available tools dynamically. You don't call Cog commands directly — your agent does, through MCP tool calls.
+Cog runs as an [MCP server](https://modelcontextprotocol.io/) over stdio. Your AI agent connects to it and discovers tools at runtime. You don't type Cog commands yourself. Your agent calls them through MCP.
 
 ```
-Your Agent  ←→  MCP (stdio)  ←→  cog mcp
-                                   ├── Memory (trycog.ai API)
-                                   ├── Code Intelligence (local SCIP index)
-                                   └── Debug (local daemon)
+Your Agent  <->  MCP (stdio)  <->  cog mcp
+                                     |-- Memory (trycog.ai API)
+                                     |-- Code Intelligence (local SCIP index)
+                                     |-- Debug (local daemon)
 ```
 
-Tool discovery happens at runtime via `tools/list`. Tool families:
+Tool families your agent discovers:
 
-- `cog_mem_*` — Memory operations (when configured)
-- `cog_code_*` — Code intelligence (query, index status, file mutations)
-- `debug_*` — Debugger (launch, breakpoints, stepping, inspection)
+- `cog_mem_*` for memory operations (when configured)
+- `cog_code_*` for code intelligence (query, index status, file mutations)
+- `debug_*` for the debugger (launch, breakpoints, stepping, inspection)
 
 ---
 
 ## Memory
 
-Persistent associative memory powered by a knowledge graph. Your agent learns concepts, links them with typed relationships, and recalls them using spreading activation — queries return not just direct matches but connected concepts across the graph.
+Your agent gets a persistent knowledge graph. It learns concepts, links them with typed relationships, and recalls them using spreading activation. Queries return not just direct matches but connected concepts across the graph.
 
-Hosted on [trycog.ai](https://trycog.ai). Requires an account and API key.
+Memory is hosted on [trycog.ai](https://trycog.ai) and requires an account and API key.
 
-### Key Concepts
+### How it works
 
-- **Engram** — A concept with a term, definition, and creation date
-- **Synapse** — A typed relationship between engrams (requires, enables, leads_to, etc.)
-- **Short-term memory** — Decays in 24 hours unless reinforced to long-term
-- **Spreading activation** — Recall traverses the graph, surfacing connected knowledge
+- An **engram** is a concept with a term, definition, and creation date
+- A **synapse** is a typed relationship between engrams (requires, enables, leads_to, and others)
+- **Short-term memories** decay in 24 hours unless reinforced to long-term
+- **Spreading activation** means recall traverses the graph, surfacing related knowledge you didn't explicitly search for
 
-### How Agents Use It
+### How agents use it
 
-The agent prompt instructs your AI to follow a four-step lifecycle:
+The system prompt we inject into your agent instructs it to follow a four-step lifecycle:
 
-1. **Recall** — Before exploring code, query memory for relevant context
-2. **Work + Record** — Learn new concepts as they're discovered during work
-3. **Reinforce** — After completing work, consolidate important memories to long-term
-4. **Consolidate** — Before ending, review short-term memories and reinforce or flush
+1. **Recall** before exploring code. Query memory for relevant context first.
+2. **Work and record**. Learn new concepts as they come up during the session.
+3. **Reinforce**. After completing work, consolidate important memories to long-term.
+4. **Consolidate**. Before ending the session, review short-term memories and reinforce or flush them.
+
+The result is an agent that gets better over time. It stops rediscovering the same solutions and starts building on what it already knows.
 
 <details>
 <summary><strong>CLI commands</strong></summary>
 
 <br>
 
-Memory commands are available as both MCP tools (`cog_mem_*`) and CLI commands. In practice, your agent uses the MCP tools. The CLI is useful for manual inspection and debugging.
+Your agent uses memory through MCP tools (`cog_mem_*`). The CLI is there for manual inspection and debugging.
 
 **Read:**
 
@@ -183,9 +182,9 @@ Run `cog mem/<command> --help` for full options.
 
 <br>
 
-If you prefer not to use `cog init`:
+If you'd rather not use `cog init`, you can set things up by hand.
 
-**1.** Place a `.cog/settings.json` in your project (or any parent up to `$HOME`):
+**1.** Place a `.cog/settings.json` in your project (or any parent directory up to `$HOME`):
 
 ```json
 {"brain": {"url": "https://trycog.ai/username/brain"}}
@@ -197,7 +196,7 @@ If you prefer not to use `cog init`:
 export COG_API_KEY=your-key-here
 ```
 
-Or in a `.env` file in your project root.
+Or put it in a `.env` file in your project root.
 
 </details>
 
@@ -205,9 +204,9 @@ Or in a `.env` file in your project root.
 
 ## Code Intelligence
 
-SCIP-based code indexing powered by tree-sitter. Gives your agent structured answers — definitions, references, symbols — in a single tool call instead of multi-round file searching.
+SCIP-based code indexing powered by tree-sitter. Instead of your agent grepping through files across multiple rounds, it gets structured answers (definitions, references, symbols) in a single tool call.
 
-Works locally. No account required.
+This runs entirely locally. No account required.
 
 ### Indexing
 
@@ -216,21 +215,21 @@ cog code/index              # Index everything
 cog code/index "**/*.ts"    # Specific pattern
 ```
 
-Results are stored in `.cog/index.scip`. The MCP server exposes `cog_code_query` for your agent to search the index.
+Results go into `.cog/index.scip`. Your agent searches it through the `cog_code_query` MCP tool.
 
-### Built-in Language Support
+### Built-in language support
 
 Go, TypeScript, TSX, JavaScript, Python, Java, Rust, C, C++
 
-Additional languages via [extensions](#extensions).
+Additional languages are supported through [extensions](#extensions).
 
 ---
 
 ## Debug
 
-An interactive debugger your agent drives through MCP `debug_*` tools. Supports breakpoints, stepping, variable inspection, stack traces, memory reads, and disassembly.
+An interactive debugger your agent controls through MCP. It supports breakpoints, stepping, variable inspection, stack traces, memory reads, and disassembly. 37+ tools exposed through MCP.
 
-Architecture: a local daemon communicates with debug adapters (DAP) and exposes 37+ tools through MCP.
+Under the hood, a local daemon communicates with debug adapters (DAP). The daemon starts automatically when your agent launches its first debug session.
 
 ### CLI utilities
 
@@ -241,21 +240,21 @@ Architecture: a local daemon communicates with debug adapters (DAP) and exposes 
 | `debug/kill` | Stop the daemon |
 | `debug/sign` | macOS code-signing for debug entitlements |
 
-The daemon starts automatically when your agent launches a debug session. On macOS, `cog init` handles code-signing.
+On macOS, `cog init` handles the code-signing for you.
 
 ---
 
 ## Extensions
 
-Add code intelligence and debugging for any language.
+You can add code intelligence and debugging support for any language through extensions.
 
 ```sh
 cog install https://github.com/trycog/cog-zig.git
 ```
 
-Extensions are installed to `~/.config/cog/extensions/` and override built-in indexers for shared file types.
+Extensions install to `~/.config/cog/extensions/` and override built-in indexers for shared file types.
 
-### Available Extensions
+### Available extensions
 
 | Extension | Language | Code Intelligence | Debugging |
 |-----------|----------|:-----------------:|:---------:|
