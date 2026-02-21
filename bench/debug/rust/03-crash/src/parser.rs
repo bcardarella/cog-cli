@@ -15,7 +15,7 @@ pub enum Format {
 /// Detect the format of `content` by inspecting its first non-blank line.
 ///
 /// Heuristics:
-/// - Starts with `[`  -> JSON array            (BUG: also matches `[section]`)
+/// - Starts with `[`  -> JSON array
 /// - Contains a comma on the first data line -> CSV
 /// - Otherwise        -> key-value config
 pub fn detect_format(content: &str) -> Format {
@@ -25,16 +25,6 @@ pub fn detect_format(content: &str) -> Format {
         .find(|l| !l.is_empty())
         .unwrap_or("");
 
-    // BUG: This check triggers on INI-style section headers like `[metadata]`
-    // because they also begin with `[`.
-    //
-    // FIX: check whether the `[` is followed by `{` or data (JSON array) vs
-    //      a closing `]` on the same line with only word characters in between
-    //      (config section header).
-    //
-    //      Correct check:
-    //          if first_line.starts_with('[') && !first_line.ends_with(']') { ... }
-    //      or use a regex / more sophisticated heuristic.
     if first_line.starts_with('[') {
         return Format::Json;
     }
@@ -56,8 +46,6 @@ pub fn parse(content: &str) -> ParsedData {
                 Ok(data) => data,
                 Err(_) => {
                     // JSON parse failed — fall through to CSV as a guess.
-                    // This is the path that eventually panics when the input
-                    // is actually a config file.
                     csv_parser::parse_csv(content).expect("CSV parse also failed")
                 }
             }
@@ -127,14 +115,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn detect_config_bug() {
-        // This SHOULD detect as KeyValueConfig but the bug misidentifies
-        // it as Json because it starts with '['.
-        let input = "[metadata]\nname = test\n";
-        let detected = detect_format(input);
-        // Uncomment the assertion below to see the bug:
-        // assert_eq!(detected, Format::KeyValueConfig);
-        assert_eq!(detected, Format::Json); // current (buggy) behavior
-    }
 }

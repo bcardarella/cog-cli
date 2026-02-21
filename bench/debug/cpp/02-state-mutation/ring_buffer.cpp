@@ -26,10 +26,6 @@ bool RingBuffer::pop(Message& msg) {
     }
 
     msg = buffer[head];
-    // BUG: head wraps at (capacity + 1) instead of capacity.
-    // When capacity=8, head advances 0,1,2,...,7,8 instead of 0,...,7,0.
-    // On the 9th pop, head=8 which is out of bounds for the array.
-    // This causes reads from uninitialized/garbage memory.
     head = (head + 1) % (capacity + 1);
     count--;
     return true;

@@ -28,14 +28,9 @@ def calculate_shipping(items):
 def calculate_order_total(items):
     """Calculate the full order total (discounted items + shipping).
 
-    IMPORTANT: ``apply_tiered_discounts`` contains a bug that sorts
-    ``items`` in-place.  After it returns, the list is reordered by
-    subtotal descending, so ``calculate_shipping`` -- which relies on
-    insertion order -- pairs items with the wrong shipping methods.
     """
     from discounts import apply_tiered_discounts
 
-    # This call mutates items (BUG -- sorts in-place)
     discounted = apply_tiered_discounts(items)
 
     item_total = sum(discounted.values())

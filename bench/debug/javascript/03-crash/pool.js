@@ -28,10 +28,6 @@ class ResourcePool {
   }
 
   release(resource) {
-    // BUG: indexOf returns -1 if resource is not in inUse (already released).
-    // splice(-1, 1) removes the LAST element instead of doing nothing,
-    // corrupting the pool by removing an unrelated resource.
-    // Fix: if (idx === -1) return;
     const idx = this.inUse.indexOf(resource);
     this.inUse.splice(idx, 1);
 
@@ -52,9 +48,7 @@ class ResourcePool {
       this.release(resource);
       return result;
     } catch (err) {
-      // If an onError callback is registered, it may also call release(),
-      // causing a double-release. The second release hits indexOf === -1,
-      // and splice(-1, 1) removes the wrong resource.
+      // If an onError callback is registered, it may also call release().
       if (this.onError) {
         this.onError(err, resource, this);
       }

@@ -19,12 +19,9 @@ int main() {
     tree.insert(8);
     tree.insert(12);
     tree.insert(20);
-    tree.insert(13);  // Right child of 12 -- will be lost due to bug
+    tree.insert(13);
 
     // Delete root node 10 (two children case).
-    // In-order successor is 12 (leftmost of right subtree).
-    // 12 has a right child (13) that must be relinked.
-    // Bug: successor's right child (13) is not relinked, so it is lost.
     tree.remove(10);
 
     // Print in-order traversal

@@ -10,8 +10,8 @@ int main() {
     const int NUM_TASKS = 500;
     std::atomic<int> completed(0);
 
-    // Watchdog: if the program hangs for more than 10 seconds, report
-    // the deadlock and force-exit the process.
+    // Watchdog: if the program hangs for more than 10 seconds,
+    // force-exit the process.
     std::thread watchdog([&]() {
         std::this_thread::sleep_for(std::chrono::seconds(10));
         if (completed.load() < NUM_TASKS) {
@@ -28,8 +28,7 @@ int main() {
         // Submit tasks unevenly: all go to queue 0.
         // Threads 1, 2, and 3 start with empty queues, so they must
         // steal from queue 0 (and each other once tasks migrate).
-        // This forces concurrent work-stealing, which triggers the
-        // lock-ordering deadlock in trySteal.
+        // This forces concurrent work-stealing.
         for (int i = 0; i < NUM_TASKS; i++) {
             pool.submitTo(0, [&completed]() {
                 // Simulate a moderate amount of work.

@@ -14,18 +14,7 @@ Image applyConvolution(const Image& src, const Kernel& kernel) {
 
             for (size_t ky = 0; ky < kernel.size; ky++) {
                 for (size_t kx = 0; kx < kernel.size; kx++) {
-                    // Map kernel coordinates to source image coordinates.
-                    // The kernel should be centered on (x, y), so the
-                    // correct mapping is:
-                    //   sx = x + kx - halfK
-                    //   sy = y + ky - halfK
-                    //
-                    // BUG: Off-by-one in kernel centering. The +1 shifts
-                    // the kernel one pixel down and to the right, so each
-                    // output pixel is computed from the wrong neighborhood.
-                    // The result is a shifted, incorrect edge map.
-                    // BUG: Off-by-one in kernel centering. The +1 shifts
-                    // the kernel one pixel down and to the right.
+                    // Map kernel coordinates to source image coordinates
                     int sx = static_cast<int>(x) + static_cast<int>(kx) - halfK + 1;
                     int sy = static_cast<int>(y) + static_cast<int>(ky) - halfK + 1;
 

@@ -8,10 +8,10 @@ use std::time::Duration;
 
 use worker::{check_completeness, validate_batch};
 
-/// Run the pipeline with a timeout to detect deadlock.
+/// Run the pipeline with a timeout.
 ///
 /// If the pipeline completes within the timeout, print a summary of the
-/// results.  If it hangs (deadlock), print an error and exit.
+/// results.  If it hangs, print an error and exit.
 fn main() {
     let (result_tx, result_rx) = mpsc::channel();
 
@@ -20,19 +20,13 @@ fn main() {
         let _ = result_tx.send(results);
     });
 
-    // Wait up to 5 seconds; a deadlock causes a timeout.
+    // Wait up to 5 seconds.
     match result_rx.recv_timeout(Duration::from_secs(5)) {
         Ok(results) => {
             report_results(&results);
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            eprintln!("ERROR: Pipeline deadlocked (timed out after 5s)");
-            eprintln!();
-            eprintln!("Diagnosis: The feedback channel between Stage 2 and Stage 1");
-            eprintln!("is a bounded sync_channel.  Stage 1 never drains it during");
-            eprintln!("its primary input loop, so once the feedback buffer fills,");
-            eprintln!("Stage 2 blocks sending feedback while Stage 1 blocks sending");
-            eprintln!("to Stage 2.  Circular wait = deadlock.");
+            eprintln!("ERROR: Pipeline timed out after 5s");
             std::process::exit(1);
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -41,7 +35,7 @@ fn main() {
         }
     }
 
-    // Join if we got a result (non-deadlocked case).
+    // Join if we got a result.
     let _ = handle.join();
 }
 

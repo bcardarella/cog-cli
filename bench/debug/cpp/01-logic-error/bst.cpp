@@ -68,8 +68,6 @@ Node* BST::removeHelper(Node* node, int key) {
         node->key = successor->key;
 
         // Now remove the successor node from the right subtree.
-        // Instead of recursively calling removeHelper (the correct approach),
-        // this code manually walks to the successor and unlinks it.
         Node* parent = node;
         Node* current = node->right;
 
@@ -81,8 +79,6 @@ Node* BST::removeHelper(Node* node, int key) {
             while (current->left != successor) {
                 current = current->left;
             }
-            // BUG: Should relink successor's right subtree (successor->right)
-            // but instead sets current->left to nullptr, losing the subtree.
             current->left = nullptr;
         }
 

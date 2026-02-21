@@ -6,9 +6,8 @@ use cache::LRUCache;
 
 /// Run a scripted access pattern and track cache correctness.
 ///
-/// The pattern is designed to exercise `move_to_front` repeatedly so
-/// that the missing `prev` pointer update in `DoublyLinkedList` corrupts
-/// the backward chain and causes incorrect evictions.
+/// The pattern is designed to exercise various cache operations
+/// including insertions, lookups, and evictions.
 fn main() {
     let mut cache: LRUCache<&str, i32> = LRUCache::new(4);
 
@@ -59,7 +58,6 @@ fn main() {
     expect_hit!(cache, "B", 2, hits, errors);
     expect_hit!(cache, "C", 3, hits, errors);
     // Correct order: C B A D
-    // With bug: backward chain is corrupted.
 
     // --- Phase 3: hit D to move it to front (1 hit) ---
     expect_hit!(cache, "D", 4, hits, errors);
@@ -109,8 +107,5 @@ fn main() {
     //   hits:   3 + 1 + 1 + 3 + 4 + 3 = 15
     //   misses: 1 + 3 = 4
     //   errors: 0
-    //
-    // With the bug, some entries are wrongly evicted or still present
-    // when they should be gone, flipping hits to errors and misses to errors.
     println!("Cache test: {} hits, {} misses, {} errors", hits, misses, errors);
 }

@@ -37,17 +37,6 @@ ASTNode* Parser::parseExpression() {
 }
 
 // Parse a multiplicative expression: primary (('*' | '/') primary)*
-//
-// BUG: When the left operand is a unary minus node (e.g., from parsing
-// "-(3+4)"), this function attempts an "optimization" that extracts the
-// inner operand from the unary node, deletes the unary wrapper, and
-// negates the inner node's value field. But the inner node is a BinaryOp
-// (3+4), not a Number, so setting its value field does nothing useful.
-// Worse, deleting the unary wrapper triggers its destructor, which
-// recursively deletes its child (the inner BinaryOp). The local pointer
-// to the inner node is now dangling. Using it as the left operand of
-// the multiplication creates a use-after-free, leading to a crash when
-// the evaluator traverses the freed node.
 ASTNode* Parser::parseTerm() {
     ASTNode* left = parsePrimary();
 
@@ -56,9 +45,6 @@ ASTNode* Parser::parseTerm() {
         char op = (current().type == TokenType::Star) ? '*' : '/';
         advance();
 
-        // BUG: Attempt to "optimize" unary minus by folding it into
-        // the multiplication. Setting value on a BinaryOp node does
-        // nothing — the negation is silently lost.
         if (left->type == ASTNode::UnaryOp && left->op == '-') {
             ASTNode* inner = left->left;
             left->left = nullptr;

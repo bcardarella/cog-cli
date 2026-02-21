@@ -6,8 +6,8 @@ class CorrelationCalculator:
 
     def __init__(self):
         self.sum_products = 0.0
-        self.sum_sq_diff_x = 0.0  # BUG: These accumulators are instance variables
-        self.sum_sq_diff_y = 0.0  # that don't get reset between column pairs
+        self.sum_sq_diff_x = 0.0
+        self.sum_sq_diff_y = 0.0
 
     def pearson(self, x_values, y_values):
         """Calculate Pearson correlation coefficient between two variables.
@@ -19,14 +19,7 @@ class CorrelationCalculator:
         x_mean = mean(x_values)
         y_mean = mean(y_values)
 
-        self.sum_products = 0.0  # This one IS reset correctly
-        # BUG: sum_sq_diff_x and sum_sq_diff_y are NOT reset here.
-        # They accumulate values from previous column pair calculations,
-        # inflating the denominator and producing incorrect correlation
-        # values for all pairs after the first one.
-        # The fix is to add:
-        #   self.sum_sq_diff_x = 0.0
-        #   self.sum_sq_diff_y = 0.0
+        self.sum_products = 0.0
 
         for i in range(n):
             dx = x_values[i] - x_mean

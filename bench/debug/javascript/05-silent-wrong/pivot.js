@@ -4,10 +4,6 @@ function pivot(aggregated, columnOrder) {
 
   for (const colName of columnOrder) {
     for (const [key, value] of aggregated) {
-      // BUG: key is a NUMBER (from groupBy), colName is a STRING
-      // (from the year-strings array). Strict equality (===) never
-      // matches because number !== string.
-      // Fix: if (String(key) === colName) {
       if (key === colName) {
         result[colName] = value;
         matched.add(key);

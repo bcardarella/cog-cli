@@ -10,10 +10,7 @@ def overlaps(a, b):
     that merely touch at a boundary, like [1, 3] and [3, 5], are
     adjacent but NOT overlapping.
 
-    BUG: uses <= instead of <, so adjacent intervals that share an
-    endpoint are incorrectly reported as overlapping.
     """
-    # BUG: should be  a.start < b.end and b.start < a.end
     return a.start <= b.end and b.start <= a.end
 
 

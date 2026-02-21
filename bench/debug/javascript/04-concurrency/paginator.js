@@ -11,11 +11,6 @@ class AsyncPaginator {
       return null;
     }
 
-    // BUG: Read the page number before the await, but increment AFTER.
-    // When two consumers call nextPage() concurrently, both read the
-    // same currentPage value before either increments it, causing
-    // duplicate pages. Some pages may also be skipped.
-    // Fix: const page = this.currentPage++;  (atomic read+increment before await)
     const page = this.currentPage;
 
     // Simulate async data fetch — yields control to other consumers

@@ -42,9 +42,9 @@ Then run this command to update the dashboard: bash ../collect.sh
 ```
 You have access to the cog debugger via cog_debug_* MCP tools. Use the debugger to diagnose and fix the bug.
 
-The program in 02-state-mutation/ is an e-commerce order calculator with tiered discounts and shipping. When you run `python3 02-state-mutation/main.py`, the order total is wrong — the shipping costs don't match the expected values because the item list order has been corrupted somewhere during processing.
+The program in 02-state-mutation/ is an e-commerce order calculator with tiered discounts and shipping. When you run `python3 02-state-mutation/main.py`, the order total is wrong — it doesn't match expected_output.txt.
 
-Diagnose the root cause using the debugger (try watchpoints on the items list), fix the source code, and verify your fix by running the program again. The expected output is in 02-state-mutation/expected_output.txt.
+Diagnose the root cause using the debugger, fix the source code, and verify your fix by running the program again. The expected output is in 02-state-mutation/expected_output.txt.
 
 After fixing, count your tool calls and LLM rounds. Write the result as JSON to .bench/python-2-debug.json in this format: {"test": 2, "name": "State mutation: shopping cart", "variant": "debug", "calls": N, "rounds": N}
 
@@ -55,7 +55,7 @@ Then run this command to update the dashboard: bash ../collect.sh
 ```
 You must NOT use any cog_* MCP tools. Diagnose and fix the bug using only standard tools (Read, Grep, Glob, Edit, Bash).
 
-The program in 02-state-mutation/ is an e-commerce order calculator with tiered discounts and shipping. When you run `python3 02-state-mutation/main.py`, the order total is wrong — the shipping costs don't match the expected values because the item list order has been corrupted somewhere during processing.
+The program in 02-state-mutation/ is an e-commerce order calculator with tiered discounts and shipping. When you run `python3 02-state-mutation/main.py`, the order total is wrong — it doesn't match expected_output.txt.
 
 Diagnose the root cause, fix the source code, and verify your fix by running the program again. The expected output is in 02-state-mutation/expected_output.txt.
 
@@ -102,9 +102,9 @@ Then run this command to update the dashboard: bash ../collect.sh
 ```
 You have access to the cog debugger via cog_debug_* MCP tools. Use the debugger to diagnose and fix the bug.
 
-The program in 04-concurrency/ implements a 3-stage threaded data pipeline with bounded queues. Stage 2 sends feedback to Stage 1. When you run `python3 04-concurrency/main.py`, it should output "Processed 200 items" but instead hangs (deadlock).
+The program in 04-concurrency/ implements a 3-stage threaded data pipeline with bounded queues. Stage 2 sends feedback to Stage 1. When you run `python3 04-concurrency/main.py`, it should output "Processed 200 items" but instead hangs.
 
-Use the debugger to pause the hung program, inspect all thread states, and identify the circular wait. Fix the source code and verify your fix.
+Use the debugger to pause the hung program, inspect all thread states, and identify the source of the hang. Fix the source code and verify your fix.
 
 After fixing, count your tool calls and LLM rounds. Write the result as JSON to .bench/python-4-debug.json in this format: {"test": 4, "name": "Concurrency: pipeline deadlock", "variant": "debug", "calls": N, "rounds": N}
 
@@ -115,7 +115,7 @@ Then run this command to update the dashboard: bash ../collect.sh
 ```
 You must NOT use any cog_* MCP tools. Diagnose and fix the bug using only standard tools (Read, Grep, Glob, Edit, Bash).
 
-The program in 04-concurrency/ implements a 3-stage threaded data pipeline with bounded queues. Stage 2 sends feedback to Stage 1. When you run `python3 04-concurrency/main.py`, it should output "Processed 200 items" but instead hangs (deadlock).
+The program in 04-concurrency/ implements a 3-stage threaded data pipeline with bounded queues. Stage 2 sends feedback to Stage 1. When you run `python3 04-concurrency/main.py`, it should output "Processed 200 items" but instead hangs.
 
 Diagnose the root cause, fix the source code, and verify your fix.
 
@@ -132,9 +132,9 @@ Then run this command to update the dashboard: bash ../collect.sh
 ```
 You have access to the cog debugger via cog_debug_* MCP tools. Use the debugger to diagnose and fix the bug.
 
-The program in 05-silent-wrong/ computes a Pearson correlation matrix for a multi-variable dataset. When you run `python3 05-silent-wrong/main.py`, the first correlation value is correct but subsequent values are wrong — they have smaller absolute values than expected.
+The program in 05-silent-wrong/ computes a Pearson correlation matrix for a multi-variable dataset. When you run `python3 05-silent-wrong/main.py`, the correlation matrix values are incorrect — they don't match expected_output.txt.
 
-Use the debugger to set breakpoints in the correlation calculation loop and inspect accumulator values between iterations. Fix the source code and verify against expected_output.txt.
+Use the debugger to inspect intermediate values in the correlation computation. Fix the source code and verify against expected_output.txt.
 
 After fixing, count your tool calls and LLM rounds. Write the result as JSON to .bench/python-5-debug.json in this format: {"test": 5, "name": "Silent wrong: correlation matrix", "variant": "debug", "calls": N, "rounds": N}
 
@@ -145,7 +145,7 @@ Then run this command to update the dashboard: bash ../collect.sh
 ```
 You must NOT use any cog_* MCP tools. Diagnose and fix the bug using only standard tools (Read, Grep, Glob, Edit, Bash).
 
-The program in 05-silent-wrong/ computes a Pearson correlation matrix for a multi-variable dataset. When you run `python3 05-silent-wrong/main.py`, the first correlation value is correct but subsequent values are wrong — they have smaller absolute values than expected.
+The program in 05-silent-wrong/ computes a Pearson correlation matrix for a multi-variable dataset. When you run `python3 05-silent-wrong/main.py`, the correlation matrix values are incorrect — they don't match expected_output.txt.
 
 Diagnose the root cause, fix the source code, and verify against expected_output.txt.
 

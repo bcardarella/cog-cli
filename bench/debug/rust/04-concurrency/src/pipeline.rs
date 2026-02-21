@@ -4,19 +4,7 @@ use std::thread;
 use crate::stage;
 use crate::worker::Record;
 
-/// Channel buffer size -- deliberately small to trigger the deadlock quickly.
-///
-/// When both the forward channel (stage1 -> stage2) and the feedback channel
-/// (stage2 -> stage1) are bounded at this size, a circular dependency forms:
-///
-///   Stage 1 blocks on  stage1->stage2.send()  (buffer full)
-///   Stage 2 blocks on  stage2->stage1.send()  (buffer full)
-///
-/// Neither can make progress.
-///
-/// **Fix**: Use `try_send` for the feedback channel and drop records that
-/// cannot be sent, or use an unbounded `std::sync::mpsc::channel()` for
-/// the feedback path so it never blocks the sender.
+/// Channel buffer size.
 const CHANNEL_BOUND: usize = 5;
 
 /// Total records to push through the pipeline.
@@ -47,9 +35,7 @@ impl Default for PipelineConfig {
 ///                                |--- [feedback] ----------|
 /// ```
 ///
-/// All channels are `sync_channel` with a small bound, which creates the
-/// potential for circular blocking between Stage 1 and Stage 2 via the
-/// feedback path.
+/// All channels are `sync_channel` with a small bound.
 pub fn run_pipeline() -> Vec<Record> {
     let config = PipelineConfig::default();
     let bound = config.channel_bound;
@@ -59,15 +45,7 @@ pub fn run_pipeline() -> Vec<Record> {
     let (s1_to_s2_tx, s1_to_s2_rx) = sync_channel::<Record>(bound);
     let (s2_to_s3_tx, s2_to_s3_rx) = sync_channel::<Record>(bound);
 
-    // Feedback channel (bounded -- this is the root cause of the deadlock).
-    //
-    // FIX: replace with an unbounded channel:
-    //   let (feedback_tx, feedback_rx) = std::sync::mpsc::channel::<Record>();
-    //
-    // or use try_send in stage2 to make it non-blocking:
-    //   if feedback_tx.try_send(record).is_err() {
-    //       output.send(record).expect("forward failed");
-    //   }
+    // Feedback channel (bounded).
     let (feedback_tx, feedback_rx) = sync_channel::<Record>(bound);
 
     // --- Spawn pipeline stages ---

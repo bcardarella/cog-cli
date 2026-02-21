@@ -50,10 +50,6 @@ class Parser {
       const op = this.consume();
       const prec = PRECEDENCE[op.type];
 
-      // BUG: For right-associative operators like ^, we should use `prec`
-      // (same precedence) so that the recursive call consumes the rest of
-      // the chain. Using `prec + 1` forces left-associative grouping.
-      // Fix: const nextMinPrec = RIGHT_ASSOCIATIVE.has(op.type) ? prec : prec + 1;
       const nextMinPrec = prec + 1;
 
       const right = this.parseExpression(nextMinPrec);

@@ -3,14 +3,7 @@ from validator import validate_config
 
 
 def main():
-    """Load the production configuration and report the result.
-
-    Expected output (with merger bug fixed):
-        Config loaded: 12 settings applied
-
-    Actual output (with merger bug):
-        AttributeError: 'NoneType' object has no attribute 'get'
-    """
+    """Load the production configuration and report the result."""
     config = load_config("production")
     settings_count = validate_config(config)
     print(f"Config loaded: {settings_count} settings applied")

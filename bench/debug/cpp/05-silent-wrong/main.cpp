@@ -45,8 +45,6 @@ int main() {
     }
 
     // Print the full edge detection result.
-    // With correct kernel centering, the strong edges appear at columns 2-3.
-    // With the off-by-one bug, the edges shift one pixel to the left (columns 1-2).
     std::cout << "Edge detection:" << std::endl;
     for (size_t y = 0; y < H; y++) {
         for (size_t x = 0; x < W; x++) {

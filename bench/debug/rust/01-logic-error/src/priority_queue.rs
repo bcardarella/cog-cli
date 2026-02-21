@@ -77,9 +77,6 @@ impl MinPriorityQueue {
     fn sift_up(&mut self, mut idx: usize) {
         while idx > 0 {
             let parent = (idx - 1) / 2;
-            // BUG: '>' should be '<' for a min-heap.  This comparison
-            // moves a child up only when it is GREATER than its parent,
-            // which builds a max-heap ordering instead of min-heap.
             if self.data[idx].priority > self.data[parent].priority {
                 self.swap_entries(idx, parent);
                 idx = parent;
@@ -97,8 +94,6 @@ impl MinPriorityQueue {
             let right = 2 * idx + 2;
             let mut smallest = idx;
 
-            // BUG: '>' should be '<' — selects the LARGEST child instead
-            // of the smallest, consistent with the broken sift_up above.
             if left < len && self.data[left].priority > self.data[smallest].priority {
                 smallest = left;
             }
@@ -136,9 +131,7 @@ mod tests {
         pq.insert(1, 3);
         pq.insert(2, 7);
 
-        // With the bug, this extracts the MAX instead of the MIN.
         let first = pq.extract_min().unwrap();
-        // Should be item 1 (priority 3) but bug gives item 0 (priority 10).
         println!("Extracted: item={}, priority={}", first.item, first.priority);
     }
 }

@@ -8,8 +8,6 @@ use decoder::decode_varint;
 
 /// Test values spanning the range from 1-byte to multi-byte varints.
 ///
-/// Single-byte values (0-127) will roundtrip correctly even with the bug
-/// because the shift error only affects multi-byte decoding.
 const TEST_VALUES: [u64; 10] = [
     0,      // 1 byte
     1,      // 1 byte

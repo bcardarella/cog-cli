@@ -12,18 +12,6 @@ const MAX_RETRY_STAGE: u32 = 4;
 /// Reads raw records from `input`, processes them, and forwards to
 /// Stage 2 via `output`.  Also listens for feedback from Stage 2 on
 /// `feedback_rx` and re-processes those records.
-///
-/// **Deadlock trigger**: `output` is a bounded `sync_channel`.  When
-/// Stage 1 tries to send on `output` while `output` is full, it blocks.
-/// Meanwhile Stage 2 is trying to send feedback on `feedback_tx` (also
-/// bounded), which blocks because Stage 1 isn't draining `feedback_rx`.
-/// Circular wait = deadlock.
-///
-/// The design flaw is that this function drains ALL input records in the
-/// first loop, only reading feedback AFTER the input is exhausted.
-/// During the first loop, feedback_rx is never polled.  If the feedback
-/// channel fills up, Stage 2 blocks sending feedback, which backs up
-/// the s1-to-s2 channel, which blocks this function.
 pub fn stage1(
     input: Receiver<Record>,
     output: SyncSender<Record>,
@@ -33,9 +21,6 @@ pub fn stage1(
     let mut feedback_processed = 0u32;
 
     // --- Primary loop: drain all input records ---
-    // BUG: This loop does not interleave checking feedback_rx.
-    //      If the feedback channel is bounded, a circular wait
-    //      forms once the feedback buffer fills.
     for mut record in input {
         do_work(&mut record, "stage1");
         output.send(record).expect("stage1 -> stage2 send failed");
@@ -43,8 +28,6 @@ pub fn stage1(
     }
 
     // --- Feedback loop: reprocess records that Stage 2 sent back ---
-    // In the deadlocked scenario, we never reach this loop because the
-    // primary loop above is stuck on `output.send()`.
     for mut record in feedback_rx {
         record.mark_retry();
         do_work(&mut record, "stage1-redo");
@@ -83,9 +66,6 @@ pub fn stage2(
         let needs_retry = record.id % 10 == 0 && record.stage < MAX_RETRY_STAGE;
 
         if needs_retry {
-            // BUG PATH: this send blocks when the feedback channel is full.
-            // Stage 1 can't drain it because Stage 1 is blocked trying to
-            // send to US (the s1-to-s2 channel is also full).
             feedback_tx
                 .send(record)
                 .expect("stage2 -> stage1 feedback send failed");

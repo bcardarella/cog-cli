@@ -27,11 +27,6 @@ int main() {
     evalAndPrint("(3 + 4) * 2");
     evalAndPrint("10 / (2 + 3)");
 
-    // This expression triggers the use-after-free crash:
-    // Parser sees unary minus, creates UnaryOp('-', BinaryOp(3,+,4)).
-    // Then parseTerm sees '*', hits the buggy "optimization" that deletes
-    // the unary node (which also frees the BinaryOp child), then uses
-    // the freed BinaryOp as a multiplication operand.
     evalAndPrint("-(3 + 4) * 2");
 
     return 0;

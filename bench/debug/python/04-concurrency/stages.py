@@ -21,13 +21,7 @@ class Stage1:
                 # Apply feedback adjustment to future items
                 item["adjustments"].append(fb)
 
-            # BUG: blocking put -- if stage2->stage1 feedback queue is full
-            # AND stage1->stage2 queue is full, we deadlock.
-            # Stage 1 blocks here waiting for Stage 2 to consume from
-            # stage1_to_stage2, but Stage 2 is blocked trying to put
-            # feedback into the full feedback queue, which Stage 1 can't
-            # drain because it's stuck here.
-            self.queue_mgr.stage1_to_stage2.put(item)  # blocks when full
+            self.queue_mgr.stage1_to_stage2.put(item)
 
         self.queue_mgr.done_producing = True
         # Send sentinel to signal Stage 2 to stop
@@ -58,13 +52,7 @@ class Stage2:
                 "suggestion": "increase_rate",
                 "metric": self.processed,
             }
-            # BUG: blocking put on feedback queue -- if Stage 1 is blocked
-            # putting to stage1->stage2 (full), and this feedback queue is
-            # also full, neither thread can make progress. This creates a
-            # circular wait: Stage 1 waits on stage1_to_stage2 space,
-            # Stage 2 waits on feedback space, and Stage 1 can't drain
-            # feedback because it's blocked on stage1_to_stage2.
-            self.queue_mgr.feedback.put(feedback)  # blocks when full
+            self.queue_mgr.feedback.put(feedback)
 
             # Forward to Stage 3
             self.queue_mgr.stage2_to_stage3.put(item)

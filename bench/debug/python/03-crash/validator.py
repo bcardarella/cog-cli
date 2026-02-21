@@ -19,16 +19,6 @@ def validate_config(config):
     Checks a handful of business rules and returns the total number of
     leaf settings on success.
 
-    CRASH PATH
-    ----------
-    After the buggy merge, ``config["server"]["ssl"]`` is ``None``
-    (the merger stored it literally instead of deleting the key).
-    The line::
-
-        ssl_config.get("enabled")
-
-    raises ``AttributeError: 'NoneType' object has no attribute 'get'``
-    because ``ssl_config`` is ``None``, not a dict.
     """
     errors = []
 
@@ -38,8 +28,6 @@ def validate_config(config):
     # Retrieve SSL sub-section; default to empty dict if absent.
     ssl_config = server.get("ssl", {})
 
-    # When the merger bug is present, ssl_config is None (not a dict).
-    # The next call crashes: NoneType has no attribute 'get'.
     if ssl_config.get("enabled"):
         cert = ssl_config.get("cert_path", "")
         key = ssl_config.get("key_path", "")

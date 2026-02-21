@@ -100,18 +100,6 @@ impl<K: Clone + std::fmt::Debug, V: Clone + std::fmt::Debug> DoublyLinkedList<K,
             node.next = self.head;
         }
 
-        // BUG: The old head's `prev` pointer is NOT updated to point
-        //      back to `idx`.  After several move_to_front calls the
-        //      backward chain breaks: traversing from the old head
-        //      toward the real head skips the moved node.
-        //
-        // The fix is:
-        //   if let Some(old_head) = self.head {
-        //       if let Some(ref mut hn) = self.nodes[old_head] {
-        //           hn.prev = Some(idx);
-        //       }
-        //   }
-
         self.head = Some(idx);
     }
 

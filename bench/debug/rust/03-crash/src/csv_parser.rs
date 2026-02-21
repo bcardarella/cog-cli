@@ -8,9 +8,8 @@ use crate::processor::ParsedData;
 ///
 /// # Panics
 ///
-/// Panics (via `.unwrap()`) if any data row has fewer fields than the
-/// header — this is the crash that triggers when a config file is
-/// mistakenly routed here.
+/// Panics (via `.unwrap()`) if any data row has a different number of
+/// fields than the header.
 pub fn parse_csv(content: &str) -> Result<ParsedData, String> {
     let lines: Vec<&str> = content
         .lines()
@@ -37,9 +36,6 @@ pub fn parse_csv(content: &str) -> Result<ParsedData, String> {
             .collect();
 
         // Validate that every row has exactly the right number of columns.
-        // The .unwrap() below is intentional: it will panic when a config
-        // file line like "name = test_app" is parsed as CSV, because the
-        // assertion result is `Err`.
         let valid = (fields.len() == num_cols)
             .then_some(())
             .ok_or_else(|| {
@@ -52,7 +48,6 @@ pub fn parse_csv(content: &str) -> Result<ParsedData, String> {
                 )
             });
 
-        // BUG TRIGGER: unwrap panics on malformed rows.
         valid.unwrap();
 
         rows.push(fields);
