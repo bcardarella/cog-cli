@@ -138,7 +138,11 @@ def main():
             instance = {
                 "instance_id": t["instance_id"],
                 "problem_statement": t["problem_statement"],
-                "repo_name": t["repo"],
+                # "testbed" (no slash) tells SWE-agent to use PreExistingRepoConfig:
+                # the repo is already at /testbed/ inside SWE-bench Pro Docker images.
+                # Using "owner/repo" would trigger LocalRepoConfig which tries to
+                # find the repo on the host filesystem.
+                "repo_name": "testbed",
                 "base_commit": t["base_commit"],
                 "image_name": f"jefzda/sweap-images:{t['dockerhub_tag']}",
             }
