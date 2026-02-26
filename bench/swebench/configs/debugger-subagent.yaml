@@ -127,7 +127,7 @@ instances:
   deployment:
     type: docker
     # SWE-bench Pro images already have Python; skip standalone install
-    # (the default tries to build a standalone Python which fails on arm64)
-    python_standalone_dir: null
+    # (null gets overridden to /root by SWE-agent; empty string disables it)
+    python_standalone_dir: ""
 
 num_workers: 1
