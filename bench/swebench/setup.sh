@@ -206,6 +206,33 @@ for i, task in enumerate(tasks):
     with open(os.path.join(claude_dir, 'settings.json'), 'w') as f:
         f.write(settings_json)
 
+    # ── Install cog-debug agent file ──────────────────────────────────
+    agents_dir = os.path.join(claude_dir, 'agents')
+    os.makedirs(agents_dir, exist_ok=True)
+    debug_agent_header = """\
+---
+name: cog-debug
+description: Debug subagent that inspects runtime state via cog debugger tools
+tools:
+  - mcp__cog__cog_debug_launch
+  - mcp__cog__cog_debug_breakpoint
+  - mcp__cog__cog_debug_run
+  - mcp__cog__cog_debug_inspect
+  - mcp__cog__cog_debug_stacktrace
+  - mcp__cog__cog_debug_stop
+  - Read
+  - Bash
+mcpServers:
+  - cog
+maxTurns: 15
+---
+"""
+    debug_agent_body_path = os.path.join(script_dir, '..', '..', 'priv', 'agents', 'cog-debug.md')
+    with open(debug_agent_body_path) as f:
+        debug_agent_body = f.read()
+    with open(os.path.join(agents_dir, 'cog-debug.md'), 'w') as f:
+        f.write(debug_agent_header + debug_agent_body)
+
     print(f"    Done")
 
 print(f"\n  All {len(tasks)} workspaces ready")
