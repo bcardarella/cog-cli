@@ -1,0 +1,39 @@
+# cog_debug tool bundle for SWE-agent
+#
+# Defines the cog_debug function signature so Claude sees it as a callable tool.
+# The actual execution is intercepted HOST-SIDE by CogDebugAgent before it
+# reaches the container. The bin/cog_debug placeholder should never run.
+
+tools:
+  cog_debug:
+    signature: "cog_debug <breakpoint> <inspect> <test> [condition]"
+    docstring: |
+      Delegate a debugging observation to the cog-debug subagent. This tool sets a
+      breakpoint at a specific file:line, runs the given test command, and inspects
+      the specified expressions when the breakpoint is hit.
+
+      The subagent is a stateless observation tool — it takes exact coordinates and
+      returns runtime variable values. You must provide everything it needs.
+
+      Use this tool to verify hypotheses about runtime state. Before calling, you
+      should have a specific, falsifiable prediction like:
+        "At file.py:42, I expect `result` to be a list, but I predict it is None."
+
+      Returns the observed values of the inspected expressions at the breakpoint.
+    arguments:
+      - name: breakpoint
+        type: string
+        description: "Breakpoint location as file:line (e.g. 'django/utils/dateparse.py:52')"
+        required: true
+      - name: inspect
+        type: string
+        description: "Comma-separated expressions to inspect at the breakpoint (e.g. 'value, regex.match(value), type(result)')"
+        required: true
+      - name: test
+        type: string
+        description: "Test command to run that triggers the breakpoint (e.g. 'python -m pytest tests/test_foo.py::test_bar -xvs')"
+        required: true
+      - name: condition
+        type: string
+        description: "Optional condition for conditional breakpoint (e.g. 'name == \"target\"'). Only breaks when condition is true."
+        required: false
