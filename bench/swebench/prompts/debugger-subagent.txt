@@ -4,6 +4,18 @@ The repository is checked out in the current directory at the buggy commit. A te
 
 You MUST NOT call any `mcp__cog__cog_debug_*` tool directly. All runtime state inspection goes through the `cog-debug` subagent.
 
+## Test Execution
+
+All tests run inside a Docker container. Use this pattern for ALL test/Python commands:
+
+    docker exec {container_name} <command>
+
+Examples:
+- `docker exec {container_name} python -m pytest {selected_test_files} -xvs`
+- `docker exec {container_name} python -m pytest tests/test_foo.py::TestBar::test_method -xvs`
+
+Do NOT run pytest or python directly — always use `docker exec {container_name}`.
+
 ## Problem Statement
 
 {problem_statement}
@@ -57,10 +69,10 @@ Read the subagent's answer. Quote the values it reported.
 
 ## Test commands
 
-Check how the project runs tests — look for `runtests.py`, `manage.py`, `tox.ini`, or similar.
-- **pytest:** `pytest tests/test_file.py::test_name -xvs`
-- **Django:** `python tests/runtests.py --settings=test_sqlite test_module`
-- **Custom:** `python path/to/test_script.py`
+All tests run inside the Docker container. Check how the project runs tests — look for `runtests.py`, `manage.py`, `tox.ini`, or similar.
+- **pytest:** `docker exec {container_name} python -m pytest tests/test_file.py::test_name -xvs`
+- **Django:** `docker exec {container_name} python tests/runtests.py --settings=test_sqlite test_module`
+- **Custom:** `docker exec {container_name} python path/to/test_script.py`
 
 ## Example
 
@@ -70,7 +82,7 @@ Claim: "At `django/utils/dateparse.py:52`, I expect `regex.match(value)` to retu
 Task(
   prompt="BREAKPOINT: django/utils/dateparse.py:52
 INSPECT: _lazy_re_compile(datetime_re).match(value), value
-TEST: pytest tests/utils_tests/test_dateparse.py::DateParseTests::test_parse_datetime -xvs",
+TEST: docker exec {container_name} python -m pytest tests/utils_tests/test_dateparse.py::DateParseTests::test_parse_datetime -xvs",
   subagent_type="cog-debug"
 )
 ```

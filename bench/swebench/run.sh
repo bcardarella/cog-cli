@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SWE-bench Lite benchmark runner
+# SWE-bench Pro benchmark runner (Docker-based)
 # Runs baseline and/or debugger variants via `claude -p`, captures patches and metrics
 #
 # Usage:
@@ -34,7 +34,7 @@ export SCRIPT_DIR ROOT_DIR BENCH_DIR PREDICTIONS_DIR LOGS_DIR WORKSPACE COG_BIN
 export VARIANT_ARG MAX_TASKS TIMEOUT
 
 echo "══════════════════════════════════════"
-echo "  SWE-bench Lite Benchmark Runner"
+echo "  SWE-bench Pro Benchmark Runner"
 echo "══════════════════════════════════════"
 echo ""
 echo "  Variant:  $VARIANT_ARG"
@@ -93,14 +93,6 @@ templates = {
     'debugger-subagent': load_template('debugger-subagent'),
 }
 
-# MCP configs — CLI-driven isolation, no .mcp.json files
-MCP_CONFIGS = {
-    'baseline': json.dumps({"mcpServers": {}}),
-    'debugger': json.dumps({"mcpServers": {"cog": {"command": cog_bin, "args": ["mcp"]}}}),
-    'debugger-lite': json.dumps({"mcpServers": {"cog": {"command": cog_bin, "args": ["mcp", "--debug-tools=core"]}}}),
-    'debugger-subagent': json.dumps({"mcpServers": {"cog": {"command": cog_bin, "args": ["mcp", "--debug-tools=core"]}}}),
-}
-
 print(f"Tasks:    {len(tasks)}")
 print(f"Variants: {' '.join(variants)}")
 print(f"Timeout:  {timeout}s per task")
@@ -110,22 +102,53 @@ print("")
 def build_prompt(task, variant):
     """Build prompt from template with task field substitution."""
     template = templates[variant]
-    fail_to_pass = task.get('FAIL_TO_PASS', [])
+
+    # Support both Pro (lowercase) and Lite (uppercase) field names
+    fail_to_pass = task.get('fail_to_pass', task.get('FAIL_TO_PASS', []))
     if isinstance(fail_to_pass, list):
         fail_str = '\n'.join(f'- {t}' for t in fail_to_pass)
     else:
         fail_str = str(fail_to_pass)
+
+    container_name = f"swebench-{task['instance_id']}"
+    selected_tests = task.get('selected_test_files_to_run', '')
 
     return template.format(
         repo=task['repo'],
         instance_id=task['instance_id'],
         problem_statement=task['problem_statement'],
         fail_to_pass=fail_str,
+        container_name=container_name,
+        selected_test_files=selected_tests,
     )
 
 
-def reset_workspace(task_dir):
-    """Reset workspace to swebench-base state."""
+def build_mcp_config(task, variant):
+    """Build per-task MCP config with Docker environment."""
+    if variant == 'baseline':
+        return json.dumps({"mcpServers": {}})
+
+    task_dir = os.path.join(workspace, task['instance_id'])
+    bin_path = os.path.join(task_dir, '.bench', 'bin')
+    container_name = f"swebench-{task['instance_id']}"
+    system_path = os.environ.get('PATH', '')
+
+    args = ["mcp"]
+    if variant in ('debugger-lite', 'debugger-subagent'):
+        args.append("--debug-tools=core")
+
+    return json.dumps({"mcpServers": {"cog": {
+        "command": cog_bin,
+        "args": args,
+        "env": {
+            "PATH": bin_path + ":" + system_path,
+            "SWEBENCH_CONTAINER": container_name,
+        }
+    }}})
+
+
+def reset_workspace(task_dir, task):
+    """Reset workspace to swebench-base state and ensure container is running."""
     try:
         subprocess.run(
             ['git', 'checkout', 'swebench-base'],
@@ -139,6 +162,21 @@ def reset_workspace(task_dir):
             ['git', 'clean', '-fd'],
             cwd=task_dir, capture_output=True, timeout=10
         )
+    except Exception:
+        pass
+
+    # Ensure container is running
+    container_name = f"swebench-{task['instance_id']}"
+    try:
+        proc = subprocess.run(
+            ['docker', 'inspect', '-f', '{{.State.Running}}', container_name],
+            capture_output=True, text=True, timeout=10
+        )
+        if proc.stdout.strip() != 'true':
+            subprocess.run(
+                ['docker', 'start', container_name],
+                capture_output=True, timeout=30
+            )
     except Exception:
         pass
 
@@ -200,15 +238,20 @@ for variant in variants:
                 pass
 
         # Reset workspace
-        reset_workspace(task_dir)
+        reset_workspace(task_dir, task)
 
         print(f"\n  run  [{i+1}/{len(tasks)}] {instance_id}-{variant}", flush=True)
         start = time.time()
 
-        # Build prompt
+        # Build prompt and per-task MCP config
         prompt = build_prompt(task, variant)
+        mcp_config = build_mcp_config(task, variant)
 
         log_file = os.path.join(logs_dir, f'{instance_id}-{variant}.jsonl')
+
+        # Set up environment with Docker wrapper PATH
+        container_name = f"swebench-{instance_id}"
+        bin_path = os.path.join(task_dir, '.bench', 'bin')
 
         try:
             cmd = [
@@ -218,9 +261,11 @@ for variant in variants:
                 '--model', 'opus',
                 '--dangerously-skip-permissions',
                 '--strict-mcp-config',
-                '--mcp-config', MCP_CONFIGS[variant],
+                '--mcp-config', mcp_config,
             ]
             env = {k: v for k, v in os.environ.items() if k not in ('CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT')}
+            env['SWEBENCH_CONTAINER'] = container_name
+            env['PATH'] = bin_path + ':' + env.get('PATH', '')
 
             # Stream output live: write to log file and parse in real-time
             cost = 0
@@ -391,7 +436,7 @@ for variant in variants:
             print(f"       FAIL: {e}", flush=True)
 
         # Reset workspace for next run
-        reset_workspace(task_dir)
+        reset_workspace(task_dir, task)
 
 print(f"\n{'='*50}")
 print(f"  {completed}/{total} runs completed")

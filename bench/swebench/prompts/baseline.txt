@@ -2,6 +2,18 @@ You are diagnosing and fixing a real bug in the {repo} repository (instance: {in
 
 The repository is checked out in the current directory at the buggy commit. A test patch has been applied that adds failing tests which expose the bug.
 
+## Test Execution
+
+All tests run inside a Docker container. Use this pattern for ALL test/Python commands:
+
+    docker exec {container_name} <command>
+
+Examples:
+- `docker exec {container_name} python -m pytest {selected_test_files} -xvs`
+- `docker exec {container_name} python -m pytest tests/test_foo.py::TestBar::test_method -xvs`
+
+Do NOT run pytest or python directly — always use `docker exec {container_name}`.
+
 ## Problem Statement
 
 {problem_statement}

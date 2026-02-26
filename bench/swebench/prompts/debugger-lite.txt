@@ -8,6 +8,18 @@ You MUST use the cog debugger MCP tools to diagnose this bug. Do NOT skip the de
 
 You have exactly 6 debug tools available. Use only these tools.
 
+## Test Execution
+
+All tests run inside a Docker container. Use this pattern for ALL test/Python commands:
+
+    docker exec {container_name} <command>
+
+Examples:
+- `docker exec {container_name} python -m pytest {selected_test_files} -xvs`
+- `docker exec {container_name} python -m pytest tests/test_foo.py::TestBar::test_method -xvs`
+
+Do NOT run pytest or python directly — always use `docker exec {container_name}`.
+
 ## Problem Statement
 
 {problem_statement}
