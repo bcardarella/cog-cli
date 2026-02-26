@@ -163,10 +163,10 @@ For complex debugging (multiple breakpoints, stepping through loops, deep call s
 - **When to delegate**: Multi-step investigations, high-iteration loops, deep call stacks, or when your context window is getting large
 - **When NOT to delegate**: Single breakpoint-and-inspect, quick variable check — use `cog_debug_inspect` directly
 
-Invoke the `cog-debug` agent by name, or use the Task tool:
+Invoke the `cog-debug` agent via the Task tool. It has access only to the 6 core debug tools, Read, and Bash:
 
 ```
-Task(prompt="Debug subagent: Using cog_debug tools, answer: What is the value of X at file.py:42 when test_foo runs? Return only observed values, no diagnosis.", subagent_type="general-purpose")
+Task(prompt="QUESTION: What is the value of X at file.py:42 when test_foo runs?\nTEST: pytest tests/test_foo.py::test_foo -xvs", subagent_type="cog-debug")
 ```
 
 You must formulate your hypothesis and question BEFORE delegating. The subagent answers questions — it does not diagnose bugs.

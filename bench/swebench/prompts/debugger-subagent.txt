@@ -35,26 +35,14 @@ Formulate a specific question for the debug subagent. The question must be answe
 - Under what test (how to trigger the code path)
 
 ### Phase 4: Delegate
-Use the Task tool to spawn a debug subagent. Use exactly this pattern:
+Use the Task tool to spawn the `cog-debug` subagent. This agent has access only to the 6 core debug tools, Read, and Bash — it cannot edit files or run other tools. Use exactly this pattern:
 
 ```
 Task(
-  prompt="You are a debug subagent. Answer this question using the cog debugger MCP tools.
+  prompt="QUESTION: <your specific question about runtime state>
 
-  QUESTION: <your specific question about runtime state>
-
-  TEST: <the pytest/test runner command to run>
-
-  Follow this sequence:
-  1. cog_debug_launch — start a debug session for the test
-  2. cog_debug_breakpoint — set breakpoint at the location in the question
-  3. cog_debug_run(action='continue') — run to the breakpoint
-  4. cog_debug_inspect — evaluate each expression asked about
-  5. cog_debug_stop — end the session
-
-  Return ONLY: file:line where stopped, exact values observed, whether exception active.
-  Do NOT suggest fixes. Keep answer under 200 words.",
-  subagent_type="general-purpose"
+  TEST: <the pytest/test runner command to run>",
+  subagent_type="cog-debug"
 )
 ```
 
@@ -64,24 +52,13 @@ Task(
 - If refuted: form a NEW hypothesis (state it explicitly), return to Phase 3.
 - **Max 3 delegations.** If 3 delegations haven't found the root cause, stop and reason from the evidence gathered.
 
-## Launching the debugger (tell your subagent)
+## Launching the debugger
 
-First check how the project runs tests. Look for `runtests.py`, `manage.py`, `tox.ini`, or similar. Include the launch approach in your delegation prompt:
+The `cog-debug` subagent knows the launch → breakpoint → run → inspect → stop sequence. Your TEST field just needs to specify how to run the test. First check how the project runs tests — look for `runtests.py`, `manage.py`, `tox.ini`, or similar.
 
-**Standard pytest projects:**
-```
-cog_debug_launch(module="pytest", args=["tests/test_file.py::test_name", "-xvs"])
-```
-
-**Django** — use the project's test runner script:
-```
-cog_debug_launch(program="tests/runtests.py", args=["--settings=test_sqlite", "test_module"], cwd="/path/to/repo")
-```
-
-**Custom test scripts:**
-```
-cog_debug_launch(program="path/to/test_script.py", args=[...])
-```
+**Standard pytest:** `TEST: pytest tests/test_file.py::test_name -xvs`
+**Django:** `TEST: python tests/runtests.py --settings=test_sqlite test_module`
+**Custom:** `TEST: python path/to/test_script.py`
 
 ## Example
 
@@ -90,9 +67,13 @@ Hypothesis: "parse_datetime returns None because the regex doesn't match
 ISO 8601 format with timezone offset '+05:30'."
 
 Delegation:
-  QUESTION: What is the return value of `_lazy_re_compile(...).match(value)`
-  at line 52 of django/utils/dateparse.py when value='2023-01-01T12:00:00+05:30'?
-  TEST: pytest tests/utils_tests/test_dateparse.py::DateParseTests::test_parse_datetime -xvs
+  Task(
+    prompt="QUESTION: What is the return value of `_lazy_re_compile(...).match(value)`
+    at line 52 of django/utils/dateparse.py when value='2023-01-01T12:00:00+05:30'?
+
+    TEST: pytest tests/utils_tests/test_dateparse.py::DateParseTests::test_parse_datetime -xvs",
+    subagent_type="cog-debug"
+  )
 
 Subagent answer: "Stopped at dateparse.py:52. match_result = None. No exception."
 
@@ -102,7 +83,7 @@ The regex pattern needs to accept colon-separated timezone offsets.
 
 ## Anti-Patterns
 
-- Do NOT call cog_debug tools directly — always delegate via Task
+- Do NOT call cog_debug tools directly — always delegate via the cog-debug subagent
 - Do NOT delegate without a hypothesis — aimless queries waste tokens
 - Do NOT ask vague questions like "what's happening?" — ask "what is X at line Y?"
 - Do NOT include more than one question per delegation — keep the subagent focused
