@@ -457,6 +457,9 @@ pub const DebugServer = struct {
     dashboard_available: bool = true,
     /// Timestamp of last failed dashboard connection attempt (for backoff)
     last_dashboard_attempt: i64 = 0,
+    /// Serializes tool dispatch so the session map and session state are safely
+    /// accessed from handler threads. Released during blocking runEx() calls.
+    mutex: std.Thread.Mutex = .{},
 
     pub fn init(allocator: std.mem.Allocator) DebugServer {
         return .{
@@ -478,6 +481,8 @@ pub const DebugServer = struct {
     /// Dispatch a tool call and return the raw result.
     /// Used by the daemon socket transport.
     pub fn callTool(self: *DebugServer, allocator: std.mem.Allocator, tool_name: []const u8, tool_args: ?json.Value) !ToolResult {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         serverLog("[DebugServer.callTool] Dispatching tool: {s}", .{tool_name});
         if (std.mem.eql(u8, tool_name, "cog_debug_launch")) {
             serverLog("[DebugServer.callTool] -> toolLaunch", .{});
