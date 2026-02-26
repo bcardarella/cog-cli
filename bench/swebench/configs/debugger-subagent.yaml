@@ -129,5 +129,7 @@ instances:
     # SWE-bench Pro images already have Python; skip standalone install
     # (null gets overridden to /root by SWE-agent; empty string disables it)
     python_standalone_dir: ""
+    # SWE-bench Pro images are amd64; needed for Apple Silicon hosts
+    platform: linux/amd64
 
 num_workers: 1
