@@ -13,10 +13,18 @@ echo "  SWE-bench Pro Benchmark Setup"
 echo "═══════════════════════════════════════"
 echo ""
 
-# ── Generate tasks.json if missing ───────────────────────────────────────
+# ── Generate tasks.json if missing or stale (Lite format) ────────────────
 
+needs_generate=false
 if [[ ! -f "$TASKS_JSON" ]]; then
-  echo "tasks.json not found, generating..."
+  needs_generate=true
+elif ! python3 -c "import json,sys; t=json.load(open('$TASKS_JSON')); sys.exit(0 if t and 'dockerhub_tag' in t[0] else 1)" 2>/dev/null; then
+  echo "Detected old SWE-bench Lite tasks.json, regenerating for Pro..."
+  needs_generate=true
+fi
+
+if $needs_generate; then
+  echo "Generating tasks.json from SWE-bench Pro..."
   echo ""
   pip install --quiet datasets 2>/dev/null
   python3 "$SCRIPT_DIR/select_tasks_pro.py"
