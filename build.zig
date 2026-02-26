@@ -234,6 +234,7 @@ fn addRelease(
     release_options.addOption([]const u8, "version", version);
     release_options.addOption([]const u8, "prompt_md", @embedFile("priv/prompts/PROMPT.md"));
     release_options.addOption([]const u8, "agent_body", @embedFile("priv/agents/cog-code-query.md"));
+    release_options.addOption([]const u8, "debug_agent_body", @embedFile("priv/agents/cog-debug.md"));
     const release_options_mod = release_options.createModule();
 
     release_mod.addImport("build_options", release_options_mod);
