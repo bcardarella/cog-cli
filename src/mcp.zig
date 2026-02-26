@@ -27,6 +27,8 @@ const RemoteTool = struct {
     input_schema: []const u8, // raw JSON string
 };
 
+const ToolTier = debug_server_mod.ToolTier;
+
 const Runtime = struct {
     allocator: std.mem.Allocator,
     mem_config: ?Config,
@@ -35,8 +37,9 @@ const Runtime = struct {
     remote_tools: ?[]RemoteTool = null,
     mcp_session_id: ?[]const u8 = null,
     watcher: ?watcher_mod.Watcher = null,
+    debug_tool_tier: ToolTier = .specialist,
 
-    fn init(allocator: std.mem.Allocator) Runtime {
+    fn init(allocator: std.mem.Allocator, debug_tool_tier: ToolTier) Runtime {
         return .{
             .allocator = allocator,
             .mem_config = Config.load(allocator) catch null,
@@ -45,6 +48,7 @@ const Runtime = struct {
             .remote_tools = null,
             .mcp_session_id = null,
             .watcher = watcher_mod.Watcher.init(allocator),
+            .debug_tool_tier = debug_tool_tier,
         };
     }
 
@@ -102,9 +106,24 @@ const Runtime = struct {
     }
 };
 
-pub fn serve(allocator: std.mem.Allocator, version: []const u8) !void {
+pub fn serve(allocator: std.mem.Allocator, version: []const u8, args: []const [:0]const u8) !void {
     server_version = version;
     shutdown_requested.store(false, .release);
+
+    // Parse MCP-specific CLI flags
+    var debug_tool_tier: ToolTier = .specialist; // default: expose all tools
+    for (args) |arg| {
+        if (std.mem.startsWith(u8, arg, "--debug-tools=")) {
+            const val = arg["--debug-tools=".len..];
+            if (std.mem.eql(u8, val, "core")) {
+                debug_tool_tier = .core;
+            } else if (std.mem.eql(u8, val, "extended")) {
+                debug_tool_tier = .extended;
+            } else if (std.mem.eql(u8, val, "all")) {
+                debug_tool_tier = .specialist;
+            }
+        }
+    }
 
     // On macOS, ensure debug entitlements are active for task_for_pid().
     // Sign the binary and re-exec so the kernel grants the entitlement.
@@ -121,7 +140,7 @@ pub fn serve(allocator: std.mem.Allocator, version: []const u8) !void {
     debugLogInit();
     setupSignalHandler();
 
-    var runtime = Runtime.init(allocator);
+    var runtime = Runtime.init(allocator, debug_tool_tier);
     // Start the watcher thread AFTER runtime is in its final stack location.
     // The thread captures a pointer to runtime.watcher, so it must not move.
     if (runtime.watcher != null) {
@@ -900,7 +919,9 @@ fn writeToolCatalog(runtime: *Runtime, allocator: std.mem.Allocator, s: *Stringi
     }
 
     for (debug_server_mod.tool_definitions) |tool| {
-        try writeToolDefWithSchemaJson(allocator, s, tool.name, tool.description, tool.input_schema);
+        if (tool.tier.isWithin(runtime.debug_tool_tier)) {
+            try writeToolDefWithSchemaJson(allocator, s, tool.name, tool.description, tool.input_schema);
+        }
     }
 }
 

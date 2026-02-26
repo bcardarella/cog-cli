@@ -66,41 +66,87 @@ pub fn errorMessage(err: anyerror) []const u8 {
 // ── Tool Definitions ────────────────────────────────────────────────────
 
 pub const tool_definitions = [_]ToolDef{
+    // ── Core tier (7 tools) ─────────────────────────────────────────────
     .{
         .name = "cog_debug_launch",
         .description = "Start a new debug session by launching a program. Returns a session_id used by all other debug tools. The program is paused before execution begins if stop_on_entry is true, otherwise it runs until a breakpoint is hit or it exits.",
         .input_schema = debug_launch_schema,
+        .tier = .core,
     },
     .{
         .name = "cog_debug_breakpoint",
         .description = "Manage breakpoints in a debug session. Use action 'set' for line breakpoints (requires file + line), 'set_function' for function-name breakpoints (requires function), 'set_exception' for exception breakpoints (use filters to specify exception types, e.g. [\"raised\"] or [\"uncaught\"]), 'remove' to delete a breakpoint by id, 'list' to show all active breakpoints.",
         .input_schema = debug_breakpoint_schema,
+        .tier = .core,
     },
     .{
         .name = "cog_debug_run",
         .description = "Control program execution. Actions: 'continue' resumes until next breakpoint or exit, 'step_over' executes current line and stops at next line, 'step_into' enters function calls, 'step_out' runs until current function returns, 'pause' suspends a running program, 'restart' re-runs from the beginning, 'goto' jumps to a specific file:line (use with file and line params).",
         .input_schema = debug_run_schema,
+        .tier = .core,
     },
     .{
         .name = "cog_debug_inspect",
         .description = "Evaluate expressions or inspect variables. To evaluate an expression, pass 'expression' (e.g. \"x + y\", \"len(items)\"). To list variables in a scope, pass 'scope' (locals, globals, or arguments). To expand a compound variable (object, array, struct), pass the 'variable_ref' number from a previous inspect result. Use 'frame_id' to inspect a specific stack frame (default: topmost).",
         .input_schema = debug_inspect_schema,
+        .tier = .core,
     },
     .{
         .name = "cog_debug_stop",
         .description = "End a debug session and terminate the debuggee process. Always call this when done debugging to clean up resources.",
         .input_schema = debug_stop_schema,
-    },
-    .{
-        .name = "cog_debug_threads",
-        .description = "List all threads in the debuggee process with their IDs and names. Use thread IDs with stacktrace to inspect specific threads.",
-        .input_schema = debug_threads_schema,
+        .tier = .core,
     },
     .{
         .name = "cog_debug_stacktrace",
         .description = "Get the call stack for a thread, showing the chain of function calls that led to the current execution point. Each frame includes a frame_id, function name, file path, and line number. Use frame_id with inspect to examine variables in a specific frame.",
         .input_schema = debug_stacktrace_schema,
+        .tier = .core,
     },
+    .{
+        .name = "cog_debug_sessions",
+        .description = "List all active debug sessions with their IDs and status. Use to find session_id values or check if a previous session is still alive.",
+        .input_schema = debug_sessions_schema,
+        .tier = .core,
+    },
+    // ── Extended tier (6 tools) ─────────────────────────────────────────
+    .{
+        .name = "cog_debug_threads",
+        .description = "List all threads in the debuggee process with their IDs and names. Use thread IDs with stacktrace to inspect specific threads.",
+        .input_schema = debug_threads_schema,
+        .tier = .extended,
+    },
+    .{
+        .name = "cog_debug_attach",
+        .description = "Attach the debugger to an already-running process by its PID. Returns a session_id for use with other debug tools. The process is paused upon attach.",
+        .input_schema = debug_attach_schema,
+        .tier = .extended,
+    },
+    .{
+        .name = "cog_debug_set_variable",
+        .description = "Modify a variable's value at runtime in the current scope. Use for testing hypotheses during debugging (e.g. \"what if this value were 0?\"). The change is temporary and only affects the running process.",
+        .input_schema = debug_set_variable_schema,
+        .tier = .extended,
+    },
+    .{
+        .name = "cog_debug_watchpoint",
+        .description = "Set a data breakpoint that pauses execution when a variable is read, written, or both. Useful for finding where a value gets unexpectedly changed.",
+        .input_schema = debug_watchpoint_schema,
+        .tier = .extended,
+    },
+    .{
+        .name = "cog_debug_exception_info",
+        .description = "Get details about the exception that caused the program to stop, including the exception type, message, and full stack trace. Call this when the program stops at an exception breakpoint.",
+        .input_schema = debug_exception_info_schema,
+        .tier = .extended,
+    },
+    .{
+        .name = "cog_debug_restart",
+        .description = "Restart the entire debug session from the beginning, re-launching the program with the same arguments and breakpoints.",
+        .input_schema = debug_restart_schema,
+        .tier = .extended,
+    },
+    // ── Specialist tier (23 tools) ──────────────────────────────────────
     .{
         .name = "cog_debug_memory",
         .description = "Read or write raw process memory at a hex address. Use action 'read' with address and size to read bytes, 'write' with address and hex data string to write bytes.",
@@ -112,24 +158,9 @@ pub const tool_definitions = [_]ToolDef{
         .input_schema = debug_disassemble_schema,
     },
     .{
-        .name = "cog_debug_attach",
-        .description = "Attach the debugger to an already-running process by its PID. Returns a session_id for use with other debug tools. The process is paused upon attach.",
-        .input_schema = debug_attach_schema,
-    },
-    .{
-        .name = "cog_debug_set_variable",
-        .description = "Modify a variable's value at runtime in the current scope. Use for testing hypotheses during debugging (e.g. \"what if this value were 0?\"). The change is temporary and only affects the running process.",
-        .input_schema = debug_set_variable_schema,
-    },
-    .{
         .name = "cog_debug_scopes",
         .description = "List the variable scopes (locals, globals, arguments) available in a stack frame. Returns scope names and variable reference IDs. Pass a variable_ref to inspect to expand and view the variables within each scope.",
         .input_schema = debug_scopes_schema,
-    },
-    .{
-        .name = "cog_debug_watchpoint",
-        .description = "Set a data breakpoint that pauses execution when a variable is read, written, or both. Useful for finding where a value gets unexpectedly changed.",
-        .input_schema = debug_watchpoint_schema,
     },
     .{
         .name = "cog_debug_capabilities",
@@ -167,11 +198,6 @@ pub const tool_definitions = [_]ToolDef{
         .input_schema = debug_restart_frame_schema,
     },
     .{
-        .name = "cog_debug_exception_info",
-        .description = "Get details about the exception that caused the program to stop, including the exception type, message, and full stack trace. Call this when the program stops at an exception breakpoint.",
-        .input_schema = debug_exception_info_schema,
-    },
-    .{
         .name = "cog_debug_registers",
         .description = "Read CPU register values (native engine only, not available for DAP sessions). Returns register names and their current values.",
         .input_schema = debug_registers_schema,
@@ -200,16 +226,6 @@ pub const tool_definitions = [_]ToolDef{
         .name = "cog_debug_terminate_threads",
         .description = "Terminate specific threads by their IDs while keeping the debug session alive.",
         .input_schema = debug_terminate_threads_schema,
-    },
-    .{
-        .name = "cog_debug_restart",
-        .description = "Restart the entire debug session from the beginning, re-launching the program with the same arguments and breakpoints.",
-        .input_schema = debug_restart_schema,
-    },
-    .{
-        .name = "cog_debug_sessions",
-        .description = "List all active debug sessions with their IDs and status. Use to find session_id values or check if a previous session is still alive.",
-        .input_schema = debug_sessions_schema,
     },
     .{
         .name = "cog_debug_goto_targets",
@@ -248,10 +264,28 @@ pub const tool_definitions = [_]ToolDef{
     },
 };
 
+pub const ToolTier = enum {
+    /// Core tools: launch, breakpoint, run, inspect, stacktrace, stop, sessions.
+    /// These cover 95% of debugging workflows.
+    core,
+    /// Extended tools: threads, watchpoint, set_variable, exception_info, attach, restart.
+    /// Useful for multi-threaded debugging and hypothesis testing.
+    extended,
+    /// Specialist tools: memory, disassemble, registers, etc.
+    /// Low-level or rarely needed by AI agents.
+    specialist,
+
+    /// Returns true if self is at or below the given tier threshold.
+    pub fn isWithin(self: ToolTier, threshold: ToolTier) bool {
+        return @intFromEnum(self) <= @intFromEnum(threshold);
+    }
+};
+
 const ToolDef = struct {
     name: []const u8,
     description: []const u8,
     input_schema: []const u8,
+    tier: ToolTier = .specialist,
 };
 
 pub const debug_launch_schema =
@@ -2611,6 +2645,34 @@ test "tool_definitions has 36 entries" {
     try std.testing.expectEqual(@as(usize, 36), tool_definitions.len);
 }
 
+test "tool tier counts" {
+    var core: usize = 0;
+    var extended: usize = 0;
+    var specialist: usize = 0;
+    for (tool_definitions) |tool| {
+        switch (tool.tier) {
+            .core => core += 1,
+            .extended => extended += 1,
+            .specialist => specialist += 1,
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 7), core);
+    try std.testing.expectEqual(@as(usize, 6), extended);
+    try std.testing.expectEqual(@as(usize, 23), specialist);
+}
+
+test "ToolTier.isWithin" {
+    try std.testing.expect(ToolTier.core.isWithin(.core));
+    try std.testing.expect(ToolTier.core.isWithin(.extended));
+    try std.testing.expect(ToolTier.core.isWithin(.specialist));
+    try std.testing.expect(!ToolTier.extended.isWithin(.core));
+    try std.testing.expect(ToolTier.extended.isWithin(.extended));
+    try std.testing.expect(ToolTier.extended.isWithin(.specialist));
+    try std.testing.expect(!ToolTier.specialist.isWithin(.core));
+    try std.testing.expect(!ToolTier.specialist.isWithin(.extended));
+    try std.testing.expect(ToolTier.specialist.isWithin(.specialist));
+}
+
 test "callTool returns error for unknown tool" {
     const allocator = std.testing.allocator;
     var srv = DebugServer.init(allocator);
@@ -2647,15 +2709,18 @@ test "callTool dispatches debug_stop" {
     }
 }
 
-test "tool schema for debug_launch has required program field" {
+test "tool schema for debug_launch has program and module fields" {
     const schema = try json.parseFromSlice(json.Value, std.testing.allocator, debug_launch_schema, .{});
     defer schema.deinit();
     const obj = schema.value.object;
 
     try std.testing.expectEqualStrings("object", obj.get("type").?.string);
-    const required = obj.get("required").?.array;
-    try std.testing.expectEqual(@as(usize, 1), required.items.len);
-    try std.testing.expectEqualStrings("program", required.items[0].string);
+    const props = obj.get("properties").?.object;
+    // Both program and module should be defined (either can be used)
+    try std.testing.expect(props.get("program") != null);
+    try std.testing.expect(props.get("module") != null);
+    // No required array — either program or module suffices
+    try std.testing.expect(obj.get("required") == null);
 }
 
 test "tool schema for debug_run has required session_id and action" {
