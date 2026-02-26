@@ -1,99 +1,98 @@
 #!/usr/bin/env bash
 # Collect SWE-bench benchmark results and inline into dashboard.html
+#
+# Reads SWE-agent trajectory metadata and evaluation results,
+# produces a JavaScript data object inlined into dashboard.html.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BENCH_DIR="$SCRIPT_DIR/.bench"
 RESULTS_DIR="$SCRIPT_DIR/results"
+PREDICTIONS_DIR="$SCRIPT_DIR/predictions"
+TRAJECTORIES_DIR="$SCRIPT_DIR/trajectories"
 DASHBOARD="$SCRIPT_DIR/dashboard.html"
 TASKS_JSON="$SCRIPT_DIR/tasks.json"
 
-if [[ ! -d "$BENCH_DIR" ]]; then
-  echo "No .bench/ directory found. Run some benchmarks first."
+if [[ ! -f "$TASKS_JSON" ]]; then
+  echo "No tasks.json found. Run setup.sh first."
   exit 1
 fi
 
-count=$(find "$BENCH_DIR" -name '*.json' -type f 2>/dev/null | wc -l | tr -d ' ')
-if [[ "$count" -eq 0 ]]; then
-  echo "No result files found in .bench/"
-  exit 1
-fi
-
-echo "Found $count result files in .bench/"
-
-# Check for SWE-bench evaluation results
-for variant in baseline debugger debugger-lite debugger-subagent; do
+# Check for results
+has_results=false
+for variant in baseline debugger-subagent; do
   report="$RESULTS_DIR/$variant/results.json"
   if [[ -f "$report" ]]; then
-    echo "Found SWE-bench eval results for $variant"
+    echo "Found evaluation results for $variant"
+    has_results=true
   fi
 done
+
+if ! $has_results; then
+  echo "No evaluation results found. Run evaluate.sh first."
+  exit 1
+fi
 
 # Build the inline script block
 INLINE_SCRIPT=$(python3 -c "
 import json, glob, os, sys
 
-bench_dir = '$BENCH_DIR'
 results_dir = '$RESULTS_DIR'
+predictions_dir = '$PREDICTIONS_DIR'
+trajectories_dir = '$TRAJECTORIES_DIR'
 tasks_json = '$TASKS_JSON'
 
-ALL_VARIANTS = ['baseline', 'debugger', 'debugger-lite', 'debugger-subagent']
-DEBUG_VARIANTS = ['debugger', 'debugger-lite', 'debugger-subagent']
+ALL_VARIANTS = ['baseline', 'debugger-subagent']
 
 # Load task definitions
 with open(tasks_json) as f:
     tasks = json.load(f)
 
-# Load run metrics from .bench/
-metrics = {}
-for f_path in sorted(glob.glob(os.path.join(bench_dir, '*.json'))):
-    try:
-        with open(f_path) as fh:
-            data = json.load(fh)
-        key = (data.get('instance_id', ''), data.get('variant', ''))
-        if key[0] and key[1]:
-            metrics[key] = data
-    except Exception as e:
-        print(f'  warning: skipping {f_path}: {e}', file=sys.stderr)
-
 # Load SWE-bench evaluation results (resolved instance IDs)
-resolved = {}  # variant -> set of resolved instance_ids
+resolved = {}
 for variant in ALL_VARIANTS:
     resolved[variant] = set()
-    # Try multiple result file locations
     for fname in ['results.json', 'report.json']:
         report_path = os.path.join(results_dir, variant, fname)
         if os.path.exists(report_path):
             try:
                 with open(report_path) as fh:
                     report = json.load(fh)
-                # SWE-bench format: {\"resolved\": [...instance_ids...]}
                 if isinstance(report, dict):
                     for iid in report.get('resolved', []):
                         resolved[variant].add(iid)
             except Exception as e:
                 print(f'  warning: could not parse {report_path}: {e}', file=sys.stderr)
 
-def build_variant_data(m, is_resolved, is_debug=False):
-    \"\"\"Build per-task data for a variant from its metrics dict.\"\"\"
-    d = {
-        'cost_usd': m.get('cost_usd', 0),
-        'duration_ms': m.get('duration_ms', 0),
-        'num_turns': m.get('num_turns', 0),
-        'input_tokens': m.get('input_tokens', 0),
-        'output_tokens': m.get('output_tokens', 0),
-        'has_patch': m.get('has_patch', False),
-        'patch_size': m.get('patch_size', 0),
-        'resolved': is_resolved,
-        'timeout': m.get('timeout', False),
-    }
-    if is_debug:
-        d['debug_tool_calls'] = m.get('debug_tool_calls', 0)
-        d['sessions_launched'] = m.get('sessions_launched', 0)
-        d['breakpoints_set'] = m.get('breakpoints_set', 0)
-        d['conditional_breakpoints'] = m.get('conditional_breakpoints', 0)
-        d['task_delegations'] = m.get('task_delegations', 0)
-    return d
+# Load prediction counts
+pred_counts = {}
+for variant in ALL_VARIANTS:
+    pred_path = os.path.join(predictions_dir, f'{variant}.jsonl')
+    if os.path.exists(pred_path):
+        with open(pred_path) as f:
+            pred_counts[variant] = sum(1 for line in f if line.strip())
+    else:
+        pred_counts[variant] = 0
+
+# Try to extract cost/token info from SWE-agent trajectory metadata
+trajectory_meta = {}  # (instance_id, variant) -> {cost, tokens, ...}
+for variant in ALL_VARIANTS:
+    variant_dir = os.path.join(trajectories_dir, variant)
+    if not os.path.isdir(variant_dir):
+        continue
+    # SWE-agent trajectory dirs: output_dir/{instance_id}/
+    for instance_dir in sorted(glob.glob(os.path.join(variant_dir, '*', ''))):
+        iid = os.path.basename(os.path.normpath(instance_dir))
+        # Look for info in .pred file or trajectory logs
+        pred_file = os.path.join(instance_dir, f'{iid}.pred')
+        if os.path.exists(pred_file):
+            try:
+                with open(pred_file) as fh:
+                    pred = json.load(fh)
+                trajectory_meta[(iid, variant)] = {
+                    'has_patch': bool(pred.get('model_patch', '')),
+                }
+            except Exception:
+                pass
 
 # Build per-task results
 task_results = []
@@ -101,93 +100,48 @@ for task in tasks:
     iid = task['instance_id']
     repo = task['repo']
 
-    baseline = metrics.get((iid, 'baseline'), {})
-    debugger = metrics.get((iid, 'debugger'), {})
-    debugger_lite = metrics.get((iid, 'debugger-lite'), {})
-    debugger_subagent = metrics.get((iid, 'debugger-subagent'), {})
-
     entry = {
         'instance_id': iid,
         'repo': repo,
-        'baseline': build_variant_data(baseline, iid in resolved['baseline']),
-        'debugger': build_variant_data(debugger, iid in resolved['debugger'], is_debug=True),
-        'debugger_lite': build_variant_data(debugger_lite, iid in resolved['debugger-lite'], is_debug=True),
-        'debugger_subagent': build_variant_data(debugger_subagent, iid in resolved['debugger-subagent'], is_debug=True),
     }
+    for variant in ALL_VARIANTS:
+        vkey = variant.replace('-', '_')
+        is_resolved = iid in resolved[variant]
+        meta = trajectory_meta.get((iid, variant), {})
+        entry[vkey] = {
+            'resolved': is_resolved,
+            'has_patch': meta.get('has_patch', False),
+        }
     task_results.append(entry)
 
 # Compute aggregates per variant
 def aggregate(tasks, key):
-    ran = sum(1 for t in tasks if t[key]['cost_usd'] > 0 or t[key].get('timeout'))
-    resolved_count = sum(1 for t in tasks if t[key]['resolved'])
-    total_tokens = sum(t[key]['input_tokens'] + t[key]['output_tokens'] for t in tasks)
-    total_cost = sum(t[key]['cost_usd'] for t in tasks)
-    return ran, resolved_count, total_tokens, total_cost
+    ran = pred_counts.get(key.replace('_', '-'), 0)
+    resolved_count = sum(1 for t in tasks if t[key.replace('-', '_')]['resolved'])
+    return ran, resolved_count
 
-b_ran, b_resolved_count, b_total_tokens, b_total_cost = aggregate(task_results, 'baseline')
-d_ran, d_resolved_count, d_total_tokens, d_total_cost = aggregate(task_results, 'debugger')
-dl_ran, dl_resolved_count, dl_total_tokens, dl_total_cost = aggregate(task_results, 'debugger_lite')
-ds_ran, ds_resolved_count, ds_total_tokens, ds_total_cost = aggregate(task_results, 'debugger_subagent')
+b_ran, b_resolved = aggregate(task_results, 'baseline')
+ds_ran, ds_resolved = aggregate(task_results, 'debugger-subagent')
 
-# Debugger advantage: tasks resolved by debugger but not baseline
-advantage = sum(1 for t in task_results if t['debugger']['resolved'] and not t['baseline']['resolved'])
-disadvantage = sum(1 for t in task_results if t['baseline']['resolved'] and not t['debugger']['resolved'])
-dl_advantage = sum(1 for t in task_results if t['debugger_lite']['resolved'] and not t['baseline']['resolved'])
-dl_disadvantage = sum(1 for t in task_results if t['baseline']['resolved'] and not t['debugger_lite']['resolved'])
-ds_advantage = sum(1 for t in task_results if t['debugger_subagent']['resolved'] and not t['baseline']['resolved'])
-ds_disadvantage = sum(1 for t in task_results if t['baseline']['resolved'] and not t['debugger_subagent']['resolved'])
-
-d_used_tools = sum(1 for t in task_results if t['debugger'].get('debug_tool_calls', 0) > 0)
-d_no_tools = sum(1 for t in task_results if t['debugger']['cost_usd'] > 0 and t['debugger'].get('debug_tool_calls', 0) == 0)
-dl_used_tools = sum(1 for t in task_results if t['debugger_lite'].get('debug_tool_calls', 0) > 0)
-dl_no_tools = sum(1 for t in task_results if t['debugger_lite']['cost_usd'] > 0 and t['debugger_lite'].get('debug_tool_calls', 0) == 0)
-ds_used_delegations = sum(1 for t in task_results if t['debugger_subagent'].get('task_delegations', 0) > 0)
-ds_no_delegations = sum(1 for t in task_results if t['debugger_subagent']['cost_usd'] > 0 and t['debugger_subagent'].get('task_delegations', 0) == 0)
+# Debugger-subagent advantage: resolved by subagent but not baseline
+advantage = sum(1 for t in task_results if t['debugger_subagent']['resolved'] and not t['baseline']['resolved'])
+disadvantage = sum(1 for t in task_results if t['baseline']['resolved'] and not t['debugger_subagent']['resolved'])
 
 data = {
     'total_tasks': len(tasks),
     'baseline_ran': b_ran,
-    'debugger_ran': d_ran,
-    'debugger_lite_ran': dl_ran,
     'debugger_subagent_ran': ds_ran,
-    'baseline_resolved': b_resolved_count,
-    'debugger_resolved': d_resolved_count,
-    'debugger_lite_resolved': dl_resolved_count,
-    'debugger_subagent_resolved': ds_resolved_count,
-    'debugger_advantage': advantage,
-    'debugger_disadvantage': disadvantage,
-    'debugger_lite_advantage': dl_advantage,
-    'debugger_lite_disadvantage': dl_disadvantage,
-    'debugger_subagent_advantage': ds_advantage,
-    'debugger_subagent_disadvantage': ds_disadvantage,
-    'baseline_total_tokens': b_total_tokens,
-    'debugger_total_tokens': d_total_tokens,
-    'debugger_lite_total_tokens': dl_total_tokens,
-    'debugger_subagent_total_tokens': ds_total_tokens,
-    'baseline_total_cost': round(b_total_cost, 2),
-    'debugger_total_cost': round(d_total_cost, 2),
-    'debugger_lite_total_cost': round(dl_total_cost, 2),
-    'debugger_subagent_total_cost': round(ds_total_cost, 2),
-    'debugger_used_tools': d_used_tools,
-    'debugger_no_tools': d_no_tools,
-    'debugger_lite_used_tools': dl_used_tools,
-    'debugger_lite_no_tools': dl_no_tools,
-    'debugger_subagent_used_delegations': ds_used_delegations,
-    'debugger_subagent_no_delegations': ds_no_delegations,
+    'baseline_resolved': b_resolved,
+    'debugger_subagent_resolved': ds_resolved,
+    'debugger_subagent_advantage': advantage,
+    'debugger_subagent_disadvantage': disadvantage,
     'tasks': task_results,
 }
 
 print('const SWEBENCH_DATA = ' + json.dumps(data, indent=2) + ';')
-print(f'Collected {len(task_results)} tasks ({b_ran} baseline, {d_ran} debugger, {dl_ran} debugger-lite, {ds_ran} debugger-subagent runs)', file=sys.stderr)
-print(f'Resolved: baseline={b_resolved_count}, debugger={d_resolved_count}, debugger-lite={dl_resolved_count}, debugger-subagent={ds_resolved_count}', file=sys.stderr)
-print(f'Debugger advantage: +{advantage}/-{disadvantage}  Debugger-lite: +{dl_advantage}/-{dl_disadvantage}  Subagent: +{ds_advantage}/-{ds_disadvantage}', file=sys.stderr)
-print(f'Debugger tool usage: {d_used_tools} used, {d_no_tools} skipped  |  Lite: {dl_used_tools} used, {dl_no_tools} skipped  |  Subagent delegations: {ds_used_delegations} used, {ds_no_delegations} skipped', file=sys.stderr)
-if d_no_tools > 0:
-    print(f'WARNING: {d_no_tools} debugger runs completed without using any cog_debug tools', file=sys.stderr)
-if dl_no_tools > 0:
-    print(f'WARNING: {dl_no_tools} debugger-lite runs completed without using any cog_debug tools', file=sys.stderr)
-if ds_no_delegations > 0:
-    print(f'WARNING: {ds_no_delegations} debugger-subagent runs completed without any Task delegations', file=sys.stderr)
+print(f'Collected {len(task_results)} tasks ({b_ran} baseline, {ds_ran} debugger-subagent runs)', file=sys.stderr)
+print(f'Resolved: baseline={b_resolved}, debugger-subagent={ds_resolved}', file=sys.stderr)
+print(f'Advantage: +{advantage}/-{disadvantage}', file=sys.stderr)
 ")
 
 # Replace the data block between markers in dashboard.html
@@ -211,5 +165,5 @@ with open('$DASHBOARD', 'w') as f:
     f.write(new_html)
 PYEOF
 
-echo "Inlined $count results into $DASHBOARD"
+echo "Inlined results into $DASHBOARD"
 echo "Open $DASHBOARD to view"
