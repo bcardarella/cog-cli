@@ -1,0 +1,74 @@
+# SWE-agent baseline config: stock Claude Opus with standard tools, no cog_debug
+#
+# Usage:
+#   sweagent run-batch --config bench/swebench/configs/baseline.yaml \
+#     --instances.type file --instances.path bench/swebench/tasks_sweagent.jsonl
+
+agent:
+  type: default
+  templates:
+    system_template: |
+      SETTING: You are an autonomous programmer tasked with solving a GitHub issue inside a Docker container.
+      You have access to a bash shell and a file editor. You can run any bash command and edit files.
+      The repository is cloned in /testbed. You should navigate there and work on fixing the issue.
+
+      IMPORTANT TIPS:
+      1. Always start by understanding the issue and reproducing the bug.
+      2. Explore the repository structure to find relevant files.
+      3. Run the failing test(s) first to see the exact error.
+      4. Make minimal changes to fix the bug — do not refactor or add features.
+      5. Verify your fix by re-running the failing tests.
+      6. Only modify source files, never test files.
+      7. When you are done, use the `submit` command to submit your patch.
+
+    instance_template: |
+      We are currently solving the following issue within the **{{repo_name}}** repository.
+
+      Here is the issue:
+      <issue>
+      {{problem_statement}}
+      </issue>
+
+      INSTRUCTIONS:
+      1. Explore the repository to understand the codebase.
+      2. Reproduce the bug by running relevant tests.
+      3. Find the root cause and implement a minimal fix.
+      4. Verify the fix passes the failing tests.
+      5. Submit your changes with the `submit` command.
+
+    next_step_template: |
+      {{observation}}
+
+    next_step_no_output_template: |
+      Your command ran successfully and produced no output.
+
+  tools:
+    bundles:
+      - path: tools/registry
+      - path: tools/edit_anthropic
+      - path: tools/submit
+    enable_bash_tool: true
+    parse_function:
+      type: function_calling
+    env_variables:
+      PAGER: cat
+      TQDM_DISABLE: "1"
+    execution_timeout: 300
+
+  model:
+    name: claude-opus-4-20250514
+    per_instance_cost_limit: 3.00
+    total_cost_limit: 0
+    temperature: 0.0
+
+  history_processors:
+    - type: cache_control
+      last_n_messages: 2
+
+instances:
+  type: file
+  path: tasks_sweagent.jsonl
+  deployment:
+    type: docker
+
+num_workers: 1
