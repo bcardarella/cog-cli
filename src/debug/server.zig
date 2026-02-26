@@ -2198,7 +2198,7 @@ pub const DebugServer = struct {
                 if (!std.mem.eql(u8, entry.key_ptr.*, filter)) continue;
             }
 
-            const session = entry.value_ptr;
+            const session = entry.value_ptr.*;
 
             // Check for completed async run
             if (session.pending_run) |*pr| {

@@ -51,13 +51,13 @@ pub const Session = struct {
 };
 
 pub const SessionManager = struct {
-    sessions: std.StringHashMap(Session),
+    sessions: std.StringHashMap(*Session),
     next_id: u64 = 1,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) SessionManager {
         return .{
-            .sessions = std.StringHashMap(Session).init(allocator),
+            .sessions = std.StringHashMap(*Session).init(allocator),
             .allocator = allocator,
         };
     }
@@ -65,14 +65,16 @@ pub const SessionManager = struct {
     pub fn deinit(self: *SessionManager) void {
         var iter = self.sessions.iterator();
         while (iter.next()) |entry| {
+            const session = entry.value_ptr.*;
             // Join any pending background run thread before destroying
-            if (entry.value_ptr.pending_run) |*pr| {
+            if (session.pending_run) |*pr| {
                 pr.thread.join();
                 pr.deinit();
-                entry.value_ptr.pending_run = null;
+                session.pending_run = null;
             }
-            entry.value_ptr.driver.deinit();
+            session.driver.deinit();
             self.allocator.free(entry.key_ptr.*);
+            self.allocator.destroy(session);
         }
         self.sessions.deinit();
     }
@@ -84,27 +86,31 @@ pub const SessionManager = struct {
         const id = try std.fmt.allocPrint(self.allocator, "session-{d}", .{id_num});
         errdefer self.allocator.free(id);
 
-        try self.sessions.put(id, .{
+        const session = try self.allocator.create(Session);
+        session.* = .{
             .id = id,
             .driver = driver,
             .status = .launching,
             .owner_pid = owner_pid,
             .orphan_action = orphan_action,
             .last_activity = std.time.milliTimestamp(),
-        });
+        };
+        errdefer self.allocator.destroy(session);
+
+        try self.sessions.put(id, session);
 
         return id;
     }
 
     pub fn getSession(self: *SessionManager, id: []const u8) ?*Session {
-        const session = self.sessions.getPtr(id) orelse return null;
+        const session = self.sessions.get(id) orelse return null;
         session.last_activity = std.time.milliTimestamp();
         return session;
     }
 
     pub fn destroySession(self: *SessionManager, id: []const u8) bool {
         if (self.sessions.fetchRemove(id)) |kv| {
-            var session = kv.value;
+            const session = kv.value;
             // Join any pending background run thread before destroying
             if (session.pending_run) |*pr| {
                 pr.thread.join();
@@ -113,6 +119,7 @@ pub const SessionManager = struct {
             }
             session.driver.deinit();
             self.allocator.free(kv.key);
+            self.allocator.destroy(session);
             return true;
         }
         return false;
@@ -134,10 +141,11 @@ pub const SessionManager = struct {
 
         var iter = self.sessions.iterator();
         while (iter.next()) |entry| {
+            const session = entry.value_ptr.*;
             try result.append(allocator, .{
                 .id = entry.key_ptr.*,
-                .status = entry.value_ptr.status,
-                .driver_type = entry.value_ptr.driver.driver_type,
+                .status = session.status,
+                .driver_type = session.driver.driver_type,
             });
         }
         return try result.toOwnedSlice(allocator);
@@ -232,7 +240,7 @@ test "createSession initializes last_activity to recent timestamp" {
     // Access via iterator to avoid getSession updating the timestamp
     var iter = mgr.sessions.iterator();
     const session = while (iter.next()) |entry| {
-        if (std.mem.eql(u8, entry.key_ptr.*, id)) break entry.value_ptr;
+        if (std.mem.eql(u8, entry.key_ptr.*, id)) break entry.value_ptr.*;
     } else null;
 
     try std.testing.expect(session != null);
@@ -252,7 +260,7 @@ test "getSession updates last_activity" {
     const initial_ts = blk: {
         var iter = mgr.sessions.iterator();
         break :blk while (iter.next()) |entry| {
-            if (std.mem.eql(u8, entry.key_ptr.*, id)) break entry.value_ptr.last_activity;
+            if (std.mem.eql(u8, entry.key_ptr.*, id)) break entry.value_ptr.*.last_activity;
         } else 0;
     };
 
