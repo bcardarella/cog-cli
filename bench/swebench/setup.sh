@@ -220,11 +220,9 @@ tools:
   - mcp__cog__cog_debug_inspect
   - mcp__cog__cog_debug_stacktrace
   - mcp__cog__cog_debug_stop
-  - Read
-  - Bash
 mcpServers:
   - cog
-maxTurns: 15
+maxTurns: 6
 ---
 """
     debug_agent_body_path = os.path.join(script_dir, '..', '..', 'priv', 'agents', 'cog-debug.md')
