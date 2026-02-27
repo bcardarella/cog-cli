@@ -25,6 +25,10 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
 
+# Ensure SWE-agent's trajectories directory exists (it asserts on import)
+swe_agent_dir = os.path.join(script_dir, "SWE-agent")
+os.makedirs(os.path.join(swe_agent_dir, "trajectories"), exist_ok=True)
+
 # ── Patch 1: Faster swe-rex install for containers without swerex-remote ───
 #
 # SWE-bench Pro images don't have swerex-remote pre-installed. The default
@@ -42,26 +46,20 @@ def _patched_get_swerex_start_cmd(self, token):
     if self._config.python_standalone_dir:
         # Standalone Python path — use original logic
         return _original_get_swerex_start_cmd(self, token)
-    # SWE-bench Pro images have several issues:
-    # 1. swerex-remote is not pre-installed
-    # 2. pip is configured to use a local PyPI mirror (127.0.0.1:9876)
+    # Try swerex-remote directly, fall back to pip install + run.
+    # SWE-bench Pro images have two issues:
+    # 1. pip is configured to use a local PyPI mirror (127.0.0.1:9876)
     #    that doesn't exist outside the evaluation harness
-    # 3. Some images have Python 3.9 but swe-rex requires >=3.10
-    #
-    # Strategy: try fast paths first, fall back to uv which can
-    # download its own Python 3.11 for old-Python images.
+    # 2. Some images have old pip (20.x) that installs swe-rex 0.0.0
+    #    (placeholder) instead of the real package
+    # Fix: override index URL and upgrade pip before installing.
     pypi = "https://pypi.org/simple/"
     cmd = (
-        # 1. Try swerex-remote directly (pre-installed)
         f"{REMOTE_EXECUTABLE_NAME} {rex_args} || "
-        # 2. Try pip install (works for Python >=3.10)
-        f"(python3 -m pip install --index-url {pypi} -q {PACKAGE_NAME} "
-        f"&& {REMOTE_EXECUTABLE_NAME} {rex_args}) || "
-        # 3. Use uv with managed Python 3.11 (works for any Python)
-        f"(curl -LsSf https://astral.sh/uv/install.sh | "
-        f"INSTALLER_NO_MODIFY_PATH=1 sh "
-        f"&& ~/.local/bin/uvx --python 3.11 --from {PACKAGE_NAME} "
-        f"{REMOTE_EXECUTABLE_NAME} {rex_args})"
+        f"(python3 -m pip install --index-url {pypi} -q --upgrade pip "
+        f"&& python3 -m pip install --index-url {pypi} -q {PACKAGE_NAME} "
+        f"&& hash -r "
+        f"&& {REMOTE_EXECUTABLE_NAME} {rex_args})"
     )
     return ["/bin/bash", "-c", cmd]
 
