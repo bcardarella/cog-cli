@@ -54,12 +54,15 @@ def _patched_get_swerex_start_cmd(self, token):
     #    (placeholder) instead of the real package
     # Fix: override index URL and upgrade pip before installing.
     pypi = "https://pypi.org/simple/"
+    # After pip install, the swerex-remote entry-point script may not be on
+    # PATH (e.g. installed to /usr/local/bin but PATH doesn't include it).
+    # Use `python3 -m swerex` as the fallback — it calls swerex.server:main
+    # directly and doesn't depend on PATH.
     cmd = (
         f"{REMOTE_EXECUTABLE_NAME} {rex_args} || "
         f"(python3 -m pip install --index-url {pypi} -q --upgrade pip "
         f"&& python3 -m pip install --index-url {pypi} -q {PACKAGE_NAME} "
-        f"&& hash -r "
-        f"&& {REMOTE_EXECUTABLE_NAME} {rex_args})"
+        f"&& python3 -m swerex {rex_args})"
     )
     return ["/bin/bash", "-c", cmd]
 
