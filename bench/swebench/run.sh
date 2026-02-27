@@ -11,6 +11,7 @@
 #   bash bench/swebench/run.sh baseline 2       # baseline only, first 2 tasks
 #   bash bench/swebench/run.sh debugger-subagent 5 2  # debugger, 5 tasks, 2 workers
 #   bash bench/swebench/run.sh --clean debugger-subagent 2  # clean run, no cached trajectories
+#   bash bench/swebench/run.sh --seed 7 debugger-subagent 5  # randomize task order with seed 7
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -20,10 +21,16 @@ COG_BIN="$ROOT_DIR/zig-out/bin/cog"
 TASKS_JSONL="$SCRIPT_DIR/tasks_sweagent.jsonl"
 
 CLEAN=false
-if [[ "${1:-}" == "--clean" ]]; then
-  CLEAN=true
-  shift
-fi
+SEED=""
+
+# Parse flags (order-independent, before positional args)
+while [[ "${1:-}" == --* ]]; do
+  case "$1" in
+    --clean) CLEAN=true; shift ;;
+    --seed)  SEED="$2"; shift 2 ;;
+    *) echo "ERROR: Unknown flag '$1'"; exit 1 ;;
+  esac
+done
 
 VARIANT_ARG="${1:-all}"
 MAX_TASKS="${2:-0}"
@@ -40,6 +47,7 @@ echo ""
 echo "  Variant:     $VARIANT_ARG"
 echo "  Max tasks:   ${MAX_TASKS:-all}"
 echo "  Workers:     $NUM_WORKERS"
+echo "  Seed:        ${SEED:-none}"
 echo ""
 
 # ── Validate ────────────────────────────────────────────────────────────
@@ -66,14 +74,29 @@ fi
 
 mkdir -p "$PREDICTIONS_DIR"
 
-# ── Prepare instance file (optionally sliced) ──────────────────────────
+# ── Prepare instance file (optionally shuffled and/or sliced) ─────────
 
 INSTANCE_FILE="$TASKS_JSONL"
-if [[ "$MAX_TASKS" -gt 0 ]]; then
+
+if [[ -n "$SEED" || "$MAX_TASKS" -gt 0 ]]; then
   INSTANCE_FILE="$SCRIPT_DIR/.tasks_sliced.jsonl"
-  head -n "$MAX_TASKS" "$TASKS_JSONL" > "$INSTANCE_FILE"
+  if [[ -n "$SEED" ]]; then
+    # Shuffle with deterministic seed, then optionally slice
+    python3 -c "
+import random, sys
+lines = open(sys.argv[1]).readlines()
+random.seed(int(sys.argv[2]))
+random.shuffle(lines)
+limit = int(sys.argv[3])
+if limit > 0:
+    lines = lines[:limit]
+sys.stdout.writelines(lines)
+" "$TASKS_JSONL" "$SEED" "$MAX_TASKS" > "$INSTANCE_FILE"
+  else
+    head -n "$MAX_TASKS" "$TASKS_JSONL" > "$INSTANCE_FILE"
+  fi
   task_count=$(wc -l < "$INSTANCE_FILE" | tr -d ' ')
-  echo "Sliced to $task_count tasks"
+  echo "Sliced to $task_count tasks (seed=${SEED:-none})"
   echo ""
 fi
 
