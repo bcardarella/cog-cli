@@ -868,14 +868,12 @@ You have these tools (and ONLY these — no bash, no local commands):
 
 {self._TEST_COMMAND_PARSING_GUIDE.format(test_cmd=test_cmd)}
 
-## Error Handling
+## CRITICAL CONSTRAINTS
 
-- If launch fails, try adjusting: check cwd exists, try module vs program, check env vars.
-- Always call cog_debug_stop before finishing, even if earlier steps failed.
-- Always end with a text response summarizing results.
-
-## Rules
-
+- You have a budget of exactly **5 tool calls**: launch, breakpoint, run, inspect(s), stop. Do NOT exceed this.
+- **NEVER launch more than one debug session.** One launch, one attempt. If the breakpoint is not hit, report that and stop.
+- If stop_reason is "exited", call cog_debug_stop and write: "BREAKPOINT NOT HIT — exit_code: <N>". Do NOT retry.
+- **ALWAYS call cog_debug_stop** before your final text response, even if earlier steps failed.
 - ONLY use MCP tools. No bash, no local commands.
 - NEVER pass "python" or "python3" as the program argument.
 - ALWAYS use frame_id=0 for inspect calls.
@@ -958,14 +956,16 @@ Control flow summary:
 
 {self._TEST_COMMAND_PARSING_GUIDE.format(test_cmd=test_cmd)}
 
-## Rules
+## CRITICAL CONSTRAINTS
 
+- **NEVER launch more than one debug session.** One launch, one attempt. If the breakpoint is not hit, report that and stop.
+- If stop_reason is "exited" after continue, call cog_debug_stop and write: "BREAKPOINT NOT HIT — exit_code: <N>". Do NOT retry.
+- **ALWAYS call cog_debug_stop** before your final text response, even if earlier steps failed.
 - ONLY use MCP tools. No bash, no local commands.
 - NEVER pass "python" or "python3" as the program argument.
 - ALWAYS use frame_id=0 for inspect calls.
 - Maximum 25 steps. Stop early if the function returns (step_out).
 - If an expression cannot be evaluated at a step (out of scope), note "N/A".
-- Always call cog_debug_stop before finishing, even on failure.
 - CRITICAL: You MUST end with a text response. NEVER end with only tool calls."""
 
     def _build_diagnose_prompt(
@@ -1036,15 +1036,17 @@ Your final text response MUST use this format:
 
 {self._TEST_COMMAND_PARSING_GUIDE.format(test_cmd=test_cmd)}
 
-## Rules
+## CRITICAL CONSTRAINTS
 
+- **ALWAYS call cog_debug_stop before launching a new session.** Never have two sessions open at once.
+- **ALWAYS call cog_debug_stop** before your final text response.
+- Budget: complete within **15 tool calls**. Do not exhaustively explore — focus on the most likely root cause.
 - ONLY use MCP tools. No bash, no local commands.
 - NEVER pass "python" or "python3" as the program argument.
-- You may set multiple breakpoints and restart the session if needed.
+- You may set multiple breakpoints within one session.
 - You may inspect variables at multiple stack frames.
 - You may step through code to understand control flow.
-- Always call cog_debug_stop before finishing, even on failure.
-- Budget: aim to complete within 15 tool calls. Do not exhaustively explore — focus on the most likely root cause.
+- If you need to restart, call cog_debug_stop FIRST, then launch a new session. Maximum 2 sessions total.
 - CRITICAL: You MUST end with a text response. NEVER end with only tool calls."""
 
     # ── Main Handler (mode-aware routing) ────────────────────────────────
