@@ -70,11 +70,15 @@ class CogDebugAgent(DefaultAgent):
             self._log("WARNING: could not discover container ID: %s", e)
             self._container_id = None
 
-        # Install debugpy in the container (required by cog MCP debug tools)
+        # Install debugpy in the container (required by cog MCP debug tools).
+        # Try pip first; fall back to uv pip for containers where uv-managed
+        # Python lacks pip (e.g. Python 3.9 images that needed uv for swerex).
         if self._container_id:
             try:
                 result = self._env.communicate(
                     "python3 -m pip install --index-url https://pypi.org/simple/ -q debugpy 2>&1"
+                    " || (command -v uv >/dev/null 2>&1 || (curl -LsSf https://astral.sh/uv/install.sh | INSTALLER_NO_MODIFY_PATH=1 sh))"
+                    " && ~/.local/bin/uv pip install --system debugpy 2>&1"
                 )
                 self._log("debugpy install output: %s", result.strip())
             except Exception as e:
