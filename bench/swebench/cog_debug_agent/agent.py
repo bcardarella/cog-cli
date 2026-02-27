@@ -360,6 +360,71 @@ class CogDebugAgent(DefaultAgent):
         logger.info(formatted)
         print(f"[CogDebugAgent] {formatted}", flush=True)
 
+    def _extract_subagent_output(self, stdout_content: str, mcp_log: str) -> str:
+        """Extract meaningful output from subagent, with JSON parsing and MCP log fallback.
+
+        The subagent runs with --output-format json. Try to extract text from
+        the JSON response first. If the model produced no text, fall back to
+        parsing the MCP log for cog_debug_run results.
+        """
+        # Try parsing JSON output from claude --output-format json
+        text_output = ""
+        if stdout_content:
+            try:
+                result = json.loads(stdout_content)
+                # JSON format: {"type":"result","subtype":"success","cost_usd":...,"result":"text",...}
+                text_output = result.get("result", "").strip()
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                # Not JSON — treat as plain text (shouldn't happen with --output-format json)
+                text_output = stdout_content.strip()
+
+        if text_output:
+            return text_output
+
+        # Fallback: extract result from MCP log
+        self._log("subagent produced no text output, falling back to MCP log")
+        fallback = self._extract_result_from_mcp_log(mcp_log)
+        if fallback:
+            return fallback
+
+        return "(subagent returned no output — check cog-mcp.log for details)"
+
+    @staticmethod
+    def _extract_result_from_mcp_log(mcp_log: str) -> str:
+        """Parse MCP log to extract cog_debug_run results as fallback output.
+
+        When the subagent model produces no text, we can still find what
+        happened by reading the MCP server's JSON-RPC responses.
+        """
+        if not mcp_log:
+            return ""
+        # Look for cog_debug_run result in the MCP log
+        # The log format includes lines like: [timestamp] [DebugServer.callTool] Result: {"stop_reason":"exited","exit_code":0}
+        # Also look for JSON-RPC response content
+        stop_reason = ""
+        exit_code = ""
+        for line in mcp_log.split("\n"):
+            if "stop_reason" in line:
+                # Try to extract JSON from the line
+                for segment in re.finditer(r'\{[^{}]*"stop_reason"[^{}]*\}', line):
+                    try:
+                        data = json.loads(segment.group())
+                        stop_reason = data.get("stop_reason", "")
+                        exit_code = data.get("exit_code", "")
+                        break
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+
+        if stop_reason == "exited":
+            return f"BREAKPOINT NOT HIT — exit_code: {exit_code}"
+        elif stop_reason == "breakpoint":
+            return "(breakpoint was hit but subagent did not report inspect results)"
+        elif stop_reason == "exception":
+            return f"Program raised an exception (stop_reason=exception)"
+        elif stop_reason:
+            return f"Unexpected stop_reason: {stop_reason}"
+        return ""
+
     @staticmethod
     def _strip_shell_operators(cmd: str) -> str:
         """Strip shell redirections and take only the first command from compound expressions.
@@ -529,6 +594,7 @@ RULES:
 - NEVER pass "python3" or "python" as the program argument.
 - ALWAYS use frame_id=0 for inspect calls. Do NOT try other frame IDs.
 - Do NOT call scope="locals". Only inspect the specific expressions listed below.
+- CRITICAL: You MUST end with a text response. NEVER end with only tool calls.
 
 Execute these steps IN ORDER:
 
@@ -544,13 +610,13 @@ Execute these steps IN ORDER:
 4. Check stop_reason from the result:
    - "breakpoint" → call ALL of these inspects IN A SINGLE PARALLEL TOOL CALL (do NOT call them one at a time):
 {inspect_calls_json}
-   - "exited" → report "BREAKPOINT NOT HIT" with the exit_code
-   - "exception" → report the exception text
-   - anything else → report the stop_reason
+   - "exited" → you MUST respond with text: "BREAKPOINT NOT HIT — exit_code: <N>"
+   - "exception" → you MUST respond with the exception text
+   - anything else → you MUST respond with the stop_reason
 
 5. cog_debug_stop with: session_id="session-1"
 
-Output ONLY the raw expression values. No analysis."""
+6. MANDATORY: Write a text response with the results. For breakpoint hits, output the raw expression values. For exits, output "BREAKPOINT NOT HIT — exit_code: <N>". NEVER skip this step."""
 
         if not self._container_id:
             step.observation = "ERROR: No Docker container discovered. Cannot run cog debug subagent."
@@ -587,6 +653,7 @@ Output ONLY the raw expression values. No analysis."""
                     [
                         "claude", "-p", subagent_prompt,
                         "--model", "claude-sonnet-4-6",
+                        "--output-format", "json",
                         "--dangerously-skip-permissions",
                         "--strict-mcp-config",
                         "--mcp-config", mcp_config_path,
@@ -628,7 +695,7 @@ Output ONLY the raw expression values. No analysis."""
                     f"Partial stderr: {stderr_content[:500]}"
                 )
             elif returncode == 0:
-                output = stdout_content or "(subagent returned no output)"
+                output = self._extract_subagent_output(stdout_content, new_mcp_log)
                 if stderr_content:
                     self._log("subagent OK — stderr: %s", stderr_content[:500])
                 if new_dap_log:
