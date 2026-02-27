@@ -3,8 +3,8 @@
 This agent subclasses SWE-agent's DefaultAgent. When the model calls the `cog_debug`
 tool, instead of executing it in the container (where it would fail), the agent:
 
-1. Extracts breakpoint/inspect/test/condition arguments
-2. Builds a subagent prompt
+1. Extracts mode/breakpoint/inspect/test/condition/question arguments
+2. Builds a mode-specific subagent prompt (inspect, trace, or diagnose)
 3. Creates a temporary python3 docker-exec wrapper for the current container
 4. Spawns `claude -p` with cog MCP config pointing to the container
 5. Returns the subagent's output as the tool observation
@@ -193,41 +193,39 @@ class CogDebugAgent(DefaultAgent):
         self._log("MCP config at %s", config_path)
 
     _COG_DEBUG_REMINDER = (
-        "\n\n[Reminder] You have `cog_debug` available — it evaluates any Python expression "
-        "at a breakpoint in one step. If you need runtime state (variable values, types, API "
-        "exploration), cog_debug is faster than writing and running a script."
+        "\n\n[Reminder] You have `cog_debug` available with three modes:\n"
+        "- **inspect**: evaluate expressions at a breakpoint (fastest for known locations)\n"
+        "- **trace**: step through a function to see how values evolve\n"
+        "- **diagnose**: investigate a test failure when you don't know where to look\n"
+        "Use cog_debug instead of writing scripts or using python3 -c."
     )
 
     _COG_DEBUG_VERIFY_REMINDER = (
-        "\n\n[Reminder] You can verify this fix with `cog_debug` using `condition` to target "
-        "the changed code path — one call confirms the fix without writing a test script. "
-        "Example: cog_debug breakpoint=\"file.py:line\" inspect=\"var, result\" "
-        "test=\"python -m pytest tests/... -xvs\" condition=\"your_new_param == 'value'\""
+        "\n\n[Reminder] You can verify this fix with `cog_debug` mode=\"inspect\" using "
+        "`condition` to target the changed code path — one call confirms the fix without "
+        "writing a test script."
     )
 
     _PYTHON_C_BLOCKED = (
         "python3 -c is not available. Use cog_debug to evaluate expressions "
         "at a breakpoint in the actual runtime context:\n\n"
-        "  cog_debug breakpoint=\"file.py:line\" "
+        "  cog_debug mode=\"inspect\" breakpoint=\"file.py:line\" "
         "inspect=[\"expr1\", \"expr2\"] "
         "test=\"python -m pytest tests/... -xvs\""
     )
 
     _SCRIPT_CREATE_REDIRECT = (
-        "Standalone debugging scripts are not allowed. Use cog_debug to inspect "
-        "runtime state at a breakpoint instead:\n\n"
-        "  cog_debug breakpoint=\"file.py:line\" "
-        "inspect=[\"expr1\", \"expr2\"] "
-        "test=\"python -m pytest tests/... -xvs\" "
-        "condition=\"your_condition\"\n\n"
+        "Standalone debugging scripts are not allowed. Use cog_debug instead:\n\n"
+        "  mode=\"inspect\" — evaluate expressions at a breakpoint\n"
+        "  mode=\"trace\"   — step through a function and track values\n"
+        "  mode=\"diagnose\" — investigate a test failure autonomously\n\n"
         "If you need a test that exercises a specific code path, create a proper "
         "pytest test file (with `def test_*` functions and assertions) — that is allowed."
     )
 
     _SCRIPT_RUN_BLOCKED = (
-        "Running custom scripts is not available. Use cog_debug to evaluate "
-        "expressions at a breakpoint instead:\n\n"
-        "  cog_debug breakpoint=\"file.py:line\" "
+        "Running custom scripts is not available. Use cog_debug instead:\n\n"
+        "  cog_debug mode=\"inspect\" breakpoint=\"file.py:line\" "
         "inspect=[\"expr1\", \"expr2\"] "
         "test=\"python -m pytest tests/... -xvs\""
     )
@@ -537,8 +535,6 @@ class CogDebugAgent(DefaultAgent):
         if not mcp_log:
             return ""
         # Look for cog_debug_run result in the MCP log
-        # The log format includes lines like: [timestamp] [DebugServer.callTool] Result: {"stop_reason":"exited","exit_code":0}
-        # Also look for JSON-RPC response content
         stop_reason = ""
         exit_code = ""
         for line in mcp_log.split("\n"):
@@ -567,8 +563,8 @@ class CogDebugAgent(DefaultAgent):
     _DISTILL_THRESHOLD = 500
 
     def _distill_subagent_output(
-        self, raw_output: str, breakpoint_loc: str,
-        inspect_exprs: list, test_cmd: str,
+        self, raw_output: str, mode: str, breakpoint_loc: str,
+        inspect_exprs: list, test_cmd: str, question: str,
     ) -> str:
         """Distill verbose subagent output to only what the primary agent needs.
 
@@ -582,28 +578,77 @@ class CogDebugAgent(DefaultAgent):
         if "BREAKPOINT NOT HIT" in raw_output:
             return raw_output
 
-        expr_bullets = "\n".join(f"  - {e}" for e in inspect_exprs)
-        prompt = (
-            "You are a post-processor for debugging output. Extract ONLY the "
-            "results — do not add commentary or explanation.\n\n"
-            f"Breakpoint: {breakpoint_loc}\n"
-            f"Test command: {test_cmd}\n"
-            f"Expressions requested:\n{expr_bullets}\n\n"
-            "From the raw output below, extract:\n"
-            "1. Whether the breakpoint was hit or not\n"
-            "2. The EXACT value of each expression (preserve verbatim — do not "
-            "paraphrase, truncate, or reformat values)\n"
-            "3. Any errors, exceptions, or unexpected behavior\n\n"
-            "Output format (use exactly, no extra text):\n"
-            "```\n"
-            "breakpoint: hit (or: not hit, exit_code=N)\n"
-            "<expression1> = <exact value>\n"
-            "<expression2> = <exact value>\n"
-            "...\n"
-            "[any errors or diagnostics on separate lines]\n"
-            "```\n\n"
-            f"Raw output:\n{raw_output}"
-        )
+        # Build mode-specific distillation prompt
+        if mode == "diagnose":
+            prompt = (
+                "You are a post-processor for debugging investigation output. Extract ONLY the "
+                "findings — do not add commentary.\n\n"
+                f"Test command: {test_cmd}\n"
+                f"Investigation question: {question}\n\n"
+                "From the raw output below, extract:\n"
+                "1. Root cause identified (or 'inconclusive')\n"
+                "2. Key runtime observations (variable values, control flow taken)\n"
+                "3. Specific file:line locations relevant to the bug\n"
+                "4. Suggested fix direction (if any)\n\n"
+                "Output format (use exactly, no extra text):\n"
+                "```\n"
+                "root_cause: <one-line summary>\n"
+                "observations:\n"
+                "  - <observation 1>\n"
+                "  - <observation 2>\n"
+                "locations: <file:line>, <file:line>\n"
+                "suggestion: <fix direction or 'none'>\n"
+                "```\n\n"
+                f"Raw output:\n{raw_output}"
+            )
+        elif mode == "trace":
+            expr_bullets = "\n".join(f"  - {e}" for e in inspect_exprs)
+            prompt = (
+                "You are a post-processor for execution trace output. Extract ONLY the "
+                "step-by-step trace — do not add commentary.\n\n"
+                f"Breakpoint: {breakpoint_loc}\n"
+                f"Test command: {test_cmd}\n"
+                f"Tracked expressions:\n{expr_bullets}\n\n"
+                "From the raw output below, extract:\n"
+                "1. The sequence of lines executed (file:line)\n"
+                "2. How each tracked expression changed at each step\n"
+                "3. Any branch decisions (which if/else path was taken)\n\n"
+                "Output format (use exactly, no extra text):\n"
+                "```\n"
+                "step 1: <file:line> — <function_name>\n"
+                "  <expr1> = <value>\n"
+                "  <expr2> = <value>\n"
+                "step 2: <file:line> — <function_name>\n"
+                "  <expr1> = <value> (changed)\n"
+                "...\n"
+                "[summary of control flow path taken]\n"
+                "```\n\n"
+                f"Raw output:\n{raw_output}"
+            )
+        else:
+            # inspect mode (default)
+            expr_bullets = "\n".join(f"  - {e}" for e in inspect_exprs)
+            prompt = (
+                "You are a post-processor for debugging output. Extract ONLY the "
+                "results — do not add commentary or explanation.\n\n"
+                f"Breakpoint: {breakpoint_loc}\n"
+                f"Test command: {test_cmd}\n"
+                f"Expressions requested:\n{expr_bullets}\n\n"
+                "From the raw output below, extract:\n"
+                "1. Whether the breakpoint was hit or not\n"
+                "2. The EXACT value of each expression (preserve verbatim — do not "
+                "paraphrase, truncate, or reformat values)\n"
+                "3. Any errors, exceptions, or unexpected behavior\n\n"
+                "Output format (use exactly, no extra text):\n"
+                "```\n"
+                "breakpoint: hit (or: not hit, exit_code=N)\n"
+                "<expression1> = <exact value>\n"
+                "<expression2> = <exact value>\n"
+                "...\n"
+                "[any errors or diagnostics on separate lines]\n"
+                "```\n\n"
+                f"Raw output:\n{raw_output}"
+            )
 
         try:
             env = {
@@ -623,7 +668,7 @@ class CogDebugAgent(DefaultAgent):
                 distilled = parsed.get("result", "").strip()
                 if distilled:
                     self._log(
-                        "distilled subagent output: %d chars → %d chars",
+                        "distilled subagent output: %d chars -> %d chars",
                         len(raw_output), len(distilled),
                     )
                     return distilled
@@ -660,11 +705,9 @@ class CogDebugAgent(DefaultAgent):
             sections.append("\n".join(header))
 
             # 2. Short test summary / FAILURES section
-            # Look for "FAILURES" or "short test summary"
             for marker in ["= FAILURES =", "short test summary", "ERRORS"]:
                 idx = obs.find(marker)
                 if idx >= 0:
-                    # Take up to 800 chars from this section
                     sections.append("...\n" + obs[idx:idx + 800])
                     break
 
@@ -674,7 +717,6 @@ class CogDebugAgent(DefaultAgent):
                 if stripped.startswith("AssertionError") or stripped.startswith("assert ") or "AssertionError" in stripped:
                     sections.append(f"Assertion: {stripped[:300]}")
                     break
-                # Also catch "E   assert" lines from pytest
                 if stripped.startswith("E ") and "assert" in stripped:
                     sections.append(f"Assertion: {stripped[:300]}")
                     break
@@ -687,7 +729,7 @@ class CogDebugAgent(DefaultAgent):
 
             result = "\n\n".join(sections)
             if len(result) < len(obs):
-                result += f"\n\n[Observation truncated: {len(obs)} → {len(result)} chars]"
+                result += f"\n\n[Observation truncated: {len(obs)} -> {len(result)} chars]"
             return result[:max_len]
 
         # Generic truncation: keep first and last portions
@@ -707,9 +749,9 @@ class CogDebugAgent(DefaultAgent):
 
         Parses the exit code from the observation and suggests specific next steps.
         """
-        # Extract exit code from observation text
         exit_code = None
-        m = re.search(r'exit_code:\s*(\d+)', observation)
+        # Match structured "exit_code: N" and prose "exit code N" / "exit code: N"
+        m = re.search(r'exit[_ ]code[:\s]+(\d+)', observation, re.IGNORECASE)
         if m:
             exit_code = int(m.group(1))
 
@@ -718,13 +760,11 @@ class CogDebugAgent(DefaultAgent):
         guidance = "\n\n**What to try next:**\n"
 
         if exit_code == 4:
-            # pytest "no tests collected"
             guidance += (
                 "- exit_code 4 = pytest found no matching tests. "
                 "The test name may not exist.\n"
             )
             if bp_file:
-                # Suggest discovering tests near the breakpoint file
                 test_dir = bp_file.rsplit("/", 1)[0] if "/" in bp_file else "."
                 guidance += (
                     f"- Run: `grep -rn 'def test_' /app/test/ | head -20` to find available test functions\n"
@@ -749,45 +789,53 @@ class CogDebugAgent(DefaultAgent):
 
         return guidance
 
-    def _handle_cog_debug(self, step: StepOutput) -> StepOutput:
-        """Execute cog_debug by spawning a Claude subagent with cog MCP."""
-        args = self._extract_cog_debug_args(step)
+    # ── Test Command Parsing Guide (shared across all subagent prompts) ───
 
-        breakpoint_loc = args.get("breakpoint", "")
-        inspect_exprs = args.get("inspect", [])
-        test_cmd = args.get("test", "")
-        condition = args.get("condition", "")
+    _TEST_COMMAND_PARSING_GUIDE = """## Test Command Parsing Guide
 
-        if not breakpoint_loc or not inspect_exprs or not test_cmd:
-            step.observation = (
-                "ERROR: cog_debug requires breakpoint, inspect, and test arguments. "
-                f"Got: breakpoint={breakpoint_loc!r}, inspect={inspect_exprs!r}, test={test_cmd!r}"
-            )
-            return step
+The test command is: `{test_cmd}`
 
-        # Try to read code context around the breakpoint for the subagent
-        code_snippet = ""
-        try:
-            if ":" in breakpoint_loc and self._container_id:
-                bp_file, bp_line_str = breakpoint_loc.rsplit(":", 1)
-                bp_line = int(bp_line_str)
-                start = max(1, bp_line - 5)
-                end = bp_line + 5
-                raw = self._env.communicate(
-                    f"sed -n '{start},{end}p' {shlex.quote(bp_file)}"
-                ).strip()
-                if raw:
-                    code_snippet = f"\nCode around {breakpoint_loc}:\n```python\n{raw}\n```\n"
-        except Exception:
-            pass  # nice-to-have, not required
+You need to parse it into cog_debug_launch arguments. Always set `language: "python"`.
 
+**Parsing rules:**
+- `cd /some/dir && <rest>` -> extract cwd="/some/dir", parse <rest>
+- `KEY=VALUE KEY2=VALUE2 <rest>` -> extract env={{"KEY": "VALUE", "KEY2": "VALUE2"}}, parse <rest>
+- `python -m module_name arg1 arg2` -> use module="module_name", args=["arg1", "arg2"]
+- `python script.py arg1` -> use program="script.py", args=["arg1"]
+- `pytest args...` -> use module="pytest", args=["args..."]
+- Strip shell operators: `2>/dev/null`, `|| ...`, `| ...` -- ignore everything after them
+- NEVER pass "python" or "python3" as the program -- extract what comes after it
+
+**Examples:**
+- `cd /app && python -m pytest tests/test_foo.py -xvs`
+  -> cwd="/app", module="pytest", args=["tests/test_foo.py", "-xvs"], language="python"
+- `ANSIBLE_ROLES_PATH=/app/roles python -m ansible.cli.playbook pb.yml`
+  -> env={{"ANSIBLE_ROLES_PATH": "/app/roles"}}, module="ansible.cli.playbook", args=["pb.yml"], language="python"
+- `python3 tests/test_it.py`
+  -> program="tests/test_it.py", args=[], language="python"
+- `cd /testbed && python -m pytest tests/unit/ -x 2>/dev/null`
+  -> cwd="/testbed", module="pytest", args=["tests/unit/", "-x"], language="python"
+"""
+
+    # ── Subagent Prompt Builders ──────────────────────────────────────────
+
+    def _build_inspect_prompt(
+        self, breakpoint_loc: str, inspect_exprs: list,
+        test_cmd: str, condition: str, code_snippet: str,
+    ) -> str:
+        """Build the subagent prompt for INSPECT mode.
+
+        Subagent behavior: Set one breakpoint, continue to it, evaluate all
+        expressions, stop. No stepping, no exploration. Deterministic 5-tool
+        workflow.
+        """
         condition_section = ""
         if condition:
             condition_section = f'\n- Breakpoint condition: `{condition}`'
 
         inspect_list = "\n".join(f"  - `{e}`" for e in inspect_exprs)
 
-        subagent_prompt = f"""You are an autonomous debugging agent. You have MCP tools that control a debugger (debugpy) inside a Docker container. Your goal is to inspect specific expressions at a breakpoint while running a test.
+        return f"""You are an autonomous debugging agent. You have MCP tools that control a debugger (debugpy) inside a Docker container. Your goal is to inspect specific expressions at a breakpoint while running a test.
 
 ## Goal
 
@@ -812,36 +860,13 @@ You have these tools (and ONLY these — no bash, no local commands):
 2. **Set breakpoint** at `{breakpoint_loc}` (split into file and line){' with condition `' + condition + '`' if condition else ''}
 3. **Run** with action="continue", timeout_ms=15000
 4. **Check stop_reason**:
-   - "breakpoint" → inspect ALL expressions (use frame_id=0 for all)
-   - "exited" → report "BREAKPOINT NOT HIT — exit_code: <N>"
-   - "exception" → report the exception text
+   - "breakpoint" -> inspect ALL expressions (use frame_id=0 for all)
+   - "exited" -> report "BREAKPOINT NOT HIT — exit_code: <N>"
+   - "exception" -> report the exception text
 5. **Stop** the session (always, even on failure)
 6. **Write a text response** with results
 
-## Test Command Parsing Guide
-
-The test command is: `{test_cmd}`
-
-You need to parse it into cog_debug_launch arguments. Always set `language: "python"`.
-
-**Parsing rules:**
-- `cd /some/dir && <rest>` → extract cwd="/some/dir", parse <rest>
-- `KEY=VALUE KEY2=VALUE2 <rest>` → extract env={{"KEY": "VALUE", "KEY2": "VALUE2"}}, parse <rest>
-- `python -m module_name arg1 arg2` → use module="module_name", args=["arg1", "arg2"]
-- `python script.py arg1` → use program="script.py", args=["arg1"]
-- `pytest args...` → use module="pytest", args=["args..."]
-- Strip shell operators: `2>/dev/null`, `|| ...`, `| ...` — ignore everything after them
-- NEVER pass "python" or "python3" as the program — extract what comes after it
-
-**Examples:**
-- `cd /app && python -m pytest tests/test_foo.py -xvs`
-  → cwd="/app", module="pytest", args=["tests/test_foo.py", "-xvs"], language="python"
-- `ANSIBLE_ROLES_PATH=/app/roles python -m ansible.cli.playbook pb.yml`
-  → env={{"ANSIBLE_ROLES_PATH": "/app/roles"}}, module="ansible.cli.playbook", args=["pb.yml"], language="python"
-- `python3 tests/test_it.py`
-  → program="tests/test_it.py", args=[], language="python"
-- `cd /testbed && python -m pytest tests/unit/ -x 2>/dev/null`
-  → cwd="/testbed", module="pytest", args=["tests/unit/", "-x"], language="python"
+{self._TEST_COMMAND_PARSING_GUIDE.format(test_cmd=test_cmd)}
 
 ## Error Handling
 
@@ -857,6 +882,244 @@ You need to parse it into cog_debug_launch arguments. Always set `language: "pyt
 - Do NOT call scope="locals". Only inspect the specific expressions listed.
 - CRITICAL: You MUST end with a text response. NEVER end with only tool calls."""
 
+    def _build_trace_prompt(
+        self, breakpoint_loc: str, inspect_exprs: list,
+        test_cmd: str, condition: str, code_snippet: str,
+    ) -> str:
+        """Build the subagent prompt for TRACE mode.
+
+        Subagent behavior: Set a breakpoint, continue to it, then step_over
+        line-by-line through the function. At each step, evaluate all tracked
+        expressions and record the file:line + values. Stop when step_out
+        returns to the caller or after 25 steps (whichever comes first).
+        Report the full trace.
+        """
+        condition_section = ""
+        if condition:
+            condition_section = f'\n- Breakpoint condition: `{condition}`'
+
+        tracked_list = "\n".join(f"  - `{e}`" for e in inspect_exprs)
+
+        return f"""You are an autonomous debugging agent. You have MCP tools that control a debugger (debugpy) inside a Docker container. Your goal is to step through code line-by-line and track how specific values evolve.
+
+## Goal
+
+Step through code starting at `{breakpoint_loc}` while running: `{test_cmd}`
+{condition_section}
+Track these expressions at each step:
+{tracked_list}
+{code_snippet}
+## Available MCP Tools
+
+You have these tools (and ONLY these — no bash, no local commands):
+
+1. **cog_debug_launch** — Start a debug session. Takes: program OR module, args (list), cwd, env (object), language.
+2. **cog_debug_breakpoint** — Set a breakpoint. Takes: session_id, file, line, condition (optional).
+3. **cog_debug_run** — Control execution. Takes: session_id, action (continue/step_over/step_into/step_out), timeout_ms.
+4. **cog_debug_inspect** — Evaluate an expression at the current stop. Takes: session_id, expression, frame_id.
+5. **cog_debug_stacktrace** — Get the call stack. Takes: session_id.
+6. **cog_debug_stop** — Stop the debug session. Takes: session_id.
+
+## Workflow
+
+1. **Launch** the debug session
+2. **Set breakpoint** at `{breakpoint_loc}`{' with condition `' + condition + '`' if condition else ''}
+3. **Run** with action="continue", timeout_ms=15000
+4. **If breakpoint hit**, begin stepping loop:
+   a. **stacktrace** — record current file:line and function name
+   b. **inspect** each tracked expression (frame_id=0)
+   c. **run** with action="step_over", timeout_ms=5000
+   d. **Check stop_reason**: if "exited" or step count >= 25, stop loop
+   e. Repeat from (a)
+5. **Stop** the session
+6. **Write a trace report** showing each step's location and expression values
+
+## Trace Report Format
+
+Your final text response MUST use this format:
+
+```
+Trace from {breakpoint_loc}:
+
+step 1: <file>:<line> — <function_name>
+  <expr1> = <value>
+  <expr2> = <value>
+
+step 2: <file>:<line> — <function_name>
+  <expr1> = <value>
+  <expr2> = <value> (changed from <old_value>)
+
+... (continue for each step)
+
+Control flow summary:
+  - <which branch/path was taken and why>
+  - <where the function returned or exited>
+```
+
+{self._TEST_COMMAND_PARSING_GUIDE.format(test_cmd=test_cmd)}
+
+## Rules
+
+- ONLY use MCP tools. No bash, no local commands.
+- NEVER pass "python" or "python3" as the program argument.
+- ALWAYS use frame_id=0 for inspect calls.
+- Maximum 25 steps. Stop early if the function returns (step_out).
+- If an expression cannot be evaluated at a step (out of scope), note "N/A".
+- Always call cog_debug_stop before finishing, even on failure.
+- CRITICAL: You MUST end with a text response. NEVER end with only tool calls."""
+
+    def _build_diagnose_prompt(
+        self, test_cmd: str, question: str,
+    ) -> str:
+        """Build the subagent prompt for DIAGNOSE mode.
+
+        Subagent behavior: Run the test with an exception breakpoint to catch
+        the failure, examine the call stack and local variables, then set
+        targeted breakpoints to trace the root cause. The subagent has more
+        autonomy: it can set multiple breakpoints, step, examine different
+        frames, and restart. It reports findings, not just raw values.
+        """
+        return f"""You are an autonomous debugging investigator. You have MCP tools that control a debugger (debugpy) inside a Docker container. Your goal is to investigate a test failure and report your findings.
+
+## Investigation Question
+
+{question}
+
+## Test Command
+
+`{test_cmd}`
+
+## Available MCP Tools
+
+You have these tools (and ONLY these — no bash, no local commands):
+
+1. **cog_debug_launch** — Start a debug session. Takes: program OR module, args (list), cwd, env (object), language.
+2. **cog_debug_breakpoint** — Set breakpoints. Takes: session_id, action (set/set_function/set_exception/remove/list), file, line, condition, function, filters.
+3. **cog_debug_run** — Control execution. Takes: session_id, action (continue/step_over/step_into/step_out), timeout_ms.
+4. **cog_debug_inspect** — Evaluate expressions or list variables. Takes: session_id, expression, scope (locals/globals), frame_id, variable_ref.
+5. **cog_debug_stacktrace** — Get the call stack. Takes: session_id, thread_id.
+6. **cog_debug_stop** — Stop the debug session. Takes: session_id.
+
+## Investigation Strategy
+
+You have full autonomy to debug. Suggested approach:
+
+1. **Launch** the debug session
+2. **Set an exception breakpoint** with action="set_exception", filters=["raised"] to catch the failure
+3. **Run** with action="continue", timeout_ms=30000
+4. **When the exception hits**:
+   a. **stacktrace** — see the full call chain
+   b. **inspect** locals at the failing frame (scope="locals", frame_id=0)
+   c. **inspect** locals at caller frames (frame_id=1, 2, ...) to trace where bad values originated
+   d. Evaluate specific expressions to test hypotheses
+5. If needed, **stop** and re-launch with targeted line breakpoints to observe values BEFORE the failure point
+6. **Stop** the session when investigation is complete
+7. **Write a findings report**
+
+## Findings Report Format
+
+Your final text response MUST use this format:
+
+```
+## Diagnosis
+
+**Root cause**: <one-sentence summary of why the test fails>
+
+**Evidence**:
+- At <file:line>: <variable> = <value> (expected: <expected>)
+- At <file:line>: <observation about control flow or state>
+
+**Call chain**: <function1> -> <function2> -> ... -> <failure point>
+
+**Suggested fix**: <specific guidance on what code to change and how>
+```
+
+{self._TEST_COMMAND_PARSING_GUIDE.format(test_cmd=test_cmd)}
+
+## Rules
+
+- ONLY use MCP tools. No bash, no local commands.
+- NEVER pass "python" or "python3" as the program argument.
+- You may set multiple breakpoints and restart the session if needed.
+- You may inspect variables at multiple stack frames.
+- You may step through code to understand control flow.
+- Always call cog_debug_stop before finishing, even on failure.
+- Budget: aim to complete within 15 tool calls. Do not exhaustively explore — focus on the most likely root cause.
+- CRITICAL: You MUST end with a text response. NEVER end with only tool calls."""
+
+    # ── Main Handler (mode-aware routing) ────────────────────────────────
+
+    def _handle_cog_debug(self, step: StepOutput) -> StepOutput:
+        """Execute cog_debug by spawning a Claude subagent with cog MCP."""
+        args = self._extract_cog_debug_args(step)
+
+        mode = args.get("mode", "inspect")
+        breakpoint_loc = args.get("breakpoint", "")
+        inspect_exprs = args.get("inspect", [])
+        test_cmd = args.get("test", "")
+        condition = args.get("condition", "")
+        question = args.get("question", "")
+
+        # Validate required arguments per mode
+        if mode == "inspect":
+            if not breakpoint_loc or not inspect_exprs or not test_cmd:
+                step.observation = (
+                    "ERROR: mode=\"inspect\" requires breakpoint, inspect, and test arguments. "
+                    f"Got: breakpoint={breakpoint_loc!r}, inspect={inspect_exprs!r}, test={test_cmd!r}"
+                )
+                return step
+        elif mode == "trace":
+            if not breakpoint_loc or not inspect_exprs or not test_cmd:
+                step.observation = (
+                    "ERROR: mode=\"trace\" requires breakpoint, inspect, and test arguments. "
+                    f"Got: breakpoint={breakpoint_loc!r}, inspect={inspect_exprs!r}, test={test_cmd!r}"
+                )
+                return step
+        elif mode == "diagnose":
+            if not test_cmd or not question:
+                step.observation = (
+                    "ERROR: mode=\"diagnose\" requires test and question arguments. "
+                    f"Got: test={test_cmd!r}, question={question!r}"
+                )
+                return step
+        else:
+            step.observation = (
+                f"ERROR: Unknown mode={mode!r}. Valid modes: inspect, trace, diagnose."
+            )
+            return step
+
+        # Try to read code context around the breakpoint for the subagent
+        code_snippet = ""
+        if breakpoint_loc:
+            try:
+                if ":" in breakpoint_loc and self._container_id:
+                    bp_file, bp_line_str = breakpoint_loc.rsplit(":", 1)
+                    bp_line = int(bp_line_str)
+                    start = max(1, bp_line - 5)
+                    end = bp_line + 5
+                    raw = self._env.communicate(
+                        f"sed -n '{start},{end}p' {shlex.quote(bp_file)}"
+                    ).strip()
+                    if raw:
+                        code_snippet = f"\nCode around {breakpoint_loc}:\n```python\n{raw}\n```\n"
+            except Exception:
+                pass  # nice-to-have, not required
+
+        # Build mode-specific subagent prompt
+        if mode == "trace":
+            subagent_prompt = self._build_trace_prompt(
+                breakpoint_loc, inspect_exprs, test_cmd, condition, code_snippet,
+            )
+            timeout = 120  # trace takes longer due to stepping loop
+        elif mode == "diagnose":
+            subagent_prompt = self._build_diagnose_prompt(test_cmd, question)
+            timeout = 120  # more exploration time
+        else:
+            subagent_prompt = self._build_inspect_prompt(
+                breakpoint_loc, inspect_exprs, test_cmd, condition, code_snippet,
+            )
+            timeout = 90
+
         if not self._container_id:
             step.observation = "ERROR: No Docker container discovered. Cannot run cog debug subagent."
             return step
@@ -864,8 +1127,8 @@ You need to parse it into cog_debug_launch arguments. Always set `language: "pyt
         mcp_config_path = str(Path(self._tmp_dir.name) / "mcp_config.json")
 
         self._log(
-            "spawning subagent — breakpoint=%s inspect=%s test=%s",
-            breakpoint_loc, inspect_exprs, test_cmd,
+            "spawning subagent — mode=%s breakpoint=%s inspect=%s test=%s question=%s",
+            mode, breakpoint_loc, inspect_exprs, test_cmd, question[:80] if question else "",
         )
 
         # Use file-based capture so output survives process kill on timeout
@@ -905,7 +1168,7 @@ You need to parse it into cog_debug_launch arguments. Always set `language: "pyt
                 )
 
                 try:
-                    returncode = proc.wait(timeout=90)
+                    returncode = proc.wait(timeout=timeout)
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.wait()
@@ -920,8 +1183,8 @@ You need to parse it into cog_debug_launch arguments. Always set `language: "pyt
             new_dap_log = self._read_log_tail(dap_log, dap_pos_before)
 
             if returncode is None:
-                # Timeout — dump everything for diagnosis
-                self._log("subagent TIMEOUT after 90s")
+                # Timeout
+                self._log("subagent TIMEOUT after %ds", timeout)
                 self._log("  stdout (%d bytes): %s", len(stdout_content), stdout_content[:1000] or "(empty)")
                 self._log("  stderr (%d bytes): %s", len(stderr_content), stderr_content[:1000] or "(empty)")
                 if new_mcp_log:
@@ -929,20 +1192,20 @@ You need to parse it into cog_debug_launch arguments. Always set `language: "pyt
                 if new_dap_log:
                     self._log("  cog-dap-debug.log (new): %s", new_dap_log[:2000])
                 step.observation = (
-                    f"[cog_debug timeout] Subagent timed out after 90s.\n"
+                    f"[cog_debug timeout] Subagent timed out after {timeout}s.\n"
                     f"Partial stdout: {stdout_content[:500]}\n"
                     f"Partial stderr: {stderr_content[:500]}"
                 )
             elif returncode == 0:
                 raw_output = self._extract_subagent_output(stdout_content, new_mcp_log)
                 output = self._distill_subagent_output(
-                    raw_output, breakpoint_loc, inspect_exprs, test_cmd,
+                    raw_output, mode, breakpoint_loc, inspect_exprs, test_cmd, question,
                 )
                 if stderr_content:
                     self._log("subagent OK — stderr: %s", stderr_content[:500])
                 if new_dap_log:
                     self._log("subagent OK — dap log: %s", new_dap_log[:500])
-                step.observation = f"[cog_debug result]\n{output}"
+                step.observation = f"[cog_debug {mode} result]\n{output}"
             else:
                 self._log("subagent FAILED (rc=%d)", returncode)
                 self._log("  stdout: %s", stdout_content[:500] or "(empty)")
@@ -964,7 +1227,7 @@ You need to parse it into cog_debug_launch arguments. Always set `language: "pyt
             step.observation = f"[cog_debug error] {type(e).__name__}: {e}"
 
         # Enrich "BREAKPOINT NOT HIT" with actionable recovery guidance
-        if step.observation and "BREAKPOINT NOT HIT" in step.observation:
+        if step.observation and "BREAKPOINT NOT HIT" in step.observation and breakpoint_loc:
             step.observation += self._breakpoint_not_hit_guidance(
                 step.observation, breakpoint_loc, test_cmd
             )
