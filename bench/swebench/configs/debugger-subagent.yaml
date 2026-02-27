@@ -28,9 +28,10 @@ agent:
       ## Constraints
 
       - `python3 -c` is disabled — use cog_debug inspect instead
-      - Creating test/debug scripts is disabled — use cog_debug instead
-      - Running custom scripts is disabled — use cog_debug instead
-      - `python -m pytest` on existing test suites IS allowed via bash
+      - Standalone debugging scripts (reproduce_*, debug_*, check_*, verify_*) are disabled — use cog_debug
+      - Creating proper pytest test files (with `def test_*` and assertions) IS allowed
+      - Creating YAML/config files for test setup IS allowed
+      - `python -m pytest` on test suites IS allowed via bash
 
       ## Example: Complete debugging workflow
 

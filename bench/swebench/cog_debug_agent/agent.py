@@ -38,9 +38,9 @@ class CogDebugAgent(DefaultAgent):
     # Max number of verification reminders (one per source edit)
     MAX_VERIFY_REMINDERS = 3
 
-    # Patterns for script filenames that the agent creates
+    # Patterns for standalone debugging script filenames
     _SCRIPT_FILENAME_RE = re.compile(
-        r'(^test_|^reproduce|^debug_|^check_|^verify_|^script_)',
+        r'(^reproduce|^debug_|^check_|^verify_|^script_)',
     )
 
     def __init__(self, *, cog_bin: str | None = None, **kwargs):
@@ -214,12 +214,14 @@ class CogDebugAgent(DefaultAgent):
     )
 
     _SCRIPT_CREATE_REDIRECT = (
-        "Script creation is not available. Use cog_debug to verify behavior "
-        "at a breakpoint instead:\n\n"
+        "Standalone debugging scripts are not allowed. Use cog_debug to inspect "
+        "runtime state at a breakpoint instead:\n\n"
         "  cog_debug breakpoint=\"file.py:line\" "
         "inspect=[\"expr1\", \"expr2\"] "
         "test=\"python -m pytest tests/... -xvs\" "
-        "condition=\"your_condition\""
+        "condition=\"your_condition\"\n\n"
+        "If you need a test that exercises a specific code path, create a proper "
+        "pytest test file (with `def test_*` functions and assertions) — that is allowed."
     )
 
     _SCRIPT_RUN_BLOCKED = (
@@ -327,7 +329,19 @@ class CogDebugAgent(DefaultAgent):
         return False
 
     def _is_script_create(self, step: StepOutput) -> str | None:
-        """Check if this step creates a script file. Returns the path or None."""
+        """Check if this step creates a standalone debugging script.
+
+        Returns the path if blocked, or None if allowed.
+
+        Blocked: standalone Python scripts that print/inspect values —
+        the kind of script cog_debug replaces (reproduce_bug.py, debug_issue.py,
+        check_output.py, etc.)
+
+        Allowed:
+        - Non-Python files (YAML playbooks, configs, fixtures, etc.)
+        - Pytest test files (contain 'def test_' or 'import pytest')
+        - Files created inside existing test directories
+        """
         if not step.tool_calls:
             return None
         for tc in step.tool_calls:
@@ -344,9 +358,52 @@ class CogDebugAgent(DefaultAgent):
                 continue
             path = args.get("path", "")
             basename = path.rsplit("/", 1)[-1] if "/" in path else path
+            content = args.get("file_text", "")
+
+            # Non-Python files are always allowed (YAML, configs, fixtures, etc.)
+            if not basename.endswith(".py"):
+                continue
+
+            # Check filename pattern — debug_*/reproduce*/check_*/verify_*/script_*
+            # are always blocked (these are standalone debugging scripts by convention)
             if self._SCRIPT_FILENAME_RE.match(basename):
                 return path
+
+            # For test_*.py files, examine the content to decide
+            if basename.startswith("test_"):
+                # Allow if it looks like a real pytest test file
+                if self._is_pytest_test_content(content):
+                    continue
+                # Block if it looks like a standalone debugging script
+                return path
+
         return None
+
+    @staticmethod
+    def _is_pytest_test_content(content: str) -> bool:
+        """Check if file content looks like a legitimate pytest test file.
+
+        A real test file has pytest imports and test functions with assertions.
+        A standalone debugging script has print() calls, if __name__ blocks,
+        and direct function invocations without assertions.
+        """
+        has_test_function = bool(re.search(r'\bdef test_\w+\s*\(', content))
+        has_assertion = 'assert ' in content or 'pytest.raises' in content
+        has_pytest_import = 'import pytest' in content or 'from pytest' in content
+
+        has_print = 'print(' in content
+        has_main_block = '__name__' in content and '__main__' in content
+
+        # It's a real test if it has test functions with assertions
+        if has_test_function and (has_assertion or has_pytest_import):
+            return True
+
+        # It's a debugging script if it prints or has a __main__ block
+        if has_print or has_main_block:
+            return False
+
+        # Default: allow test_* files (benefit of the doubt)
+        return has_test_function
 
     def _is_python_c_command(self, step: StepOutput) -> bool:
         """Check if this step runs a python3 -c or python -c command."""
@@ -356,7 +413,12 @@ class CogDebugAgent(DefaultAgent):
         return bool(re.search(r'\bpython3?\s+-c\b', cmd))
 
     def _is_custom_script_run(self, step: StepOutput) -> bool:
-        """Check if this step runs a script the agent previously created."""
+        """Check if this step runs a standalone debugging script directly.
+
+        Blocks: python3 reproduce_bug.py, python3 debug_issue.py, etc.
+        Allows: python -m pytest test_*.py (running tests through pytest is fine)
+        Allows: python3 test_*.py (test files may need direct execution)
+        """
         cmd = self._get_bash_command(step)
         if not cmd:
             return False
@@ -364,9 +426,9 @@ class CogDebugAgent(DefaultAgent):
         for script_path in self._created_scripts:
             if script_path in cmd:
                 return True
-        # Also match pattern: python3 /app/test_*.py, python3 /app/reproduce_*.py, etc.
-        if re.search(r'\bpython3?\s+\S*(test_|reproduce|debug_|check_|verify_|script_)\S*\.py\b', cmd):
-            # Exclude pytest invocations on existing test suites
+        # Block running standalone debugging scripts (reproduce*, debug_*, check_*, verify_*, script_*)
+        # but NOT test_* files (those are legitimate test cases)
+        if re.search(r'\bpython3?\s+\S*(reproduce|debug_|check_|verify_|script_)\S*\.py\b', cmd):
             if 'pytest' not in cmd and '-m pytest' not in cmd:
                 return True
         return False
