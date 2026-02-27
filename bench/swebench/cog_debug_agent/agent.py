@@ -77,8 +77,8 @@ class CogDebugAgent(DefaultAgent):
             try:
                 result = self._env.communicate(
                     "python3 -m pip install --index-url https://pypi.org/simple/ -q debugpy 2>&1"
-                    " || (command -v uv >/dev/null 2>&1 || (curl -LsSf https://astral.sh/uv/install.sh | INSTALLER_NO_MODIFY_PATH=1 sh))"
-                    " && ~/.local/bin/uv pip install --system debugpy 2>&1"
+                    " || ((command -v uv >/dev/null 2>&1 || (curl -LsSf https://astral.sh/uv/install.sh | INSTALLER_NO_MODIFY_PATH=1 sh))"
+                    " && ~/.local/bin/uv pip install --system debugpy 2>&1)"
                 )
                 self._log("debugpy install output: %s", result.strip())
             except Exception as e:
