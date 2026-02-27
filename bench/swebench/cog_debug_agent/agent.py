@@ -492,18 +492,22 @@ class CogDebugAgent(DefaultAgent):
                 step.observation = f"[cog_debug error] Failed to write inline code to container: {e}"
                 return step
 
-        # Build launch JSON for the subagent (exact args to pass to cog_debug_launch)
+        # Build launch JSON for the subagent (exact args to pass to cog_debug_launch).
+        # Always include language="python" so cog uses the DAP/debugpy driver
+        # even for entry-point scripts like ansible-playbook that lack a .py extension.
         if "module" in launch_args:
             launch_json = json.dumps({
                 "module": launch_args["module"],
                 "args": launch_args["args"],
                 "cwd": launch_args["cwd"],
+                "language": "python",
             }, indent=2)
         else:
             launch_json = json.dumps({
                 "program": launch_args["program"],
                 "args": launch_args["args"],
                 "cwd": launch_args["cwd"],
+                "language": "python",
             }, indent=2)
 
         # Pre-build the inspect JSON calls so the subagent can copy-paste them
