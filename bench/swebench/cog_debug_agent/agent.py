@@ -496,6 +496,54 @@ class CogDebugAgent(DefaultAgent):
         return ""
 
     @staticmethod
+    def _breakpoint_not_hit_guidance(observation: str, breakpoint_loc: str, test_cmd: str) -> str:
+        """Generate actionable recovery guidance when a breakpoint is not hit.
+
+        Parses the exit code from the observation and suggests specific next steps.
+        """
+        # Extract exit code from observation text
+        exit_code = None
+        m = re.search(r'exit_code:\s*(\d+)', observation)
+        if m:
+            exit_code = int(m.group(1))
+
+        bp_file = breakpoint_loc.split(":")[0] if ":" in breakpoint_loc else ""
+
+        guidance = "\n\n**What to try next:**\n"
+
+        if exit_code == 4:
+            # pytest "no tests collected"
+            guidance += (
+                "- exit_code 4 = pytest found no matching tests. "
+                "The test name may not exist.\n"
+            )
+            if bp_file:
+                # Suggest discovering tests near the breakpoint file
+                test_dir = bp_file.rsplit("/", 1)[0] if "/" in bp_file else "."
+                guidance += (
+                    f"- Run: `grep -rn 'def test_' /app/test/ | head -20` to find available test functions\n"
+                    f"- Or run: `python -m pytest --collect-only {test_dir}/ 2>/dev/null | head -30`\n"
+                )
+        elif exit_code == 1:
+            guidance += (
+                "- exit_code 1 = the test/program failed or errored before reaching your breakpoint line.\n"
+                "- Try removing the `condition` argument (the condition may never be true in this test).\n"
+                "- Try a different test that exercises the target code path.\n"
+            )
+        elif exit_code == 0:
+            guidance += (
+                "- exit_code 0 = the program completed successfully but never reached your breakpoint line.\n"
+                "- The test may not exercise this code path. Try a different test.\n"
+                "- Check that the breakpoint line number is correct (view the file first).\n"
+            )
+        else:
+            guidance += (
+                f"- exit_code {exit_code} = unexpected exit. Check the test command is valid.\n"
+            )
+
+        return guidance
+
+    @staticmethod
     def _strip_shell_operators(cmd: str) -> str:
         """Strip shell redirections and take only the first command from compound expressions.
 
@@ -834,6 +882,12 @@ Execute these steps IN ORDER:
         except Exception as e:
             self._log("subagent exception: %s: %s", type(e).__name__, e)
             step.observation = f"[cog_debug error] {type(e).__name__}: {e}"
+
+        # Enrich "BREAKPOINT NOT HIT" with actionable recovery guidance
+        if step.observation and "BREAKPOINT NOT HIT" in step.observation:
+            step.observation += self._breakpoint_not_hit_guidance(
+                step.observation, breakpoint_loc, test_cmd
+            )
 
         # Get state for consistency with normal flow
         try:
