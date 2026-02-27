@@ -233,12 +233,12 @@ pub fn initializeRequestParams(allocator: std.mem.Allocator, seq: i64, adapter_i
 }
 
 pub fn launchRequest(allocator: std.mem.Allocator, seq: i64, program: []const u8, args: []const []const u8, stop_on_entry: bool) ![]const u8 {
-    return launchRequestEx(allocator, seq, program, args, stop_on_entry, null, null, null);
+    return launchRequestEx(allocator, seq, program, args, stop_on_entry, null, null, null, null);
 }
 
 /// Build a launch request with optional extra arguments merged from JSON and optional cwd.
 /// extra_args_json, when non-null, is parsed and each field is written into the arguments object.
-pub fn launchRequestEx(allocator: std.mem.Allocator, seq: i64, program: []const u8, args: []const []const u8, stop_on_entry: bool, extra_args_json: ?[]const u8, cwd: ?[]const u8, module: ?[]const u8) ![]const u8 {
+pub fn launchRequestEx(allocator: std.mem.Allocator, seq: i64, program: []const u8, args: []const []const u8, stop_on_entry: bool, extra_args_json: ?[]const u8, cwd: ?[]const u8, module: ?[]const u8, env: ?std.json.ObjectMap) ![]const u8 {
     var aw: Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
     var s: Stringify = .{ .writer = &aw.writer };
@@ -308,6 +308,16 @@ pub fn launchRequestEx(allocator: std.mem.Allocator, seq: i64, program: []const 
     if (cwd) |d| {
         try s.objectField("cwd");
         try s.write(d);
+    }
+    if (env) |env_map| {
+        try s.objectField("env");
+        try s.beginObject();
+        var env_it = env_map.iterator();
+        while (env_it.next()) |entry| {
+            try s.objectField(entry.key_ptr.*);
+            if (entry.value_ptr.* == .string) try s.write(entry.value_ptr.string);
+        }
+        try s.endObject();
     }
     try s.endObject();
     try s.endObject();

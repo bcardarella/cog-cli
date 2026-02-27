@@ -702,10 +702,29 @@ pub const LaunchConfig = struct {
             break :blk null;
         } else null;
 
+        var env: ?std.json.ObjectMap = null;
+        if (obj.get("env")) |env_val| {
+            if (env_val == .object) {
+                var env_map: std.json.ObjectMap = .init(allocator);
+                errdefer env_map.deinit();
+                var env_it = env_val.object.iterator();
+                while (env_it.next()) |entry| {
+                    if (entry.value_ptr.* == .string) {
+                        const key = try allocator.dupe(u8, entry.key_ptr.*);
+                        errdefer allocator.free(key);
+                        const val = try allocator.dupe(u8, entry.value_ptr.string);
+                        try env_map.put(key, .{ .string = val });
+                    }
+                }
+                env = env_map;
+            }
+        }
+
         return .{
             .program = program orelse "",
             .module = module,
             .args = try args_list.toOwnedSlice(allocator),
+            .env = env,
             .cwd = cwd,
             .language = language,
             .stop_on_entry = stop_on_entry,
@@ -719,6 +738,15 @@ pub const LaunchConfig = struct {
         allocator.free(self.args);
         if (self.language) |l| allocator.free(l);
         if (self.cwd) |c| allocator.free(c);
+        if (self.env) |env_map| {
+            var it = env_map.unmanaged.iterator();
+            while (it.next()) |entry| {
+                allocator.free(entry.key_ptr.*);
+                if (entry.value_ptr.* == .string) allocator.free(entry.value_ptr.string);
+            }
+            var m = env_map;
+            m.deinit();
+        }
     }
 };
 

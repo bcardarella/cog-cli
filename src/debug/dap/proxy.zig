@@ -896,6 +896,15 @@ pub const DapProxy = struct {
                                         .event_name = self.allocator.dupe(u8, evt.string) catch "",
                                         .body = self.allocator.dupe(u8, decoded.body) catch "",
                                     }) catch {};
+                                    // If the program exited/terminated while we're waiting
+                                    // for "stopped", the breakpoint will never hit — bail out
+                                    // so proxyRun can check the buffered "exited" event.
+                                    if (std.mem.eql(u8, event_name, "stopped") and
+                                        (std.mem.eql(u8, evt.string, "exited") or std.mem.eql(u8, evt.string, "terminated")))
+                                    {
+                                        dapLog("[DAP waitForEvent] Program exited while waiting for stopped — aborting wait", .{});
+                                        return error.Timeout;
+                                    }
                                     // Also queue notifications for important events so
                                     // they are visible via poll_events (mirrors readResponse).
                                     if (std.mem.eql(u8, evt.string, "output")) {
@@ -1034,7 +1043,7 @@ pub const DapProxy = struct {
         defer evt.deinit(allocator);
 
         return .{
-            .stop_reason = .exception,
+            .stop_reason = .exited,
             .exit_code = if (evt.exit_code) |c| @intCast(c) else null,
         };
     }
@@ -1285,7 +1294,7 @@ pub const DapProxy = struct {
 
         // 2. Send launch request WITHOUT waiting for response.
         dapLog("[DAP launch] Step 2: Sending launch request (seq={d})...", .{self.seq});
-        const launch_msg = try protocol.launchRequestEx(allocator, self.nextSeq(), config.program, config.args, config.stop_on_entry, cfg.launch_extra_args_json, null, config.module);
+        const launch_msg = try protocol.launchRequestEx(allocator, self.nextSeq(), config.program, config.args, config.stop_on_entry, cfg.launch_extra_args_json, config.cwd, config.module, config.env);
         defer allocator.free(launch_msg);
         try self.sendRaw(allocator, launch_msg);
         dapLog("[DAP launch] Step 2: Launch request sent", .{});
@@ -1364,8 +1373,8 @@ pub const DapProxy = struct {
         //    we handle entry-stop ourselves via DAP "pause" in connectChildSession.
         const stop_on_entry = if (cfg.child_sessions.enabled) false else config.stop_on_entry;
         dapLog("[DAP launch] Sending launch request (stopOnEntry={})...", .{stop_on_entry});
-        const cwd = if (config.program.len > 0) std.fs.path.dirname(config.program) else null;
-        const launch_msg = try protocol.launchRequestEx(allocator, self.nextSeq(), config.program, config.args, stop_on_entry, cfg.launch_extra_args_json, cwd, config.module);
+        const cwd = config.cwd orelse if (config.program.len > 0) std.fs.path.dirname(config.program) else null;
+        const launch_msg = try protocol.launchRequestEx(allocator, self.nextSeq(), config.program, config.args, stop_on_entry, cfg.launch_extra_args_json, cwd, config.module, config.env);
         defer allocator.free(launch_msg);
         try self.sendRaw(allocator, launch_msg);
 
@@ -1716,6 +1725,13 @@ pub const DapProxy = struct {
             dapLog("[DAP proxyRun] Re-arming breakpoints before deferred configurationDone", .{});
             self.rearmBreakpoints(allocator);
 
+            // Clear exception breakpoints so the adapter only stops at our
+            // explicit breakpoints, not on uncaught exceptions during startup
+            // or import resolution.
+            dapLog("[DAP proxyRun] Clearing exception breakpoints (empty filters)", .{});
+            const empty_filters: []const []const u8 = &.{};
+            try self.sendExceptionBreakpoints(allocator, empty_filters);
+
             dapLog("[DAP proxyRun] Sending deferred configurationDone to start program", .{});
             const cd_msg = try protocol.configurationDoneRequest(allocator, self.nextSeq());
             defer allocator.free(cd_msg);
@@ -1738,7 +1754,13 @@ pub const DapProxy = struct {
                 return .{ .stop_reason = .step };
             };
             defer allocator.free(exit_data);
-            return translateExitedEvent(allocator, exit_data);
+            var exit_state = try translateExitedEvent(allocator, exit_data);
+            // Attach captured output (traceback, stderr) so the caller can
+            // see why the program exited.
+            if (self.output_buffer.items.len > 0) {
+                exit_state.output = self.output_buffer.toOwnedSlice(self.allocator) catch &.{};
+            }
+            return exit_state;
         };
         defer allocator.free(event_data);
 
@@ -3428,6 +3450,7 @@ pub const DapProxy = struct {
                 cfg.launch_extra_args_json,
                 if (program.len > 0) std.fs.path.dirname(program) else null,
                 self.saved_launch_module,
+                null,
             );
             defer allocator.free(launch_msg);
             try self.sendRaw(allocator, launch_msg);
@@ -3773,7 +3796,7 @@ test "DapProxy translates DAP exited event with exit_code" {
         \\{"seq":20,"type":"event","event":"exited","body":{"exitCode":0}}
     ;
     const state = try DapProxy.translateExitedEvent(allocator, data);
-    try std.testing.expectEqual(StopReason.exception, state.stop_reason);
+    try std.testing.expectEqual(StopReason.exited, state.stop_reason);
     try std.testing.expectEqual(@as(i32, 0), state.exit_code.?);
 }
 
