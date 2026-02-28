@@ -886,25 +886,24 @@ You have these tools (and ONLY these — no bash, no local commands):
     ) -> str:
         """Build the subagent prompt for TRACE mode.
 
-        Subagent behavior: Set a breakpoint, continue to it, then step_over
-        line-by-line through the function. At each step, evaluate all tracked
-        expressions and record the file:line + values. Stop when step_out
-        returns to the caller or after 25 steps (whichever comes first).
-        Report the full trace.
+        Subagent behavior: Set a breakpoint, continue to it, then use
+        step_over_inspect to step through the function while evaluating
+        all tracked expressions in a single MCP call. Report the results.
         """
         condition_section = ""
         if condition:
             condition_section = f'\n- Condition to check: `{condition}`'
 
         tracked_list = "\n".join(f"  - `{e}`" for e in inspect_exprs)
+        expressions_json = json.dumps(inspect_exprs)
 
-        return f"""You are an autonomous debugging agent. You have MCP tools that control a debugger (debugpy) inside a Docker container. Your goal is to step through code line-by-line and track how specific values evolve.
+        return f"""You are an autonomous debugging agent. You have MCP tools that control a debugger (debugpy) inside a Docker container. Your goal is to step through code and track how specific values evolve.
 
 ## Goal
 
 Step through code starting at `{breakpoint_loc}` while running: `{test_cmd}`
 {condition_section}
-Track these expressions at each step:
+Track these expressions:
 {tracked_list}
 {code_snippet}
 ## Available MCP Tools
@@ -913,7 +912,7 @@ You have these tools (and ONLY these — no bash, no local commands):
 
 1. **cog_debug_launch** — Start a debug session. Takes: program OR module, args (list), cwd, env (object), language.
 2. **cog_debug_breakpoint** — Set a breakpoint. Takes: session_id, file, line, condition (optional). Also supports action="set_exception", filters=["raised"] to break on exceptions.
-3. **cog_debug_run** — Control execution. Takes: session_id, action (continue/step_over/step_into/step_out), timeout_ms.
+3. **cog_debug_run** — Control execution. Takes: session_id, action, timeout_ms. The action **step_over_inspect** steps repeatedly while evaluating expressions, returning all results in one call.
 4. **cog_debug_inspect** — Evaluate an expression at the current stop. Takes: session_id, expression, scope (locals/globals), frame_id.
 5. **cog_debug_stacktrace** — Get the call stack. Takes: session_id.
 6. **cog_debug_stop** — Stop the debug session. Takes: session_id.
@@ -928,14 +927,17 @@ You have these tools (and ONLY these — no bash, no local commands):
 4. **Check stop_reason**:
    - "exception" -> the test crashed before reaching your line. Call **stacktrace**, then **inspect** with scope="locals" at frame_id=0. Report the exception and stop (no stepping).
    - "exited" -> report "BREAKPOINT NOT HIT — exit_code: <N>" and stop.
-5. **If breakpoint hit**:{(' first **inspect** the condition `' + condition + '` to see its actual value and report it.') if condition else ''} Begin stepping loop:
-   a. **stacktrace** — record current file:line and function name
-   b. **inspect** each tracked expression (frame_id=0)
-   c. **run** with action="step_over", timeout_ms=5000
-   d. **Check stop_reason**: if "exited" or step count >= 25, stop loop
-   e. Repeat from (a)
-5. **Stop** the session
-6. **Write a trace report** showing each step's location and expression values
+5. **If breakpoint hit**:{(' first **inspect** the condition `' + condition + '` to see its actual value and report it.') if condition else ''} Use **step_over_inspect** to trace through the function:
+   Call **cog_debug_run** with action="step_over_inspect", expressions={expressions_json}, max_steps=25
+   This single call will step through the function line-by-line, evaluating each expression at every step.
+   The response contains:
+   - "results": object mapping each expression to its resolved value
+   - "unresolved": list of expressions that never came into scope
+   - "steps_taken": number of steps executed
+   - "stop_reason": why stepping stopped ("all_resolved", "max_steps", "stepped_out", "exited", "error")
+   - "location": final file/line/function after stepping
+6. **Stop** the session
+7. **Write a trace report** with the results
 
 ## Trace Report Format
 
@@ -944,18 +946,18 @@ Your final text response MUST use this format:
 ```
 Trace from {breakpoint_loc}:
 
-step 1: <file>:<line> — <function_name>
+Results (after <steps_taken> steps, stop_reason: <reason>):
   <expr1> = <value>
   <expr2> = <value>
+  ...
 
-step 2: <file>:<line> — <function_name>
-  <expr1> = <value>
-  <expr2> = <value> (changed from <old_value>)
+Unresolved expressions:
+  <expr> (never came into scope)
 
-... (continue for each step)
+Final location: <file>:<line> — <function>
 
 Control flow summary:
-  - <which branch/path was taken and why>
+  - <interpretation of the results>
   - <where the function returned or exited>
 ```
 
@@ -969,8 +971,6 @@ Control flow summary:
 - ONLY use MCP tools. No bash, no local commands.
 - NEVER pass "python" or "python3" as the program argument.
 - ALWAYS use frame_id=0 for inspect calls.
-- Maximum 25 steps. Stop early if the function returns (step_out).
-- If an expression cannot be evaluated at a step (out of scope), note "N/A".
 - CRITICAL: You MUST end with a text response. NEVER end with only tool calls."""
 
     def _build_diagnose_prompt(
