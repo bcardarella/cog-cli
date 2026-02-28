@@ -846,14 +846,13 @@ Expressions to inspect:
 {code_snippet}
 ## Available MCP Tools
 
-You have these tools (and ONLY these — no bash, no local commands):
+You will see many tools from the MCP server. Ignore all except these five:
 
-1. **cog_debug_launch** — Start a debug session. Takes: program OR module, args (list), cwd, env (object), language.
-2. **cog_debug_breakpoint** — Set a breakpoint. Takes: session_id, file, line, condition (optional). Also supports action="set_exception", filters=["raised"] to break on exceptions.
-3. **cog_debug_run** — Control execution. Takes: session_id, action ("continue", "step_over", "step_into", "step_out"), timeout_ms.
-4. **cog_debug_inspect** — Evaluate an expression at the current stop. Takes: session_id, expression, scope (locals/globals), frame_id.
-5. **cog_debug_stacktrace** — Get the call stack. Takes: session_id.
-6. **cog_debug_stop** — Stop the debug session. Takes: session_id.
+1. **cog_debug_launch** — Start a debug session
+2. **cog_debug_breakpoint** — Set breakpoints
+3. **cog_debug_run** — Control execution (continue, step_over_inspect)
+4. **cog_debug_inspect** — Only for exception/condition inspection (NOT for evaluating the main expressions)
+5. **cog_debug_stop** — Stop the debug session
 
 ## Workflow
 
@@ -863,7 +862,7 @@ You have these tools (and ONLY these — no bash, no local commands):
    b. Exception breakpoint: action="set_exception", filters=["raised"] — this is a safety net
 3. **Run** with action="continue", timeout_ms=15000
 4. **Check stop_reason**:
-   - "breakpoint" -> {('first **inspect** the condition `' + condition + '` to see its actual value. Report what it evaluates to. Then inspect ALL requested expressions. ') if condition else ''}inspect ALL requested expressions (use frame_id=0). If any expression is not yet in scope, use **step_over** (up to 5 steps) until it is, then inspect again. Use the code context to judge how far to step.
+   - "breakpoint" -> {('first **inspect** the condition `' + condition + '` to see its actual value. Report what it evaluates to. Then use step_over_inspect to evaluate all remaining expressions. ') if condition else ''}call **cog_debug_run** with action="step_over_inspect", expressions={json.dumps(inspect_exprs)}, max_steps=5. This evaluates all expressions at the current stop and steps forward (up to 5 times) if any are not yet in scope. Do NOT call step_over + inspect individually — that is too slow.
    - "exception" -> the test crashed before reaching your line. Call **stacktrace**, then **inspect** with scope="locals" at frame_id=0 to capture the failure context. Report what exception occurred and where.
    - "exited" -> report "BREAKPOINT NOT HIT — exit_code: <N>"
 5. **Stop** the session (always, even on failure)
@@ -872,6 +871,7 @@ You have these tools (and ONLY these — no bash, no local commands):
 {self._TEST_COMMAND_PARSING_GUIDE.format(test_cmd=test_cmd)}
 
 ## CRITICAL CONSTRAINTS
+- **NEVER call step_over or inspect in a loop to evaluate expressions.** Use action="step_over_inspect" — it evaluates all expressions and steps if needed, in one call. Calling step_over + inspect individually WILL timeout.
 - **NEVER launch more than one debug session.** One launch, one attempt. If the breakpoint is not hit, report that and stop.
 - If stop_reason is "exited", call cog_debug_stop and write: "BREAKPOINT NOT HIT — exit_code: <N>". Do NOT retry.
 - **ALWAYS call cog_debug_stop** before your final text response, even if earlier steps failed.
