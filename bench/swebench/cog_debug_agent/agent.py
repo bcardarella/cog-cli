@@ -931,13 +931,12 @@ You have these tools (and ONLY these — no bash, no local commands):
    Call **cog_debug_run** with action="step_over_inspect", expressions={expressions_json}, max_steps=25
    This single call will step through the function line-by-line, evaluating each expression at every step.
    The response contains:
-   - "results": object mapping each expression to its resolved value
-   - "unresolved": list of expressions that never came into scope
-   - "steps_taken": number of steps executed
+   - "steps": array of per-step records, each with step number, file, line, function, and values (object mapping each expression to its value or null if not in scope)
+   - "unresolved": list of expressions that never resolved at any step
+   - "steps_taken": total number of steps executed
    - "stop_reason": why stepping stopped ("all_resolved", "max_steps", "stepped_out", "exited", "error")
-   - "location": final file/line/function after stepping
 6. **Stop** the session
-7. **Write a trace report** with the results
+7. **Write a trace report** from the per-step data
 
 ## Trace Report Format
 
@@ -946,18 +945,21 @@ Your final text response MUST use this format:
 ```
 Trace from {breakpoint_loc}:
 
-Results (after <steps_taken> steps, stop_reason: <reason>):
+step 1: <file>:<line> — <function_name>
   <expr1> = <value>
   <expr2> = <value>
-  ...
+
+step 2: <file>:<line> — <function_name>
+  <expr1> = <value> (changed from <old_value>)
+  <expr2> = <value>
+
+... (continue for each step)
 
 Unresolved expressions:
   <expr> (never came into scope)
 
-Final location: <file>:<line> — <function>
-
 Control flow summary:
-  - <interpretation of the results>
+  - <which branch/path was taken and why>
   - <where the function returned or exited>
 ```
 

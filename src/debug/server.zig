@@ -1087,9 +1087,11 @@ pub const DebugServer = struct {
     }
 
     /// Composite action: step over repeatedly while evaluating expressions.
-    /// At each stop, tries to evaluate all pending expressions. Successful ones
-    /// are removed from the pending list. Stops when: all resolved, max steps
-    /// reached, function returned (stack depth decreased), or program exited.
+    /// At each stop, evaluates ALL expressions and records per-step results.
+    /// Expressions that haven't resolved yet stay in the pending list; once all
+    /// have resolved at least once the loop can stop early. Stops when: all
+    /// resolved, max steps reached, function returned (stack depth decreased),
+    /// or program exited.
     fn toolStepOverInspect(self: *DebugServer, allocator: std.mem.Allocator, a: json.Value, session: *session_mod.Session) !ToolResult {
         if (requireStopped(session)) |err_result| return err_result;
 
@@ -1120,22 +1122,33 @@ pub const DebugServer = struct {
             break :blk frames.len;
         };
 
-        // Result storage: expression -> value (duped strings owned by allocator)
-        var results = std.StringArrayHashMapUnmanaged([]const u8).empty;
+        // Per-step records: each entry is one stop point
+        const StepRecord = struct {
+            file: []const u8,
+            line: u32,
+            function: []const u8,
+            /// One value per expression (same order as `expressions`).
+            /// null = evaluation failed / not in scope at this step.
+            values: []?[]const u8,
+        };
+        var steps = std.ArrayListUnmanaged(StepRecord).empty;
         defer {
-            for (results.keys(), results.values()) |k, v| {
-                allocator.free(k);
-                allocator.free(v);
+            for (steps.items) |step| {
+                for (step.values) |maybe_val| {
+                    if (maybe_val) |v| allocator.free(v);
+                }
+                allocator.free(step.values);
             }
-            results.deinit(allocator);
+            steps.deinit(allocator);
         }
 
-        // Pending expressions (indices into expressions array)
-        var pending = std.ArrayListUnmanaged(usize).empty;
-        defer pending.deinit(allocator);
-        for (0..expressions.items.len) |i| {
-            try pending.append(allocator, i);
-        }
+        // Track which expressions have resolved at least once (for early stop)
+        var resolved = try allocator.alloc(bool, expressions.items.len);
+        defer allocator.free(resolved);
+        @memset(resolved, false);
+
+        // Mark session as running so concurrent tool calls are rejected
+        session.status = .running;
 
         // Release mutex for blocking DAP calls
         self.mutex.unlock();
@@ -1143,63 +1156,73 @@ pub const DebugServer = struct {
 
         var steps_taken: u32 = 0;
         var final_stop_reason: []const u8 = "max_steps";
-        var final_location: ?types.SourceLocation = null;
+        var exited = false;
 
-        while (pending.items.len > 0) {
-            // Try to evaluate each pending expression
-            var still_pending = std.ArrayListUnmanaged(usize).empty;
-            defer still_pending.deinit(allocator);
+        while (true) {
+            // Get current location via stacktrace
+            var step_file: []const u8 = "";
+            var step_line: u32 = 0;
+            var step_func: []const u8 = "";
+            if (session.driver.stackTrace(allocator, 1, 0, 1)) |frames| {
+                if (frames.len > 0) {
+                    step_file = frames[0].source;
+                    step_line = frames[0].line;
+                    step_func = frames[0].name;
+                }
+            } else |_| {}
 
-            for (pending.items) |idx| {
-                const expr = expressions.items[idx];
+            // Evaluate every expression at this stop
+            const values = try allocator.alloc(?[]const u8, expressions.items.len);
+            errdefer {
+                for (values) |maybe_val| {
+                    if (maybe_val) |v| allocator.free(v);
+                }
+                allocator.free(values);
+            }
+
+            var all_resolved = true;
+            for (expressions.items, 0..) |expr, i| {
                 const inspect_result = session.driver.inspect(allocator, .{
                     .expression = expr,
                     .frame_id = 0,
                 }) catch {
-                    // Transport error — keep pending
-                    try still_pending.append(allocator, idx);
+                    values[i] = null;
+                    if (!resolved[i]) all_resolved = false;
                     continue;
                 };
                 defer inspect_result.deinit(allocator);
 
                 if (inspect_result.result.len > 0 and !isEvalError(inspect_result.result)) {
-                    // Success — store result
-                    const key = try allocator.dupe(u8, expr);
-                    errdefer allocator.free(key);
-                    const val = try allocator.dupe(u8, inspect_result.result);
-                    errdefer allocator.free(val);
-                    try results.put(allocator, key, val);
+                    values[i] = try allocator.dupe(u8, inspect_result.result);
+                    resolved[i] = true;
                 } else {
-                    // Evaluation failed (not in scope, etc.) — keep pending
-                    try still_pending.append(allocator, idx);
+                    values[i] = null;
+                    if (!resolved[i]) all_resolved = false;
                 }
             }
 
-            // Replace pending with still_pending
-            pending.deinit(allocator);
-            pending = .empty;
-            for (still_pending.items) |idx| {
-                try pending.append(allocator, idx);
-            }
+            try steps.append(allocator, .{
+                .file = step_file,
+                .line = step_line,
+                .function = step_func,
+                .values = values,
+            });
 
-            if (pending.items.len == 0) {
+            // Check early termination: all expressions resolved at least once
+            if (all_resolved) {
                 final_stop_reason = "all_resolved";
                 break;
             }
 
             // Step over
             const state = session.driver.runEx(allocator, .step_over, .{}) catch {
-                // Transport/driver error — return what we have
                 final_stop_reason = "error";
                 break;
             };
 
-            // Update location from step result
-            final_location = state.location;
-
             // Check if program exited
             if (state.exit_code != null or state.stop_reason == .exited) {
-                session.status = .terminated;
+                exited = true;
                 final_stop_reason = "exited";
                 break;
             }
@@ -1221,45 +1244,66 @@ pub const DebugServer = struct {
             }
         }
 
+        // Restore session status
+        session.status = if (exited) .terminated else .stopped;
+
         // Build JSON response
         var aw: Writer.Allocating = .init(allocator);
         defer aw.deinit();
         var jw: Stringify = .{ .writer = &aw.writer };
         try jw.beginObject();
 
-        try jw.objectField("results");
-        try jw.beginObject();
-        for (results.keys(), results.values()) |k, v| {
-            try jw.objectField(k);
-            try jw.write(v);
-        }
-        try jw.endObject();
-
-        if (pending.items.len > 0) {
-            try jw.objectField("unresolved");
-            try jw.beginArray();
-            for (pending.items) |idx| {
-                try jw.write(expressions.items[idx]);
+        // Per-step trace
+        try jw.objectField("steps");
+        try jw.beginArray();
+        for (steps.items, 0..) |step, step_idx| {
+            try jw.beginObject();
+            try jw.objectField("step");
+            try jw.write(step_idx + 1);
+            try jw.objectField("file");
+            try jw.write(step.file);
+            try jw.objectField("line");
+            try jw.write(step.line);
+            try jw.objectField("function");
+            try jw.write(step.function);
+            try jw.objectField("values");
+            try jw.beginObject();
+            for (expressions.items, 0..) |expr, i| {
+                try jw.objectField(expr);
+                if (step.values[i]) |val| {
+                    try jw.write(val);
+                } else {
+                    try jw.write(null);
+                }
             }
-            try jw.endArray();
+            try jw.endObject();
+            try jw.endObject();
+        }
+        try jw.endArray();
+
+        // Unresolved expressions (never succeeded at any step)
+        {
+            var has_unresolved = false;
+            for (resolved) |r| {
+                if (!r) {
+                    has_unresolved = true;
+                    break;
+                }
+            }
+            if (has_unresolved) {
+                try jw.objectField("unresolved");
+                try jw.beginArray();
+                for (expressions.items, 0..) |expr, i| {
+                    if (!resolved[i]) try jw.write(expr);
+                }
+                try jw.endArray();
+            }
         }
 
         try jw.objectField("steps_taken");
-        try jw.write(steps_taken);
+        try jw.write(steps.items.len);
         try jw.objectField("stop_reason");
         try jw.write(final_stop_reason);
-
-        if (final_location) |loc| {
-            try jw.objectField("location");
-            try jw.beginObject();
-            try jw.objectField("file");
-            try jw.write(loc.file);
-            try jw.objectField("line");
-            try jw.write(loc.line);
-            try jw.objectField("function");
-            try jw.write(loc.function);
-            try jw.endObject();
-        }
 
         try jw.endObject();
         const result = try aw.toOwnedSlice();
