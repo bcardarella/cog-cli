@@ -1192,7 +1192,7 @@ pub const DebugServer = struct {
                 };
                 defer inspect_result.deinit(allocator);
 
-                if (inspect_result.result.len > 0 and !isEvalError(inspect_result.result)) {
+                if (!inspect_result.is_error and inspect_result.result.len > 0) {
                     values[i] = try allocator.dupe(u8, inspect_result.result);
                     resolved[i] = true;
                 } else {
@@ -1311,16 +1311,6 @@ pub const DebugServer = struct {
         return .{ .ok = result };
     }
 
-    /// Check if an inspect result looks like an evaluation error (name not defined, etc.)
-    fn isEvalError(result: []const u8) bool {
-        // DAP adapters typically return error messages for undefined names
-        if (std.mem.startsWith(u8, result, "NameError:")) return true;
-        if (std.mem.startsWith(u8, result, "name '")) return true;
-        if (std.mem.indexOf(u8, result, "is not defined")) |_| return true;
-        if (std.mem.indexOf(u8, result, "not found")) |_| return true;
-        if (std.mem.startsWith(u8, result, "ReferenceError:")) return true;
-        return false;
-    }
 
     fn toolInspect(self: *DebugServer, allocator: std.mem.Allocator, args: ?json.Value) !ToolResult {
         const a = args orelse return .{ .err = .{ .code = INVALID_PARAMS, .message = "Missing arguments" } };

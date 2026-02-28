@@ -821,6 +821,9 @@ pub const InspectResult = struct {
     children: []const Variable = &.{},
     result_allocated: bool = false,
     children_allocated: bool = false,
+    /// True when the evaluation failed (e.g. DAP success:false).
+    /// The result field contains the error message.
+    is_error: bool = false,
 
     pub fn deinit(self: *const InspectResult, allocator: std.mem.Allocator) void {
         if (self.result_allocated) {

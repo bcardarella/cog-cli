@@ -2195,7 +2195,7 @@ pub const DapProxy = struct {
                     const success = if (check.value.object.get("success")) |v| v == .bool and v.bool else false;
                     if (!success) {
                         const err_msg = if (check.value.object.get("message")) |v| if (v == .string) v.string else "variables request failed" else "variables request failed";
-                        return .{ .result = try allocator.dupe(u8, err_msg), .@"type" = "", .result_allocated = true };
+                        return .{ .result = try allocator.dupe(u8, err_msg), .@"type" = "", .result_allocated = true, .is_error = true };
                     }
                 }
 
@@ -2335,7 +2335,7 @@ pub const DapProxy = struct {
         const success = if (parsed.value.object.get("success")) |v| v == .bool and v.bool else false;
         if (!success) {
             const err_msg = if (parsed.value.object.get("message")) |v| if (v == .string) v.string else "<error>" else "<error>";
-            return .{ .result = try allocator.dupe(u8, err_msg), .@"type" = "", .result_allocated = true };
+            return .{ .result = try allocator.dupe(u8, err_msg), .@"type" = "", .result_allocated = true, .is_error = true };
         }
 
         const body = parsed.value.object.get("body") orelse return .{ .result = "", .@"type" = "" };
