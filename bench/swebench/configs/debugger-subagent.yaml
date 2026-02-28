@@ -36,7 +36,7 @@ agent:
          - Know the file:line? Use `trace` to evaluate expressions and step through code.
          - Don't know where to look? Use `diagnose` to let the debugger investigate.
       4. **Fix**: Apply a minimal edit based on what you observed.
-      5. **Verify**: Use `trace` to confirm the fix on the changed code path.
+      5. **Verify**: Run the failing test via bash to confirm the fix.
 
       ## Constraints
 
@@ -105,7 +105,7 @@ agent:
         - |
           Thank you for your work on this issue. Please carefully follow the steps below to help review your changes.
 
-          1. If you have not yet verified your fix with `cog_debug`, call it on the changed code path before submitting.
+          1. Run the failing test to confirm your fix works.
           2. Remove any temporary files you created (test scripts, scratch files, etc.).
           3. If you have modified any TEST files, please revert them to the state they had before you started fixing the issue.
             You can do this with `git checkout -- /path/to/test/file.py`. Use below <diff> to find the files you need to revert.

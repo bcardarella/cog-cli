@@ -290,13 +290,8 @@ class CogDebugAgent(DefaultAgent):
                 step.observation += self._COG_DEBUG_REMINDER
             self._log("injected exploration reminder at step %d", self._step_count)
 
-        # Verification reminder: after each source edit, up to MAX_VERIFY_REMINDERS
-        if is_source_edit and self._verify_reminder_count < self.MAX_VERIFY_REMINDERS:
+        if is_source_edit:
             self._source_edited = True
-            self._verify_reminder_count += 1
-            if step.observation:
-                step.observation += self._COG_DEBUG_VERIFY_REMINDER
-            self._log("injected verification reminder #%d at step %d", self._verify_reminder_count, self._step_count)
 
         return step
 
