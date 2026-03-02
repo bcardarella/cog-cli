@@ -947,26 +947,25 @@ fn buildToolCatalogResourceJson(runtime: *Runtime) ![]u8 {
     return aw.toOwnedSlice();
 }
 
-/// Direct memory tools advertised in tools/list. All other memory tools
-/// are accessed through the cog-mem sub-agent.
-const direct_mem_tools = [_][]const u8{
-    "cog_mem_learn",
-    "cog_mem_associate",
-    "cog_mem_refactor",
-    "cog_mem_deprecate",
-    "cog_mem_update",
-};
-
-fn isDirectMemTool(name: []const u8) bool {
-    for (direct_mem_tools) |allowed| {
-        if (std.mem.eql(u8, name, allowed)) return true;
-    }
-    return false;
-}
-
 fn writeToolCatalog(runtime: *Runtime, allocator: std.mem.Allocator, s: *Stringify) !void {
-    // Code tools and debug tools are accessed through sub-agents only.
-    // They are NOT advertised in tools/list but still handled by runtimeCallTool.
+    // All tools are advertised so that host-side sub-agents can discover
+    // their schemas via tools/list. The primary agent prompt (PROMPT.md)
+    // guides the agent to only use 5 direct memory tools; everything else
+    // is accessed through sub-agents (code, debug, memory).
+
+    try writeToolDef(s, "cog_code_query", "Query the SCIP code index for symbol information. Use mode 'find' to locate where a symbol is defined, 'refs' to find all references to a symbol, or 'symbols' to list all symbols in a specific file.", &.{
+        .{ .name = "mode", .typ = "string", .desc = "Query mode: 'find' (locate a symbol's definition), 'refs' (find all references to a symbol), 'symbols' (list all symbols in a file)", .required = true },
+        .{ .name = "name", .typ = "string", .desc = "Symbol name to search for (required for find and refs modes). Supports glob patterns: '*' (zero or more chars) and '?' (one char). Examples: '*init*', 'get*', 'Handle?'", .required = false },
+        .{ .name = "file", .typ = "string", .desc = "File path filter. Required for symbols mode. Optional for find/refs to scope results to a specific file.", .required = false },
+        .{ .name = "kind", .typ = "string", .desc = "Filter results by symbol kind (e.g. function, class, method, variable)", .required = false },
+    });
+
+    try writeToolDef(s, "cog_code_status", "Check whether the SCIP code index exists, how many files are indexed, and which languages are covered. Use this to verify the index is available before querying.", &.{});
+
+    try writeToolDefWithSchemaJson(allocator, s, "cog_code_explore",
+        "Find multiple symbols by name and return full definition bodies with file table of contents. Combines find + read in a single call. Auto-retries failed lookups with glob patterns, reads compact function/struct bodies, and includes a file_symbols TOC listing every symbol in each matched file. Also includes references (symbols called within each function body).",
+        \\{"type":"object","properties":{"queries":{"type":"array","description":"List of symbol queries. Each finds a symbol and returns source code around its definition.","items":{"type":"object","properties":{"name":{"type":"string","description":"Symbol name (supports glob: '*init*', 'get*')"},"kind":{"type":"string","description":"Filter by symbol kind (function, struct, method, variable, etc.)"}},"required":["name"]}},"context_lines":{"type":"number","description":"Fallback context lines for simple definitions without braces (default: 15)"}},"required":["queries"]}
+    );
 
     // Lazily discover remote memory tools on first tools/list
     if (runtime.hasMemory() and runtime.remote_tools == null) {
@@ -975,12 +974,15 @@ fn writeToolCatalog(runtime: *Runtime, allocator: std.mem.Allocator, s: *Stringi
         };
     }
 
-    // Only advertise the 5 direct memory tools
     if (runtime.remote_tools) |tools| {
         for (tools) |tool| {
-            if (isDirectMemTool(tool.name)) {
-                try writeToolDefWithSchemaJson(allocator, s, tool.name, tool.description, tool.input_schema);
-            }
+            try writeToolDefWithSchemaJson(allocator, s, tool.name, tool.description, tool.input_schema);
+        }
+    }
+
+    for (debug_server_mod.tool_definitions) |tool| {
+        if (tool.tier.isWithin(runtime.debug_tool_tier)) {
+            try writeToolDefWithSchemaJson(allocator, s, tool.name, tool.description, tool.input_schema);
         }
     }
 }
@@ -1592,24 +1594,6 @@ fn debugLogBytes(prefix: []const u8, data: []const u8) void {
         f.writeAll(trunc_msg) catch return;
     }
     f.writeAll("\n") catch return;
-}
-
-test "isDirectMemTool accepts the 5 direct tools" {
-    try std.testing.expect(isDirectMemTool("cog_mem_learn"));
-    try std.testing.expect(isDirectMemTool("cog_mem_associate"));
-    try std.testing.expect(isDirectMemTool("cog_mem_refactor"));
-    try std.testing.expect(isDirectMemTool("cog_mem_deprecate"));
-    try std.testing.expect(isDirectMemTool("cog_mem_update"));
-}
-
-test "isDirectMemTool rejects non-direct tools" {
-    try std.testing.expect(!isDirectMemTool("cog_mem_recall"));
-    try std.testing.expect(!isDirectMemTool("cog_mem_bulk_recall"));
-    try std.testing.expect(!isDirectMemTool("cog_mem_reinforce"));
-    try std.testing.expect(!isDirectMemTool("cog_mem_flush"));
-    try std.testing.expect(!isDirectMemTool("cog_mem_stats"));
-    try std.testing.expect(!isDirectMemTool("cog_code_query"));
-    try std.testing.expect(!isDirectMemTool("cog_debug_launch"));
 }
 
 test "nextMessageFromBuffer extracts newline-delimited JSON" {
