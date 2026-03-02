@@ -54,3 +54,4 @@ opencode.json
 # Research notes (temporary)
 /debug*.txt
 /CLAUDE.md.debug
+*.txt

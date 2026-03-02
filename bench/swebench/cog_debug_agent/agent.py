@@ -21,7 +21,6 @@ import os
 import re
 import shlex
 import stat
-import subprocess
 import tempfile
 from pathlib import Path
 
@@ -29,19 +28,73 @@ from sweagent.agent.agents import DefaultAgent
 from sweagent.agent.models import GLOBAL_STATS, GLOBAL_STATS_LOCK
 from sweagent.types import StepOutput
 
+from .subagent import SubagentConfig, SubagentRunner
+
 logger = logging.getLogger(__name__)
 
 class CogDebugAgent(DefaultAgent):
     """DefaultAgent extended with host-side cog_debug interception."""
 
-    # After this many steps without a cog_debug call, inject a one-time reminder
-    COG_DEBUG_REMINDER_STEP = 3
-    # Max number of verification reminders (one per source edit)
-    MAX_VERIFY_REMINDERS = 3
+    # cog_debug call budget — escalating pressure to stop debugging and start fixing
+    COG_DEBUG_SOFT_LIMIT = 4   # After 4 calls: nudge
+    COG_DEBUG_HARD_LIMIT = 7   # After 7 calls: strong warning
+    COG_DEBUG_MAX = 10         # After 10 calls: block
 
     # Patterns for standalone debugging script filenames
     _SCRIPT_FILENAME_RE = re.compile(
         r'(^reproduce|^debug_|^check_|^verify_|^script_)',
+    )
+
+    # Patterns that indicate print-statement debugging added to source code.
+    # Used by _is_print_debug_edit() to block edits that inject debug output.
+    _PRINT_DEBUG_RE = re.compile(
+        r'(?:'
+        r'\bprint\s*\('                          # print(
+        r'|\bpprint\s*[\.(]'                     # pprint( or pprint.pprint(
+        r'|\bpp\s*\('                            # pp(
+        r'|\bsys\.std(?:out|err)\.write\s*\('    # sys.stdout.write(
+        r'|\b(?:logging|logger|log)\.\w+\s*\('   # logging.debug(, logger.info(
+        r'|\bdisplay\.(?:debug|v{1,6}|warning|error|deprecated)\s*\('  # Ansible display
+        r'|\bpdb\.set_trace\s*\('               # pdb.set_trace()
+        r'|\bbreakpoint\s*\('                    # breakpoint()
+        r'|\btraceback\.print_'                  # traceback.print_exc(
+        r'|\bimport\s+pdb'                       # import pdb
+        r')',
+    )
+
+    # Redirect message when print-debugging is blocked.
+    _PRINT_DEBUG_REDIRECT = (
+        "[BLOCKED] Adding debug output to source code is not permitted. "
+        "Use `cog_debug` to observe runtime state instead.\n\n"
+        "To inspect values at a specific location:\n"
+        "  cog_debug mode=\"trace\" breakpoint=\"<file>:<line>\" "
+        "inspect=[\"<expr1>\", \"<expr2>\"] test=\"<test_command>\"\n\n"
+        "To investigate a failure you don't understand:\n"
+        "  cog_debug mode=\"diagnose\" test=\"<test_command>\" "
+        "question=\"<what you want to know>\"\n\n"
+        "Your edit was NOT applied."
+    )
+
+    # Language-agnostic pattern for error values in debugger output.
+    # Matches expressions whose value is an error/exception in any language.
+    _ERROR_VALUE_RE = re.compile(
+        r'=\s*('
+        r'(\w*Error|Exception)\s*[\(:]'  # Python: NameError(...), ValueError:
+        r'|error:'                         # Generic: error: ...
+        r'|<error>'                        # XML-style: <error>
+        r'|undefined'                      # JS: undefined
+        r'|nil'                            # Go/Ruby: nil
+        r'|null'                           # Java/JSON: null
+        r'|NaN'                            # Numeric: NaN
+        r'|not in scope'                   # Debugger: not in scope
+        r'|NameError'                      # Bare error type names
+        r'|TypeError'
+        r'|AttributeError'
+        r'|KeyError'
+        r'|IndexError'
+        r'|RuntimeError'
+        r')',
+        re.IGNORECASE,
     )
 
     def __init__(self, *, cog_bin: str | None = None, **kwargs):
@@ -51,11 +104,12 @@ class CogDebugAgent(DefaultAgent):
         self._tmp_dir: tempfile.TemporaryDirectory | None = None
         self._step_count: int = 0
         self._cog_debug_called: bool = False
-        self._reminder_sent: bool = False
-        self._source_edited: bool = False
-        self._verify_reminder_count: int = 0
-        # Track created script paths for custom-script-run detection
-        self._created_scripts: set[str] = set()
+        # Track cog_debug call counts for cost logging
+        self._trace_calls: int = 0
+        self._trace_blocked: int = 0
+        self._diagnose_calls: int = 0
+        self._bp_not_hit_count: int = 0  # consecutive breakpoint-not-hit count
+        self._print_debug_blocked: int = 0  # times print-debugging was blocked
 
     def setup(self, env, problem_statement, output_dir=Path(".")):
         """Set up the agent, then discover the Docker container for cog MCP."""
@@ -87,6 +141,9 @@ class CogDebugAgent(DefaultAgent):
 
         # Create temp directory for wrapper scripts and MCP config
         self._tmp_dir = tempfile.TemporaryDirectory(prefix="cog_debug_")
+        self._subagent_runner = SubagentRunner(
+            work_dir=self._tmp_dir.name, log_fn=self._log,
+        )
         if self._container_id:
             self._create_python3_wrapper()
             self._create_mcp_config()
@@ -193,83 +250,40 @@ class CogDebugAgent(DefaultAgent):
         config_path.write_text(json.dumps(config))
         self._log("MCP config at %s", config_path)
 
-    _COG_DEBUG_REMINDER = (
-        "\n\n[Reminder] You have `cog_debug` available with two modes:\n"
-        "- **trace**: evaluate expressions at a breakpoint and step through code to see how values evolve\n"
-        "- **diagnose**: investigate a test failure when you don't know where to look\n"
-        "Use cog_debug instead of writing scripts or using python3 -c."
-    )
+    def handle_submission(self, step, *, observation="", force_submission=False):
+        """Clean up agent-created scratch files before patch generation.
 
-    _COG_DEBUG_VERIFY_REMINDER = (
-        "\n\n[Reminder] You can verify this fix with `cog_debug` mode=\"trace\" using "
-        "`condition` to target the changed code path — one call confirms the fix without "
-        "writing a test script."
-    )
-
-    _PYTHON_C_BLOCKED = (
-        "python3 -c is not available. Use cog_debug to evaluate expressions "
-        "at a breakpoint in the actual runtime context:\n\n"
-        "  cog_debug mode=\"trace\" breakpoint=\"file.py:line\" "
-        "inspect=[\"expr1\", \"expr2\"] "
-        "test=\"python -m pytest tests/... -xvs\""
-    )
-
-    _SCRIPT_CREATE_REDIRECT = (
-        "Standalone debugging scripts are not allowed. Use cog_debug instead:\n\n"
-        "  mode=\"trace\"    — evaluate expressions at a breakpoint and step through code\n"
-        "  mode=\"diagnose\" — investigate a test failure autonomously\n\n"
-        "If you need a test that exercises a specific code path, create a proper "
-        "pytest test file (with `def test_*` functions and assertions) — that is allowed."
-    )
-
-    _SCRIPT_RUN_BLOCKED = (
-        "Running custom scripts is not available. Use cog_debug instead:\n\n"
-        "  cog_debug mode=\"trace\" breakpoint=\"file.py:line\" "
-        "inspect=[\"expr1\", \"expr2\"] "
-        "test=\"python -m pytest tests/... -xvs\""
-    )
+        The submit tool runs ``git add -A && git diff --cached`` which captures
+        ALL untracked files.  We remove known scratch-file patterns that the
+        agent may have left behind (test_*.py at repo root, reproduce*.py, etc.)
+        so they don't leak into the final patch.
+        """
+        if self._env:
+            try:
+                self._env.communicate(
+                    "cd $(git rev-parse --show-toplevel 2>/dev/null || echo /app) && "
+                    "git ls-files --others --exclude-standard -z | "
+                    "grep -z -E '^(test_|reproduce|debug_|check_|verify_|script_)' | "
+                    "xargs -0 rm -f 2>/dev/null || true"
+                )
+                self._log("pre-submit cleanup: removed untracked scratch files at repo root")
+            except Exception as e:
+                self._log("WARNING: pre-submit cleanup failed: %s", e)
+        return super().handle_submission(step, observation=observation, force_submission=force_submission)
 
     def handle_action(self, step: StepOutput) -> StepOutput:
-        """Intercept cog_debug tool calls; hard-gate unwanted actions."""
+        """Intercept cog_debug tool calls; block print-debugging; pass rest through."""
         self._step_count += 1
 
         if self._is_cog_debug_call(step):
             self._cog_debug_called = True
             return self._handle_cog_debug(step)
 
-        # --- Hard gate: python3 -c / python -c ---
-        if self._is_python_c_command(step):
-            step.observation = self._PYTHON_C_BLOCKED
-            try:
-                step.state = self.tools.get_state(env=self._env)
-            except Exception:
-                pass
-            self._log("blocked python3 -c at step %d", self._step_count)
-            return step
-
-        # --- Hard gate: script creation ---
-        script_create_path = self._is_script_create(step)
-        if script_create_path:
-            step.observation = self._SCRIPT_CREATE_REDIRECT
-            try:
-                step.state = self.tools.get_state(env=self._env)
-            except Exception:
-                pass
-            self._log("blocked script creation %s at step %d", script_create_path, self._step_count)
-            return step
-
-        # --- Hard gate: running custom scripts ---
-        if self._is_custom_script_run(step):
-            step.observation = self._SCRIPT_RUN_BLOCKED
-            try:
-                step.state = self.tools.get_state(env=self._env)
-            except Exception:
-                pass
-            self._log("blocked custom script run at step %d", self._step_count)
-            return step
-
-        # Detect source edit before processing
-        is_source_edit = self._is_source_edit(step)
+        # Block print-debugging: detect and reject edits that add debug output
+        # to source files. The edit is NOT executed — the agent gets a redirect
+        # message pointing it to cog_debug instead.
+        if self._is_print_debug_edit(step):
+            return self._block_print_debug(step, "str_replace_editor")
 
         step = super().handle_action(step)
 
@@ -279,150 +293,33 @@ class CogDebugAgent(DefaultAgent):
         if step.observation and len(step.observation) > 3000:
             step.observation = self._truncate_observation(step.observation)
 
-        # Exploration reminder: once, after N steps, if cog_debug hasn't been used yet
-        if (
-            not self._cog_debug_called
-            and not self._reminder_sent
-            and self._step_count >= self.COG_DEBUG_REMINDER_STEP
-        ):
-            self._reminder_sent = True
-            if step.observation:
-                step.observation += self._COG_DEBUG_REMINDER
-            self._log("injected exploration reminder at step %d", self._step_count)
-
-        if is_source_edit:
-            self._source_edited = True
-
         return step
 
-    def _is_source_edit(self, step: StepOutput) -> bool:
-        """Check if this step edits project source (not creating a new test file)."""
-        if not step.tool_calls:
+    def _is_agent_created_file(self, breakpoint_loc: str) -> bool:
+        """Check if a breakpoint targets a file the agent likely created.
+
+        Agent-created files (test scripts, debugging scripts) at the repo root
+        waste cog_debug calls because breakpoints in them don't reveal anything
+        about the actual bug. This detects:
+        - Files matching _SCRIPT_FILENAME_RE (reproduce*, debug_*, etc.)
+        - test_*.py files at the repo root (/app/ or /testbed/) rather than
+          in proper test directories (tests/, test/units/, etc.)
+        """
+        bp_file = breakpoint_loc.rsplit(":", 1)[0] if ":" in breakpoint_loc else breakpoint_loc
+        if not bp_file:
             return False
-        for tc in step.tool_calls:
-            fn = tc.get("function", {})
-            if fn.get("name") != "str_replace_editor":
-                continue
-            args = fn.get("arguments", {})
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except (json.JSONDecodeError, TypeError):
-                    continue
-            # Only str_replace (actual edits), not view or create
-            if args.get("command") != "str_replace":
-                continue
-            # Skip files that look like agent-created test scripts
-            path = args.get("path", "")
-            basename = path.rsplit("/", 1)[-1] if "/" in path else path
-            if basename.startswith("test_") or basename.startswith("reproduce"):
-                continue
-            return True
-        return False
+        basename = bp_file.rsplit("/", 1)[-1] if "/" in bp_file else bp_file
+        parent_dir = bp_file.rsplit("/", 1)[0] if "/" in bp_file else ""
 
-    def _is_script_create(self, step: StepOutput) -> str | None:
-        """Check if this step creates a standalone debugging script.
-
-        Returns the path if blocked, or None if allowed.
-
-        Blocked: standalone Python scripts that print/inspect values —
-        the kind of script cog_debug replaces (reproduce_bug.py, debug_issue.py,
-        check_output.py, etc.)
-
-        Allowed:
-        - Non-Python files (YAML playbooks, configs, fixtures, etc.)
-        - Pytest test files (contain 'def test_' or 'import pytest')
-        - Files created inside existing test directories
-        """
-        if not step.tool_calls:
-            return None
-        for tc in step.tool_calls:
-            fn = tc.get("function", {})
-            if fn.get("name") != "str_replace_editor":
-                continue
-            args = fn.get("arguments", {})
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except (json.JSONDecodeError, TypeError):
-                    continue
-            if args.get("command") != "create":
-                continue
-            path = args.get("path", "")
-            basename = path.rsplit("/", 1)[-1] if "/" in path else path
-            content = args.get("file_text", "")
-
-            # Non-Python files are always allowed (YAML, configs, fixtures, etc.)
-            if not basename.endswith(".py"):
-                continue
-
-            # Check filename pattern — debug_*/reproduce*/check_*/verify_*/script_*
-            # are always blocked (these are standalone debugging scripts by convention)
-            if self._SCRIPT_FILENAME_RE.match(basename):
-                return path
-
-            # For test_*.py files, examine the content to decide
-            if basename.startswith("test_"):
-                # Allow if it looks like a real pytest test file
-                if self._is_pytest_test_content(content):
-                    continue
-                # Block if it looks like a standalone debugging script
-                return path
-
-        return None
-
-    @staticmethod
-    def _is_pytest_test_content(content: str) -> bool:
-        """Check if file content looks like a legitimate pytest test file.
-
-        A real test file has pytest imports and test functions with assertions.
-        A standalone debugging script has print() calls, if __name__ blocks,
-        and direct function invocations without assertions.
-        """
-        has_test_function = bool(re.search(r'\bdef test_\w+\s*\(', content))
-        has_assertion = 'assert ' in content or 'pytest.raises' in content
-        has_pytest_import = 'import pytest' in content or 'from pytest' in content
-
-        has_print = 'print(' in content
-        has_main_block = '__name__' in content and '__main__' in content
-
-        # It's a real test if it has test functions with assertions
-        if has_test_function and (has_assertion or has_pytest_import):
+        # Script filenames are always agent-created
+        if self._SCRIPT_FILENAME_RE.match(basename):
             return True
 
-        # It's a debugging script if it prints or has a __main__ block
-        if has_print or has_main_block:
-            return False
-
-        # Default: allow test_* files (benefit of the doubt)
-        return has_test_function
-
-    def _is_python_c_command(self, step: StepOutput) -> bool:
-        """Check if this step runs a python3 -c or python -c command."""
-        cmd = self._get_bash_command(step)
-        if not cmd:
-            return False
-        return bool(re.search(r'\bpython3?\s+-c\b', cmd))
-
-    def _is_custom_script_run(self, step: StepOutput) -> bool:
-        """Check if this step runs a standalone debugging script directly.
-
-        Blocks: python3 reproduce_bug.py, python3 debug_issue.py, etc.
-        Allows: python -m pytest test_*.py (running tests through pytest is fine)
-        Allows: python3 test_*.py (test files may need direct execution)
-        """
-        cmd = self._get_bash_command(step)
-        if not cmd:
-            return False
-        # Check if the command runs any of the agent's created scripts
-        for script_path in self._created_scripts:
-            if script_path in cmd:
+        # test_*.py at the repo root = agent-created (not in a proper test dir)
+        if basename.startswith("test_") and basename.endswith(".py"):
+            if parent_dir in ("/app", "/testbed", ""):
                 return True
-        # Block running standalone debugging scripts (reproduce*, debug_*, check_*, verify_*, script_*)
-        # but NOT test_* files (those are legitimate test cases)
-        if re.search(r'\bpython3?\s+\S*(reproduce|debug_|check_|verify_|script_)\S*\.py\b', cmd):
-            if 'pytest' not in cmd and '-m pytest' not in cmd:
-                return True
+
         return False
 
     def _get_bash_command(self, step: StepOutput) -> str | None:
@@ -442,6 +339,69 @@ class CogDebugAgent(DefaultAgent):
         if step.action and not step.action.strip().startswith("cog_debug"):
             return step.action
         return None
+
+    def _get_str_replace_args(self, step: StepOutput) -> dict | None:
+        """Extract str_replace_editor arguments from a step."""
+        if step.tool_calls:
+            for tc in step.tool_calls:
+                fn = tc.get("function", {})
+                if fn.get("name") == "str_replace_editor":
+                    args = fn.get("arguments", {})
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except (json.JSONDecodeError, TypeError):
+                            return None
+                    return args
+        return None
+
+    def _is_print_debug_edit(self, step: StepOutput) -> bool:
+        """Check if a str_replace_editor call adds debug output to source code.
+
+        Returns True only when *new* debug-output code is being added — not when
+        viewing files or when existing code already contains the pattern.
+        """
+        args = self._get_str_replace_args(step)
+        if not args:
+            return False
+
+        command = args.get("command", "")
+        # Only check modifications, not views
+        if command not in ("str_replace", "insert", "create"):
+            return False
+
+        new_str = args.get("new_str", "")
+        if not new_str:
+            return False
+
+        # For str_replace, only check lines genuinely ADDED (in new_str but not old_str)
+        old_str = args.get("old_str", "")
+        if command == "str_replace" and old_str:
+            old_lines = set(old_str.splitlines())
+            added_text = "\n".join(
+                line for line in new_str.splitlines() if line not in old_lines
+            )
+        else:
+            added_text = new_str
+
+        if not added_text.strip():
+            return False
+
+        return bool(self._PRINT_DEBUG_RE.search(added_text))
+
+    def _block_print_debug(self, step: StepOutput, tool_name: str) -> StepOutput:
+        """Block a print-debug attempt and redirect to cog_debug."""
+        self._print_debug_blocked += 1
+        self._log(
+            "BLOCKED print-debug via %s (total blocked: %d)",
+            tool_name, self._print_debug_blocked,
+        )
+        step.observation = self._PRINT_DEBUG_REDIRECT
+        try:
+            step.state = self.tools.get_state(env=self._env)
+        except Exception:
+            pass
+        return step
 
     def _is_cog_debug_call(self, step: StepOutput) -> bool:
         """Check if this step is a cog_debug tool call."""
@@ -500,17 +460,6 @@ class CogDebugAgent(DefaultAgent):
         self._log("subagent cost: $%.4f (instance total: $%.2f)",
                   cost_usd, self.model.stats.instance_cost)
 
-    @staticmethod
-    def _extract_cost_from_json(stdout_content: str) -> float:
-        """Extract cost_usd from claude --output-format json response."""
-        if not stdout_content:
-            return 0.0
-        try:
-            result = json.loads(stdout_content)
-            return float(result.get("cost_usd", 0) or 0)
-        except (json.JSONDecodeError, TypeError, ValueError):
-            return 0.0
-
     def _extract_subagent_output(self, stdout_content: str, mcp_log: str) -> str:
         """Extract meaningful output from subagent, with JSON parsing and MCP log fallback.
 
@@ -518,16 +467,7 @@ class CogDebugAgent(DefaultAgent):
         the JSON response first. If the model produced no text, fall back to
         parsing the MCP log for cog_debug_run results.
         """
-        # Try parsing JSON output from claude --output-format json
-        text_output = ""
-        if stdout_content:
-            try:
-                result = json.loads(stdout_content)
-                # JSON format: {"type":"result","subtype":"success","cost_usd":...,"result":"text",...}
-                text_output = result.get("result", "").strip()
-            except (json.JSONDecodeError, TypeError, AttributeError):
-                # Not JSON — treat as plain text (shouldn't happen with --output-format json)
-                text_output = stdout_content.strip()
+        text_output = SubagentRunner.extract_text(stdout_content)
 
         if text_output:
             return text_output
@@ -643,30 +583,21 @@ class CogDebugAgent(DefaultAgent):
             )
 
         try:
-            env = {
-                k: v for k, v in os.environ.items()
-                if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")
-            }
-            result = subprocess.run(
-                [
-                    "claude", "-p", prompt,
-                    "--model", "claude-haiku-4-5-20251001",
-                    "--output-format", "json",
-                ],
-                capture_output=True, text=True, timeout=30, env=env,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                parsed = json.loads(result.stdout.strip())
-                distill_cost = float(parsed.get("cost_usd", 0) or 0)
-                if distill_cost > 0:
-                    self._track_subagent_cost(distill_cost)
-                distilled = parsed.get("result", "").strip()
-                if distilled:
-                    self._log(
-                        "distilled subagent output: %d chars -> %d chars",
-                        len(raw_output), len(distilled),
-                    )
-                    return distilled
+            result = self._subagent_runner.run(SubagentConfig(
+                prompt=prompt,
+                model="claude-haiku-4-5-20251001",
+                timeout=30,
+                dangerously_skip_permissions=False,
+                strict_mcp_config=False,
+            ))
+            if result.cost_usd > 0:
+                self._track_subagent_cost(result.cost_usd)
+            if result.success and result.text:
+                self._log(
+                    "distilled subagent output: %d chars -> %d chars",
+                    len(raw_output), len(result.text),
+                )
+                return result.text
         except Exception as e:
             self._log("distillation failed, using raw output: %s", e)
 
@@ -783,6 +714,33 @@ class CogDebugAgent(DefaultAgent):
             )
 
         return guidance
+
+    @classmethod
+    def _has_all_error_values(cls, observation: str) -> bool:
+        """Check if ALL expression values in the observation are errors.
+
+        Scans lines matching `expr = value` patterns. If every such value
+        matches _ERROR_VALUE_RE, the breakpoint line is likely too early
+        (variables not yet in scope). Language-agnostic.
+        """
+        # Find lines that look like expression evaluations: "  expr = value"
+        expr_lines = re.findall(r'^\s+\S+\s*=\s*.+', observation, re.MULTILINE)
+        if not expr_lines:
+            return False
+
+        error_count = 0
+        for line in expr_lines:
+            if cls._ERROR_VALUE_RE.search(line):
+                error_count += 1
+
+        # All expressions are errors
+        return error_count == len(expr_lines)
+
+    _ALL_ERRORS_GUIDANCE = (
+        "\n\n**All expressions returned errors** — the breakpoint line is likely "
+        "too early (variables not yet assigned). Try setting the breakpoint a few "
+        "lines LATER in the same function, after the target variables are assigned."
+    )
 
     # ── Test Command Parsing Guide (shared across all subagent prompts) ───
 
@@ -1008,6 +966,20 @@ Your final text response MUST use this format:
         condition = args.get("condition", "")
         question = args.get("question", "")
 
+        # Enforce hard budget limit
+        total_calls = self._trace_calls + self._diagnose_calls
+        if total_calls >= self.COG_DEBUG_MAX:
+            step.observation = (
+                "[cog_debug blocked] Budget exhausted (%d calls). "
+                "Apply your fix based on what you've already learned." % total_calls
+            )
+            self._log("cog_debug BLOCKED — budget exhausted (%d calls)", total_calls)
+            try:
+                step.state = self.tools.get_state(env=self._env)
+            except Exception:
+                pass
+            return step
+
         # Validate required arguments per mode
         if mode == "trace":
             if not breakpoint_loc or not inspect_exprs or not test_cmd:
@@ -1028,6 +1000,32 @@ Your final text response MUST use this format:
                 f"ERROR: Unknown mode={mode!r}. Valid modes: trace, diagnose."
             )
             return step
+
+        # Block trace calls targeting agent-created files (wastes subagent cost)
+        if mode == "trace" and breakpoint_loc and self._is_agent_created_file(breakpoint_loc):
+            self._trace_blocked += 1
+            self._log(
+                "BLOCKED cog_debug trace on agent-created file: %s (blocked: %d)",
+                breakpoint_loc, self._trace_blocked,
+            )
+            step.observation = (
+                f"ERROR: Cannot debug agent-created file `{breakpoint_loc}`. "
+                "Set breakpoints in the **repository source code**, not in test scripts you created. "
+                "Use cog_debug on the actual source file where the bug is."
+            )
+            try:
+                step.state = self.tools.get_state(env=self._env)
+            except Exception:
+                pass
+            return step
+
+        # Track call counts
+        if mode == "trace":
+            self._trace_calls += 1
+            self._log("cog_debug trace call #%d", self._trace_calls)
+        else:
+            self._diagnose_calls += 1
+            self._log("cog_debug diagnose call #%d", self._diagnose_calls)
 
         # Try to read code context around the breakpoint for the subagent
         code_snippet = ""
@@ -1067,111 +1065,131 @@ Your final text response MUST use this format:
             mode, breakpoint_loc, inspect_exprs, test_cmd, question[:80] if question else "",
         )
 
-        # Use file-based capture so output survives process kill on timeout
-        stdout_path = Path(self._tmp_dir.name) / f"subagent_stdout_{self._step_count}.log"
-        stderr_path = Path(self._tmp_dir.name) / f"subagent_stderr_{self._step_count}.log"
-
         # Record cog log positions before the call so we can read only new content
         mcp_log = Path("/tmp/cog-mcp.log")
         dap_log = Path("/tmp/cog-dap-debug.log")
         mcp_pos_before = mcp_log.stat().st_size if mcp_log.exists() else 0
         dap_pos_before = dap_log.stat().st_size if dap_log.exists() else 0
 
-        try:
-            env = {
-                k: v for k, v in os.environ.items()
-                if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")
-            }
-            env["SWEBENCH_CONTAINER"] = self._container_id
-            bin_dir = str(Path(self._tmp_dir.name) / "bin")
-            env["PATH"] = bin_dir + ":" + env.get("PATH", "")
+        bin_dir = str(Path(self._tmp_dir.name) / "bin")
+        config = SubagentConfig(
+            prompt=subagent_prompt,
+            model="claude-sonnet-4-6",
+            timeout=timeout,
+            mcp_config_path=mcp_config_path,
+            cwd=self._tmp_dir.name,
+            env_overrides={
+                "SWEBENCH_CONTAINER": self._container_id,
+                "PATH": bin_dir + ":" + os.environ.get("PATH", ""),
+            },
+        )
+        result = self._subagent_runner.run(config)
 
-            with open(stdout_path, "w") as stdout_f, open(stderr_path, "w") as stderr_f:
-                proc = subprocess.Popen(
-                    [
-                        "claude", "-p", subagent_prompt,
-                        "--model", "claude-sonnet-4-6",
-                        "--output-format", "json",
-                        "--dangerously-skip-permissions",
-                        "--strict-mcp-config",
-                        "--mcp-config", mcp_config_path,
-                    ],
-                    stdout=stdout_f,
-                    stderr=stderr_f,
-                    text=True,
-                    cwd=self._tmp_dir.name,
-                    env=env,
-                )
+        # Track subagent cost (even on timeout — partial work still costs)
+        if result.cost_usd > 0:
+            self._track_subagent_cost(result.cost_usd)
 
-                try:
-                    returncode = proc.wait(timeout=timeout)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
-                    returncode = None
+        # Read new cog DAP/MCP logs since before the call
+        new_mcp_log = self._read_log_tail(mcp_log, mcp_pos_before)
+        new_dap_log = self._read_log_tail(dap_log, dap_pos_before)
 
-            # Read captured output from files (survives process kill)
-            stdout_content = stdout_path.read_text().strip() if stdout_path.exists() else ""
-            stderr_content = stderr_path.read_text().strip() if stderr_path.exists() else ""
-
-            # Track subagent cost (even on timeout — partial work still costs)
-            subagent_cost = self._extract_cost_from_json(stdout_content)
-            if subagent_cost > 0:
-                self._track_subagent_cost(subagent_cost)
-
-            # Read new cog DAP/MCP logs since before the call
-            new_mcp_log = self._read_log_tail(mcp_log, mcp_pos_before)
-            new_dap_log = self._read_log_tail(dap_log, dap_pos_before)
-
-            if returncode is None:
-                # Timeout
-                self._log("subagent TIMEOUT after %ds", timeout)
-                self._log("  stdout (%d bytes): %s", len(stdout_content), stdout_content[:1000] or "(empty)")
-                self._log("  stderr (%d bytes): %s", len(stderr_content), stderr_content[:1000] or "(empty)")
-                if new_mcp_log:
-                    self._log("  cog-mcp.log (new): %s", new_mcp_log[:2000])
-                if new_dap_log:
-                    self._log("  cog-dap-debug.log (new): %s", new_dap_log[:2000])
-                step.observation = (
-                    f"[cog_debug timeout] Subagent timed out after {timeout}s.\n"
-                    f"Partial stdout: {stdout_content[:500]}\n"
-                    f"Partial stderr: {stderr_content[:500]}"
-                )
-            elif returncode == 0:
-                raw_output = self._extract_subagent_output(stdout_content, new_mcp_log)
-                output = self._distill_subagent_output(
-                    raw_output, mode, breakpoint_loc, inspect_exprs, test_cmd, question,
-                )
-                if stderr_content:
-                    self._log("subagent OK — stderr: %s", stderr_content[:500])
-                if new_dap_log:
-                    self._log("subagent OK — dap log: %s", new_dap_log[:500])
-                step.observation = f"[cog_debug {mode} result]\n{output}"
-            else:
-                self._log("subagent FAILED (rc=%d)", returncode)
-                self._log("  stdout: %s", stdout_content[:500] or "(empty)")
-                self._log("  stderr: %s", stderr_content[:500] or "(empty)")
-                if new_mcp_log:
-                    self._log("  cog-mcp.log (new): %s", new_mcp_log[:1000])
-                if new_dap_log:
-                    self._log("  cog-dap-debug.log (new): %s", new_dap_log[:1000])
-                step.observation = (
-                    f"[cog_debug error] Subagent exited with code {returncode}.\n"
-                    f"stdout: {stdout_content[:500]}\n"
-                    f"stderr: {stderr_content[:500]}"
-                )
-
-        except FileNotFoundError:
-            step.observation = "[cog_debug error] 'claude' CLI not found. Is it installed?"
-        except Exception as e:
-            self._log("subagent exception: %s: %s", type(e).__name__, e)
-            step.observation = f"[cog_debug error] {type(e).__name__}: {e}"
+        if result.timed_out:
+            self._log("subagent TIMEOUT after %ds", timeout)
+            self._log("  stdout (%d bytes): %s", len(result.stdout_raw), result.stdout_raw[:1000] or "(empty)")
+            self._log("  stderr (%d bytes): %s", len(result.stderr_raw), result.stderr_raw[:1000] or "(empty)")
+            if new_mcp_log:
+                self._log("  cog-mcp.log (new): %s", new_mcp_log[:2000])
+            if new_dap_log:
+                self._log("  cog-dap-debug.log (new): %s", new_dap_log[:2000])
+            step.observation = (
+                f"[cog_debug timeout] Subagent timed out after {timeout}s.\n"
+                f"Partial stdout: {result.stdout_raw[:500]}\n"
+                f"Partial stderr: {result.stderr_raw[:500]}"
+            )
+        elif result.success:
+            raw_output = self._extract_subagent_output(result.stdout_raw, new_mcp_log)
+            output = self._distill_subagent_output(
+                raw_output, mode, breakpoint_loc, inspect_exprs, test_cmd, question,
+            )
+            if result.stderr_raw:
+                self._log("subagent OK — stderr: %s", result.stderr_raw[:500])
+            if new_dap_log:
+                self._log("subagent OK — dap log: %s", new_dap_log[:500])
+            step.observation = f"[cog_debug {mode} result]\n{output}"
+        elif not result.success and result.returncode is None and not result.timed_out:
+            # FileNotFoundError — claude not installed
+            step.observation = f"[cog_debug error] {result.text}"
+        else:
+            self._log("subagent FAILED (rc=%d)", result.returncode)
+            self._log("  stdout: %s", result.stdout_raw[:500] or "(empty)")
+            self._log("  stderr: %s", result.stderr_raw[:500] or "(empty)")
+            if new_mcp_log:
+                self._log("  cog-mcp.log (new): %s", new_mcp_log[:1000])
+            if new_dap_log:
+                self._log("  cog-dap-debug.log (new): %s", new_dap_log[:1000])
+            step.observation = (
+                f"[cog_debug error] Subagent exited with code {result.returncode}.\n"
+                f"stdout: {result.stdout_raw[:500]}\n"
+                f"stderr: {result.stderr_raw[:500]}"
+            )
 
         # Enrich "BREAKPOINT NOT HIT" with actionable recovery guidance
         if step.observation and "BREAKPOINT NOT HIT" in step.observation and breakpoint_loc:
             step.observation += self._breakpoint_not_hit_guidance(
                 step.observation, breakpoint_loc, test_cmd
             )
+
+        # Track consecutive breakpoint misses and inject stronger guidance
+        if step.observation and "BREAKPOINT NOT HIT" in step.observation:
+            self._bp_not_hit_count += 1
+            if self._bp_not_hit_count >= 2:
+                step.observation += (
+                    "\n\n**[Repeated miss]** This is the %d consecutive breakpoint miss. "
+                    "STOP guessing lines. View the file first, find the exact line that "
+                    "executes in the code path under test, then try again."
+                    % self._bp_not_hit_count
+                )
+        else:
+            self._bp_not_hit_count = 0  # reset on success
+
+        # Enrich trace results where all expressions are errors
+        if (
+            step.observation
+            and mode == "trace"
+            and "BREAKPOINT NOT HIT" not in step.observation
+            and self._has_all_error_values(step.observation)
+        ):
+            self._log("all expressions returned errors at %s", breakpoint_loc)
+            step.observation += self._ALL_ERRORS_GUIDANCE
+
+        # Inject escalating budget pressure messages
+        total_calls = self._trace_calls + self._diagnose_calls
+        if total_calls >= self.COG_DEBUG_MAX:
+            step.observation += (
+                "\n\n**[Budget exhausted]** You have used all %d cog_debug calls. "
+                "You MUST now fix the code based on what you've learned and submit. "
+                "No further cog_debug calls will be accepted." % total_calls
+            )
+        elif total_calls >= self.COG_DEBUG_HARD_LIMIT:
+            remaining = self.COG_DEBUG_MAX - total_calls
+            step.observation += (
+                "\n\n**[Budget warning]** You have used %d/%d cog_debug calls (%d remaining). "
+                "You have enough information to fix this. Apply your fix NOW."
+                % (total_calls, self.COG_DEBUG_MAX, remaining)
+            )
+        elif total_calls >= self.COG_DEBUG_SOFT_LIMIT:
+            step.observation += (
+                "\n\n**[Budget note]** %d/%d cog_debug calls used. "
+                "Consider whether you have enough information to start fixing."
+                % (total_calls, self.COG_DEBUG_MAX)
+            )
+
+        # Log cog_debug call summary
+        self._log(
+            "cog_debug summary: trace=%d (blocked=%d) diagnose=%d print_debug_blocked=%d",
+            self._trace_calls, self._trace_blocked, self._diagnose_calls,
+            self._print_debug_blocked,
+        )
 
         # Get state for consistency with normal flow
         try:

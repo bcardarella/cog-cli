@@ -12,6 +12,8 @@
 #   bash bench/swebench/run.sh debugger-subagent 5 2  # debugger, 5 tasks, 2 workers
 #   bash bench/swebench/run.sh --clean debugger-subagent 2  # clean run, no cached trajectories
 #   bash bench/swebench/run.sh --seed 7 debugger-subagent 5  # randomize task order with seed 7
+#   bash bench/swebench/run.sh --tasks ansible-42355d all    # run one task, all variants
+#   bash bench/swebench/run.sh --tasks ansible-42355d,ansible-d33bed debugger-subagent  # multiple tasks
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -22,12 +24,14 @@ TASKS_JSONL="$SCRIPT_DIR/tasks_sweagent.jsonl"
 
 CLEAN=false
 SEED=""
+TASKS=""
 
 # Parse flags (order-independent, before positional args)
 while [[ "${1:-}" == --* ]]; do
   case "$1" in
     --clean) CLEAN=true; shift ;;
     --seed)  SEED="$2"; shift 2 ;;
+    --tasks) TASKS="$2"; shift 2 ;;
     *) echo "ERROR: Unknown flag '$1'"; exit 1 ;;
   esac
 done
@@ -48,6 +52,7 @@ echo "  Variant:     $VARIANT_ARG"
 echo "  Max tasks:   ${MAX_TASKS:-all}"
 echo "  Workers:     $NUM_WORKERS"
 echo "  Seed:        ${SEED:-none}"
+echo "  Tasks:       ${TASKS:-all}"
 echo ""
 
 # ── Validate ────────────────────────────────────────────────────────────
@@ -74,11 +79,40 @@ fi
 
 mkdir -p "$PREDICTIONS_DIR"
 
-# ── Prepare instance file (optionally shuffled and/or sliced) ─────────
+# ── Prepare instance file (optionally filtered, shuffled, and/or sliced) ──
 
 INSTANCE_FILE="$TASKS_JSONL"
 
+# Filter by task name(s) if --tasks was given
+if [[ -n "$TASKS" ]]; then
+  INSTANCE_FILE="$SCRIPT_DIR/.tasks_filtered.jsonl"
+  python3 -c "
+import sys, json
+names = sys.argv[2].split(',')
+matched = set()
+with open(sys.argv[1]) as f:
+    for line in f:
+        iid = json.loads(line)['instance_id']
+        for name in names:
+            if name.strip() in iid:
+                sys.stdout.write(line)
+                matched.add(name.strip())
+                break
+missing = [n for n in names if n.strip() not in matched]
+if missing:
+    print(f'WARNING: no match for: {missing}', file=sys.stderr)
+" "$TASKS_JSONL" "$TASKS" > "$INSTANCE_FILE"
+  task_count=$(wc -l < "$INSTANCE_FILE" | tr -d ' ')
+  if [[ "$task_count" -eq 0 ]]; then
+    echo "ERROR: --tasks '$TASKS' matched 0 tasks"
+    exit 1
+  fi
+  echo "Filtered to $task_count task(s) matching: $TASKS"
+  echo ""
+fi
+
 if [[ -n "$SEED" || "$MAX_TASKS" -gt 0 ]]; then
+  INPUT_FOR_SLICE="$INSTANCE_FILE"
   INSTANCE_FILE="$SCRIPT_DIR/.tasks_sliced.jsonl"
   if [[ -n "$SEED" ]]; then
     # Shuffle with deterministic seed, then optionally slice
@@ -91,9 +125,9 @@ limit = int(sys.argv[3])
 if limit > 0:
     lines = lines[:limit]
 sys.stdout.writelines(lines)
-" "$TASKS_JSONL" "$SEED" "$MAX_TASKS" > "$INSTANCE_FILE"
+" "$INPUT_FOR_SLICE" "$SEED" "$MAX_TASKS" > "$INSTANCE_FILE"
   else
-    head -n "$MAX_TASKS" "$TASKS_JSONL" > "$INSTANCE_FILE"
+    head -n "$MAX_TASKS" "$INPUT_FOR_SLICE" > "$INSTANCE_FILE"
   fi
   task_count=$(wc -l < "$INSTANCE_FILE" | tr -d ' ')
   echo "Sliced to $task_count tasks (seed=${SEED:-none})"
