@@ -1594,6 +1594,24 @@ fn debugLogBytes(prefix: []const u8, data: []const u8) void {
     f.writeAll("\n") catch return;
 }
 
+test "isDirectMemTool accepts the 5 direct tools" {
+    try std.testing.expect(isDirectMemTool("cog_mem_learn"));
+    try std.testing.expect(isDirectMemTool("cog_mem_associate"));
+    try std.testing.expect(isDirectMemTool("cog_mem_refactor"));
+    try std.testing.expect(isDirectMemTool("cog_mem_deprecate"));
+    try std.testing.expect(isDirectMemTool("cog_mem_update"));
+}
+
+test "isDirectMemTool rejects non-direct tools" {
+    try std.testing.expect(!isDirectMemTool("cog_mem_recall"));
+    try std.testing.expect(!isDirectMemTool("cog_mem_bulk_recall"));
+    try std.testing.expect(!isDirectMemTool("cog_mem_reinforce"));
+    try std.testing.expect(!isDirectMemTool("cog_mem_flush"));
+    try std.testing.expect(!isDirectMemTool("cog_mem_stats"));
+    try std.testing.expect(!isDirectMemTool("cog_code_query"));
+    try std.testing.expect(!isDirectMemTool("cog_debug_launch"));
+}
+
 test "nextMessageFromBuffer extracts newline-delimited JSON" {
     const allocator = std.testing.allocator;
     var buf: std.ArrayListUnmanaged(u8) = .empty;

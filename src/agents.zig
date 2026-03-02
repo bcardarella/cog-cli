@@ -485,3 +485,9 @@ test "all agents have debug_file_path" {
         try std.testing.expect(agent.debug_file_path != null);
     }
 }
+
+test "all agents have mem_file_path" {
+    for (agents) |agent| {
+        try std.testing.expect(agent.mem_file_path != null);
+    }
+}
