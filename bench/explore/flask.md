@@ -10,7 +10,7 @@ Run each prompt in a fresh Claude Code session from `bench/explore/flask/`.
 
 ### Explore variant
 ```
-Use the cog-code-explore agent to answer this question. Do NOT use Grep, Read, Glob, or any other tools yourself.
+Use the cog-code-query agent to answer this question. Do NOT use Grep, Read, Glob, or any other tools yourself.
 
 How does Flask's request context work? What happens when a request comes in — how does the app create the context, make it available to handlers, and clean it up?
 
@@ -21,7 +21,7 @@ Then run this command to update the dashboard: bash ../collect.sh
 
 ### Traditional variant
 ```
-You MUST answer using ONLY Grep, Read, and Glob tools. Do NOT use any cog_code_* MCP tools or the cog-code-explore agent.
+You MUST answer using ONLY Grep, Read, and Glob tools. Do NOT use any cog_code_* MCP tools or the cog-code-query agent.
 
 How does Flask's request context work? What happens when a request comes in — how does the app create the context, make it available to handlers, and clean it up?
 
@@ -36,7 +36,7 @@ Then run this command to update the dashboard: bash ../collect.sh
 
 ### Explore variant
 ```
-Use the cog-code-explore agent to answer this question. Do NOT use Grep, Read, Glob, or any other tools yourself.
+Use the cog-code-query agent to answer this question. Do NOT use Grep, Read, Glob, or any other tools yourself.
 
 How do Flask blueprints work? I want to use them to organize a large app. Show me how blueprints register routes, how they integrate with the main app, and how URL prefixes are handled.
 
@@ -47,7 +47,7 @@ Then run this command to update the dashboard: bash ../collect.sh
 
 ### Traditional variant
 ```
-You MUST answer using ONLY Grep, Read, and Glob tools. Do NOT use any cog_code_* MCP tools or the cog-code-explore agent.
+You MUST answer using ONLY Grep, Read, and Glob tools. Do NOT use any cog_code_* MCP tools or the cog-code-query agent.
 
 How do Flask blueprints work? I want to use them to organize a large app. Show me how blueprints register routes, how they integrate with the main app, and how URL prefixes are handled.
 
@@ -62,7 +62,7 @@ Then run this command to update the dashboard: bash ../collect.sh
 
 ### Explore variant
 ```
-Use the cog-code-explore agent to answer this question. Do NOT use Grep, Read, Glob, or any other tools yourself.
+Use the cog-code-query agent to answer this question. Do NOT use Grep, Read, Glob, or any other tools yourself.
 
 How does Flask dispatch an incoming request to the right view function? Walk me through the routing from URL matching through the @app.route decorator to calling the handler.
 
@@ -73,7 +73,7 @@ Then run this command to update the dashboard: bash ../collect.sh
 
 ### Traditional variant
 ```
-You MUST answer using ONLY Grep, Read, and Glob tools. Do NOT use any cog_code_* MCP tools or the cog-code-explore agent.
+You MUST answer using ONLY Grep, Read, and Glob tools. Do NOT use any cog_code_* MCP tools or the cog-code-query agent.
 
 How does Flask dispatch an incoming request to the right view function? Walk me through the routing from URL matching through the @app.route decorator to calling the handler.
 
@@ -88,7 +88,7 @@ Then run this command to update the dashboard: bash ../collect.sh
 
 ### Explore variant
 ```
-Use the cog-code-explore agent to answer this question. Do NOT use Grep, Read, Glob, or any other tools yourself.
+Use the cog-code-query agent to answer this question. Do NOT use Grep, Read, Glob, or any other tools yourself.
 
 How does Flask handle errors and exceptions? I want to add custom error pages for 404 and 500 errors. Show me the error handler registration mechanism and how exceptions flow through the app.
 
@@ -99,7 +99,7 @@ Then run this command to update the dashboard: bash ../collect.sh
 
 ### Traditional variant
 ```
-You MUST answer using ONLY Grep, Read, and Glob tools. Do NOT use any cog_code_* MCP tools or the cog-code-explore agent.
+You MUST answer using ONLY Grep, Read, and Glob tools. Do NOT use any cog_code_* MCP tools or the cog-code-query agent.
 
 How does Flask handle errors and exceptions? I want to add custom error pages for 404 and 500 errors. Show me the error handler registration mechanism and how exceptions flow through the app.
 
@@ -114,7 +114,7 @@ Then run this command to update the dashboard: bash ../collect.sh
 
 ### Explore variant
 ```
-Use the cog-code-explore agent to answer this question. Do NOT use Grep, Read, Glob, or any other tools yourself.
+Use the cog-code-query agent to answer this question. Do NOT use Grep, Read, Glob, or any other tools yourself.
 
 How does Flask's response system work? When a view function returns a value, how does Flask turn it into an HTTP response? What are the different return types it handles (string, tuple, Response object)?
 
@@ -125,7 +125,7 @@ Then run this command to update the dashboard: bash ../collect.sh
 
 ### Traditional variant
 ```
-You MUST answer using ONLY Grep, Read, and Glob tools. Do NOT use any cog_code_* MCP tools or the cog-code-explore agent.
+You MUST answer using ONLY Grep, Read, and Glob tools. Do NOT use any cog_code_* MCP tools or the cog-code-query agent.
 
 How does Flask's response system work? When a view function returns a value, how does Flask turn it into an HTTP response? What are the different return types it handles (string, tuple, Response object)?
 

@@ -8,49 +8,15 @@ BENCH_DIR="$SCRIPT_DIR"
 COG_BIN="${COG_BIN:-zig-out/bin/cog}"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
+# Source shared deployment library
+source "$SCRIPT_DIR/../lib/deploy.sh"
+
 # Resolve cog binary
 if [[ ! -f "$ROOT_DIR/$COG_BIN" ]]; then
   echo "Building cog binary..."
   (cd "$ROOT_DIR" && zig build)
 fi
 COG="$ROOT_DIR/$COG_BIN"
-
-# Agent definition for cog-code-explore subagent
-AGENT_MD='---
-name: cog-code-explore
-description: Explore code structure using the Cog SCIP index
-tools:
-  - mcp__cog__cog_code_explore
-model: haiku
----
-
-You are a code index exploration agent. You have ONE tool: `cog_code_explore`. Complete every task in exactly 1 tool call.
-
-Call `cog_code_explore` ONCE with ALL symbols in a single `queries` array. The tool returns:
-- Complete function/struct body snippets (first ~30 lines)
-- `end_line` showing the full size of each definition
-- `references` listing symbols called within each function body
-- `file_symbols` listing EVERY symbol defined in the same file (name, kind, line, end_line)
-
-The `file_symbols` field is a table of contents — it tells you what else exists in the file without reading it. Use it to understand the codebase structure. Do NOT make follow-up calls to look up symbols you see in file_symbols — they are there for context.
-
-Example — if the user asks about "init", "Settings", and "writeSettings":
-```
-cog_code_explore({ queries: [{ name: "init", kind: "function" }, { name: "Settings", kind: "struct" }, { name: "writeSettings" }] })
-```
-
-After the tool returns, synthesize your answer from the snippets and file_symbols. Do not make additional tool calls.
-
-## Rules
-
-- Put ALL symbols in one `queries` array — never split across multiple calls
-- Use `kind` filter to narrow results (function, method, struct, variable, etc.)
-- The `name` parameter supports glob patterns: `*init*`, `get*`, `Handle?`
-- Trust the results — snippets show the definition, file_symbols show the full file context
-
-## Output
-
-Return a concise summary of what you found. Include file paths and line numbers for key definitions. Do not dump raw tool output — synthesize it.'
 
 # Settings that auto-allow all tools needed for both benchmark variants
 # Explore: Task (subagent), mcp__cog__* (code explore), Write (result file)
@@ -65,9 +31,8 @@ configure_claude() {
     echo "{\"mcpServers\":{\"cog\":{\"command\":\"$COG\",\"args\":[\"mcp\"]}}}" > "$dir/.mcp.json"
   fi
 
-  # .claude/agents/cog-code-explore.md — subagent definition
-  mkdir -p "$dir/.claude/agents"
-  echo "$AGENT_MD" > "$dir/.claude/agents/cog-code-explore.md"
+  # Deploy canonical CLAUDE.md and all 3 sub-agent files
+  deploy_canonical "$dir"
 
   # .claude/settings.json — auto-allow all benchmark tools
   echo "$SETTINGS_JSON" > "$dir/.claude/settings.json"

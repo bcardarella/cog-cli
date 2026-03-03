@@ -10,7 +10,7 @@ Run each prompt in a fresh Claude Code session from `bench/explore/ripgrep/`.
 
 ### Explore variant
 ```
-Use the cog-code-explore agent to answer this question. Do NOT use Grep, Read, Glob, or any other tools yourself.
+Use the cog-code-query agent to answer this question. Do NOT use Grep, Read, Glob, or any other tools yourself.
 
 How does ripgrep's search pipeline work? Walk me through the architecture from parsing CLI args to printing matches — what are the key crates and their responsibilities?
 
@@ -21,7 +21,7 @@ Then run this command to update the dashboard: bash ../collect.sh
 
 ### Traditional variant
 ```
-You MUST answer using ONLY Grep, Read, and Glob tools. Do NOT use any cog_code_* MCP tools or the cog-code-explore agent.
+You MUST answer using ONLY Grep, Read, and Glob tools. Do NOT use any cog_code_* MCP tools or the cog-code-query agent.
 
 How does ripgrep's search pipeline work? Walk me through the architecture from parsing CLI args to printing matches — what are the key crates and their responsibilities?
 
@@ -36,7 +36,7 @@ Then run this command to update the dashboard: bash ../collect.sh
 
 ### Explore variant
 ```
-Use the cog-code-explore agent to answer this question. Do NOT use Grep, Read, Glob, or any other tools yourself.
+Use the cog-code-query agent to answer this question. Do NOT use Grep, Read, Glob, or any other tools yourself.
 
 How does ripgrep handle different output formats (standard, JSON, count-only, files-with-matches)? What's the printer abstraction and how do the different implementations work?
 
@@ -47,7 +47,7 @@ Then run this command to update the dashboard: bash ../collect.sh
 
 ### Traditional variant
 ```
-You MUST answer using ONLY Grep, Read, and Glob tools. Do NOT use any cog_code_* MCP tools or the cog-code-explore agent.
+You MUST answer using ONLY Grep, Read, and Glob tools. Do NOT use any cog_code_* MCP tools or the cog-code-query agent.
 
 How does ripgrep handle different output formats (standard, JSON, count-only, files-with-matches)? What's the printer abstraction and how do the different implementations work?
 
@@ -62,7 +62,7 @@ Then run this command to update the dashboard: bash ../collect.sh
 
 ### Explore variant
 ```
-Use the cog-code-explore agent to answer this question. Do NOT use Grep, Read, Glob, or any other tools yourself.
+Use the cog-code-query agent to answer this question. Do NOT use Grep, Read, Glob, or any other tools yourself.
 
 How does ripgrep decide which files to search? Explain the ignore/filtering system — how does it handle .gitignore, --type filters, and --glob patterns? What are the key types and traits?
 
@@ -73,7 +73,7 @@ Then run this command to update the dashboard: bash ../collect.sh
 
 ### Traditional variant
 ```
-You MUST answer using ONLY Grep, Read, and Glob tools. Do NOT use any cog_code_* MCP tools or the cog-code-explore agent.
+You MUST answer using ONLY Grep, Read, and Glob tools. Do NOT use any cog_code_* MCP tools or the cog-code-query agent.
 
 How does ripgrep decide which files to search? Explain the ignore/filtering system — how does it handle .gitignore, --type filters, and --glob patterns? What are the key types and traits?
 
@@ -88,7 +88,7 @@ Then run this command to update the dashboard: bash ../collect.sh
 
 ### Explore variant
 ```
-Use the cog-code-explore agent to answer this question. Do NOT use Grep, Read, Glob, or any other tools yourself.
+Use the cog-code-query agent to answer this question. Do NOT use Grep, Read, Glob, or any other tools yourself.
 
 How does ripgrep parallelize search across files? What's the threading model, how is work distributed, and how are results collected and ordered for output?
 
@@ -99,7 +99,7 @@ Then run this command to update the dashboard: bash ../collect.sh
 
 ### Traditional variant
 ```
-You MUST answer using ONLY Grep, Read, and Glob tools. Do NOT use any cog_code_* MCP tools or the cog-code-explore agent.
+You MUST answer using ONLY Grep, Read, and Glob tools. Do NOT use any cog_code_* MCP tools or the cog-code-query agent.
 
 How does ripgrep parallelize search across files? What's the threading model, how is work distributed, and how are results collected and ordered for output?
 
@@ -114,7 +114,7 @@ Then run this command to update the dashboard: bash ../collect.sh
 
 ### Explore variant
 ```
-Use the cog-code-explore agent to answer this question. Do NOT use Grep, Read, Glob, or any other tools yourself.
+Use the cog-code-query agent to answer this question. Do NOT use Grep, Read, Glob, or any other tools yourself.
 
 I want to add a new output format to ripgrep. What's the interface I need to implement, where do the existing printers live, and how does the CLI flag wire up to the printer selection?
 
@@ -125,7 +125,7 @@ Then run this command to update the dashboard: bash ../collect.sh
 
 ### Traditional variant
 ```
-You MUST answer using ONLY Grep, Read, and Glob tools. Do NOT use any cog_code_* MCP tools or the cog-code-explore agent.
+You MUST answer using ONLY Grep, Read, and Glob tools. Do NOT use any cog_code_* MCP tools or the cog-code-query agent.
 
 I want to add a new output format to ripgrep. What's the interface I need to implement, where do the existing printers live, and how does the CLI flag wire up to the printer selection?
 
