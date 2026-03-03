@@ -48,7 +48,7 @@ Review the candidates and pick 5 debugger-friendly tasks. Add them to `tasks.jso
 bash bench/swedebug/setup.sh
 ```
 
-This clones repos, builds Docker images, generates prompts, and configures Claude.
+This clones repos, builds Docker images, generates prompts, and deploys canonical `CLAUDE.md` and sub-agents from `priv/`.
 
 ### 3. Run benchmarks
 
@@ -74,7 +74,7 @@ bench/swedebug/
 ├── README.md
 ├── select_tasks.py           # One-time: find candidates from HuggingFace
 ├── tasks.json                # 5 task definitions (populate after select_tasks.py)
-├── setup.sh                  # Clone repos, build Docker, configure Claude
+├── setup.sh                  # Clone repos, build Docker, deploy canonical prompts/agents
 ├── run.sh                    # Orchestrate: reset → claude -p → verify → record
 ├── collect.sh                # Aggregate .bench/*.json → dashboard.html
 ├── dashboard.html            # D3.js visualization

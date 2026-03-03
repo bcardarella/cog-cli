@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Setup script for cog_code_explore benchmarks
+# Setup script for cog-code-query benchmarks
 # Clones repos and builds cog indexes for all 4 benchmark languages
 set -euo pipefail
 

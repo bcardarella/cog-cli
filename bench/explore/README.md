@@ -1,6 +1,6 @@
-# Explore Benchmark: `cog_code_explore` Across Languages
+# Explore Benchmark: `cog-code-query` Across Languages
 
-Systematic benchmark comparing `cog_code_explore` (single MCP tool call) vs traditional tools (Grep + Read + Glob) across 4 languages.
+Systematic benchmark comparing the `cog-code-query` sub-agent (structured code intelligence via SCIP index) vs traditional tools (Grep + Read + Glob) across 4 languages.
 
 ## Repos
 
@@ -24,7 +24,7 @@ Requires the `cog` binary (`zig build` runs automatically if needed).
 
 Each language has a prompt file with 5 test cases. Each test case has two variants:
 
-- **Agent A (Explore)**: Uses only `cog_code_explore`
+- **Agent A (Explore)**: Uses the `cog-code-query` sub-agent
 - **Agent B (Traditional)**: Uses only Grep, Read, Glob
 
 ### Per test case:

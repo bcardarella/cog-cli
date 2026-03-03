@@ -33,7 +33,7 @@ Each language has one test per category:
 ## Quick Start
 
 ```bash
-# Setup: verify deps, compile programs, configure Claude settings
+# Setup: verify deps, compile programs, deploy canonical prompts/agents
 bash bench/debug/setup.sh
 
 # Run all benchmarks
@@ -52,7 +52,7 @@ open bench/debug/dashboard.html
 ```
 bench/debug/
 ├── README.md
-├── setup.sh              # verify deps, configure .mcp.json/.claude/
+├── setup.sh              # verify deps, deploy canonical CLAUDE.md + sub-agents
 ├── run.sh                # orchestrator (reset → run → verify → record)
 ├── collect.sh            # aggregate results into dashboard
 ├── dashboard.html        # D3.js visualization
