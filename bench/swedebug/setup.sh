@@ -10,6 +10,9 @@ TASKS_JSON="$SCRIPT_DIR/tasks.json"
 WORKSPACE="$SCRIPT_DIR/workspace"
 DOCKER_DIR="$SCRIPT_DIR/docker"
 
+# Source shared deployment library
+source "$SCRIPT_DIR/../lib/deploy.sh"
+
 echo "═══════════════════════════════════════"
 echo "  SWE-bench Debug Benchmark Setup"
 echo "═══════════════════════════════════════"
@@ -270,6 +273,17 @@ with open(md_path, 'w') as f:
 
 print(f"\n  Generated {len(prompts)} task prompts in swedebug.md")
 PYEOF
+
+# ── Deploy canonical CLAUDE.md and sub-agents to each workspace ──────────
+
+echo ""
+echo "Deploying canonical prompts and agents..."
+for task_dir in "$WORKSPACE"/task-*/; do
+  if [[ -d "$task_dir" ]]; then
+    deploy_canonical "$task_dir"
+    echo "  $(basename "$task_dir"): deployed CLAUDE.md + agents"
+  fi
+done
 
 # ── Build Docker images ──────────────────────────────────────────────────
 
