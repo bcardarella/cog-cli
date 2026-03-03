@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Setup script for SWE-bench Pro benchmarks (SWE-agent based)
+# Setup script for SWE-bench Pro benchmarks (claude -p based)
 #
-# SWE-agent handles Docker containers, source extraction, and environment setup
-# via SWE-ReX. This script just ensures dependencies are in place.
+# Ensures dependencies are in place and tasks are generated.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -10,36 +9,17 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TASKS_JSON="$SCRIPT_DIR/tasks.json"
 COG_BIN="$ROOT_DIR/zig-out/bin/cog"
 
+# Source shared deployment library
+source "$SCRIPT_DIR/../lib/deploy.sh"
+
 echo "═══════════════════════════════════════"
 echo "  SWE-bench Pro Benchmark Setup"
-echo "  (SWE-agent scaffold)"
+echo "  (claude -p runner)"
 echo "═══════════════════════════════════════"
 echo ""
-
-# ── Initialize SWE-agent submodule ──────────────────────────────────────
-
-echo "Checking SWE-agent submodule..."
-if [[ ! -f "$SCRIPT_DIR/SWE-agent/pyproject.toml" ]]; then
-  echo "  Initializing submodule..."
-  git -C "$ROOT_DIR" submodule update --init --recursive bench/swebench/SWE-agent
-fi
-echo "  SWE-agent: $(git -C "$SCRIPT_DIR/SWE-agent" log --oneline -1)"
-
-# ── Install SWE-agent ──────────────────────────────────────────────────
-
-echo ""
-echo "Installing SWE-agent..."
-pip install -e "$SCRIPT_DIR/SWE-agent" --quiet 2>&1 | tail -1 || true
-if ! command -v sweagent &>/dev/null; then
-  echo "  ERROR: sweagent CLI not found after install"
-  echo "  Try: pip install -e bench/swebench/SWE-agent"
-  exit 1
-fi
-echo "  sweagent: $(sweagent --version 2>&1 | head -1 || echo 'installed')"
 
 # ── Check dependencies ─────────────────────────────────────────────────
 
-echo ""
 echo "Checking dependencies..."
 missing=()
 
@@ -57,7 +37,7 @@ if ! command -v python3 &>/dev/null; then
 fi
 
 if ! command -v claude &>/dev/null; then
-  missing+=("claude (Claude Code CLI — needed for debugger-subagent)")
+  missing+=("claude (Claude Code CLI)")
 fi
 
 if [[ ${#missing[@]} -gt 0 ]]; then
@@ -68,10 +48,7 @@ fi
 
 echo "  docker:   $(docker --version 2>&1 | head -1)"
 echo "  python3:  $(python3 --version 2>&1)"
-echo "  sweagent: installed"
-if command -v claude &>/dev/null; then
-  echo "  claude:   $(claude --version 2>&1 | head -1)"
-fi
+echo "  claude:   $(claude --version 2>&1 | head -1)"
 
 # ── Build cog if needed ──────────────────────────────────────────────────
 
@@ -113,18 +90,12 @@ if [[ "$task_count" -eq 0 ]]; then
 fi
 echo "Found $task_count tasks in tasks.json"
 
-# Check SWE-agent JSONL
-if [[ ! -f "$SCRIPT_DIR/tasks_sweagent.jsonl" ]]; then
-  echo "Regenerating tasks_sweagent.jsonl..."
-  python3 "$SCRIPT_DIR/select_tasks_pro.py"
-fi
-echo "SWE-agent instance file: tasks_sweagent.jsonl"
-
 # ── Create output directories ──────────────────────────────────────────
 
 mkdir -p "$SCRIPT_DIR/predictions"
 mkdir -p "$SCRIPT_DIR/results"
 mkdir -p "$SCRIPT_DIR/logs"
+mkdir -p "$SCRIPT_DIR/workspace"
 
 echo ""
 echo "═══════════════════════════════════════"
@@ -133,7 +104,7 @@ echo "════════════════════════�
 echo ""
 echo "Run benchmarks:"
 echo "  bash bench/swebench/run.sh baseline 2      # baseline, first 2 tasks"
-echo "  bash bench/swebench/run.sh debugger-subagent 2  # with cog_debug, first 2"
+echo "  bash bench/swebench/run.sh debugger 2      # with cog-debug, first 2"
 echo "  bash bench/swebench/run.sh all              # all tasks, all variants"
 echo ""
 echo "View results:"

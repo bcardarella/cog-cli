@@ -131,25 +131,6 @@ def main():
 
     print(f"\nWrote {len(selected)} tasks to {out_path}", file=sys.stderr)
 
-    # Write SWE-agent instance JSONL (one JSON object per line)
-    jsonl_path = os.path.join(script_dir, "tasks_sweagent.jsonl")
-    with open(jsonl_path, "w") as f:
-        for t in selected:
-            instance = {
-                "instance_id": t["instance_id"],
-                "problem_statement": t["problem_statement"],
-                # "testbed" (no slash) tells SWE-agent to use PreExistingRepoConfig:
-                # the repo is already at /testbed/ inside SWE-bench Pro Docker images.
-                # Using "owner/repo" would trigger LocalRepoConfig which tries to
-                # find the repo on the host filesystem.
-                "repo_name": "testbed",
-                "base_commit": t["base_commit"],
-                "image_name": f"jefzda/sweap-images:{t['dockerhub_tag']}",
-            }
-            f.write(json.dumps(instance) + "\n")
-
-    print(f"Wrote {len(selected)} SWE-agent instances to {jsonl_path}", file=sys.stderr)
-
     # Summary by repo
     repos = {}
     for t in selected:
