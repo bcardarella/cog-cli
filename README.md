@@ -305,8 +305,10 @@ Extensions install to `~/.config/cog/extensions/` and override built-in indexers
 ### Available extensions
 
 | Extension | Language | Code Intelligence | Debugging |
-|-----------|----------|:-----------------:|:---------:|
-| [cog-zig](https://github.com/trycog/cog-zig) | Zig | Yes | Yes |
+|-----------|----------|:-----------------:|-----------|
+| [cog-elixir](https://github.com/trycog/cog-elixir) | Elixir | Yes | DAP (ElixirLS) |
+| [cog-ruby](https://github.com/trycog/cog-ruby) | Ruby | Yes | DAP (rdbg) |
+| [cog-zig](https://github.com/trycog/cog-zig) | Zig | Yes | DWARF (native) |
 
 See **[Writing a Language Extension](EXTENSIONS.md)** to build your own.
 
