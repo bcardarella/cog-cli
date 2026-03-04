@@ -127,6 +127,70 @@ fn handleSigint(_: c_int) callconv(.c) void {
     std.c._exit(130);
 }
 
+// ── Reaper process for SIGKILL orphan cleanup ───────────────────────────
+// When the parent is killed with `kill -9`, child processes become orphans.
+// A reaper is a tiny forked process that blocks on a pipe. The parent holds
+// the write end; when the parent dies the kernel closes it, the reaper gets
+// EOF and kills the target child.
+
+const ReaperHandle = struct {
+    pipe_write_fd: posix.fd_t,
+    reaper_pid: posix.pid_t,
+};
+
+/// Fork a reaper process that will kill `target_pid` if the parent dies
+/// without calling `dismissReaper`. Returns a handle the parent uses to
+/// signal normal completion.
+fn spawnReaper(target_pid: i32) ?ReaperHandle {
+    if (target_pid <= 0) return null;
+
+    const pipe_fds = posix.pipe() catch return null;
+    // pipe_fds[0] = read end, pipe_fds[1] = write end
+
+    const pid = posix.fork() catch {
+        posix.close(pipe_fds[0]);
+        posix.close(pipe_fds[1]);
+        return null;
+    };
+
+    if (pid == 0) {
+        // ── Reaper child process ──
+        // Close write end — only the parent should hold it.
+        posix.close(pipe_fds[1]);
+
+        // Block until parent writes (normal exit) or pipe breaks (parent killed).
+        var buf: [1]u8 = undefined;
+        const n = posix.read(pipe_fds[0], &buf) catch 0;
+        posix.close(pipe_fds[0]);
+
+        if (n == 0) {
+            // EOF — parent died. Kill the target child.
+            _ = std.c.kill(target_pid, posix.SIG.KILL);
+        }
+        // n > 0 → parent dismissed us; target exited normally.
+        std.c._exit(0);
+    }
+
+    // ── Parent process ──
+    posix.close(pipe_fds[0]); // Don't need read end.
+
+    return .{
+        .pipe_write_fd = pipe_fds[1],
+        .reaper_pid = pid,
+    };
+}
+
+/// Tell the reaper that the child exited normally (don't kill it),
+/// then wait for the reaper to exit to avoid zombies.
+fn dismissReaper(handle: ?ReaperHandle) void {
+    const h = handle orelse return;
+    // Send a byte so the reaper's read() returns n > 0.
+    _ = posix.write(h.pipe_write_fd, &[_]u8{0x01}) catch {};
+    posix.close(h.pipe_write_fd);
+    // Reap the reaper to prevent zombies.
+    _ = posix.waitpid(h.reaper_pid, 0);
+}
+
 fn printErr(msg: []const u8) void {
     if (@import("builtin").is_test) return;
     var buf: [4096]u8 = undefined;
@@ -795,6 +859,7 @@ fn runFile(
     };
     const child_pid: i32 = child.id;
     if (child_pid > 0) registerChild(child_pid);
+    const reaper = spawnReaper(child_pid);
 
     // Read stdout (JSON output from agents like Claude)
     const stdout_data = if (child.stdout) |stdout|
@@ -805,10 +870,12 @@ fn runFile(
 
     const term = child.wait() catch |err| {
         if (child_pid > 0) unregisterChild(child_pid);
+        dismissReaper(reaper);
         printFmtErr(allocator, "    " ++ red ++ "wait error: {s}" ++ reset ++ "\n", .{@errorName(err)});
         return fail;
     };
     if (child_pid > 0) unregisterChild(child_pid);
+    dismissReaper(reaper);
 
     switch (term) {
         .Exited => |code| {
@@ -898,6 +965,7 @@ fn runAssociationPhase(
     };
     const assoc_pid: i32 = child.id;
     if (assoc_pid > 0) registerChild(assoc_pid);
+    const reaper = spawnReaper(assoc_pid);
 
     const stdout_data = if (child.stdout) |stdout|
         stdout.readToEndAlloc(allocator, 10 * 1024 * 1024) catch null
@@ -907,10 +975,12 @@ fn runAssociationPhase(
 
     const term = child.wait() catch |err| {
         if (assoc_pid > 0) unregisterChild(assoc_pid);
+        dismissReaper(reaper);
         printFmtErr(allocator, "    " ++ red ++ "wait error: {s}" ++ reset ++ "\n", .{@errorName(err)});
         return fail;
     };
     if (assoc_pid > 0) unregisterChild(assoc_pid);
+    dismissReaper(reaper);
 
     switch (term) {
         .Exited => |code| {
