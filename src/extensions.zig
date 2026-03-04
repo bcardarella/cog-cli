@@ -424,6 +424,7 @@ fn scanInstalled(allocator: std.mem.Allocator, file_ext: []const u8) ?Extension 
                 const bin_path = std.fmt.allocPrint(allocator, "{s}/{s}/bin/{s}", .{ ext_dir, entry.name, manifest.name }) catch continue;
 
                 const result_ext = manifestToExtension(manifest, bin_path);
+                freeDebuggerLeftovers(allocator, manifest.debugger);
                 return result_ext;
             }
         }
@@ -461,6 +462,7 @@ fn scanInstalledByLanguageHint(allocator: std.mem.Allocator, lang: []const u8) ?
                 const bin_path = std.fmt.allocPrint(allocator, "{s}/{s}/bin/{s}", .{ ext_dir, entry.name, manifest.name }) catch continue;
 
                 const result_ext = manifestToExtension(manifest, bin_path);
+                freeDebuggerLeftovers(allocator, manifest.debugger);
                 return result_ext;
             }
         }
@@ -595,7 +597,12 @@ fn readManifest(allocator: std.mem.Allocator, path: []const u8) !ManifestData {
     // Parse optional language_names array
     const language_names = if (obj.get("language_names")) |ln_val| blk: {
         if (ln_val != .array) break :blk @as([]const []const u8, &.{});
-        const names = allocator.alloc([]const u8, ln_val.array.items.len) catch break :blk @as([]const []const u8, &.{});
+        var name_count: usize = 0;
+        for (ln_val.array.items) |item| {
+            if (item == .string) name_count += 1;
+        }
+        if (name_count == 0) break :blk @as([]const []const u8, &.{});
+        const names = allocator.alloc([]const u8, name_count) catch break :blk @as([]const []const u8, &.{});
         var ni: usize = 0;
         for (ln_val.array.items) |item| {
             if (item == .string) {
@@ -658,7 +665,11 @@ fn parseDebuggerConfig(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !?
             }
             if (adapter.get("args")) |args_v| {
                 if (args_v == .array) {
-                    const adapter_args = try allocator.alloc([]const u8, args_v.array.items.len);
+                    var string_count: usize = 0;
+                    for (args_v.array.items) |item| {
+                        if (item == .string) string_count += 1;
+                    }
+                    const adapter_args = try allocator.alloc([]const u8, string_count);
                     var idx: usize = 0;
                     for (args_v.array.items) |item| {
                         if (item == .string) {
@@ -666,7 +677,7 @@ fn parseDebuggerConfig(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !?
                             idx += 1;
                         }
                     }
-                    result.adapter_args = adapter_args[0..idx];
+                    result.adapter_args = adapter_args;
                 }
             }
         }
@@ -682,7 +693,11 @@ fn parseDebuggerConfig(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !?
     // Parse boundary_markers
     if (dbg.get("boundary_markers")) |bm| {
         if (bm == .array) {
-            const markers = try allocator.alloc([]const u8, bm.array.items.len);
+            var marker_count: usize = 0;
+            for (bm.array.items) |item| {
+                if (item == .string) marker_count += 1;
+            }
+            const markers = try allocator.alloc([]const u8, marker_count);
             var mi: usize = 0;
             for (bm.array.items) |item| {
                 if (item == .string) {
@@ -690,7 +705,7 @@ fn parseDebuggerConfig(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !?
                     mi += 1;
                 }
             }
-            result.boundary_markers = markers[0..mi];
+            result.boundary_markers = markers;
         }
     }
 
@@ -753,6 +768,27 @@ pub fn freeExtension(allocator: std.mem.Allocator, ext: *const Extension) void {
                 if (nat.boundary_markers.len > 0) allocator.free(nat.boundary_markers);
             },
         }
+    }
+}
+
+/// Free fields from AllocatedDebuggerConfig that are NOT transferred
+/// to the Extension's DebugConfig during manifestToExtension/toDebugConfig.
+/// - adapter_transport is always converted to an enum (.tcp/.stdio), so
+///   the heap string must be freed separately.
+/// - For native debuggers, adapter_command/args/launch_args aren't part
+///   of NativeConfig and would leak if present.
+fn freeDebuggerLeftovers(allocator: std.mem.Allocator, debugger: ?AllocatedDebuggerConfig) void {
+    const dbg = debugger orelse return;
+    // adapter_transport is converted to an enum in toDebugConfig(); free the string.
+    if (dbg.adapter_transport) |t| allocator.free(t);
+    // For native debuggers, adapter fields aren't carried into NativeConfig.
+    if (dbg.debugger_type == .native) {
+        if (dbg.adapter_command) |c| allocator.free(c);
+        if (dbg.adapter_args) |args| {
+            for (args) |a| allocator.free(a);
+            allocator.free(args);
+        }
+        if (dbg.launch_args_template) |l| allocator.free(l);
     }
 }
 
