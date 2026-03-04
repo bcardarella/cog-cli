@@ -218,6 +218,39 @@ pub const debug_kill =
     ++ "\n"
 ;
 
+// ── Memory ────────────────────────────────────────────────────────────
+
+pub const mem_bootstrap =
+    bold ++ "  cog mem:bootstrap" ++ reset ++ "\n"
+    ++ "\n"
+    ++ "  Scan project files and populate the Cog knowledge graph. Uses\n"
+    ++ "  the SCIP code index for source files and globs for documentation\n"
+    ++ "  files, then invokes " ++ dim ++ "claude -p" ++ reset ++ " to extract and store concepts.\n"
+    ++ "\n"
+    ++ cyan ++ bold ++ "  Usage" ++ reset ++ "\n"
+    ++ "    cog mem:bootstrap " ++ dim ++ "[options]" ++ reset ++ "\n"
+    ++ "\n"
+    ++ cyan ++ bold ++ "  Options" ++ reset ++ "\n"
+    ++ "    " ++ bold ++ "--batch-size" ++ reset ++ " N        " ++ dim ++ "Files per batch (default: 20)" ++ reset ++ "\n"
+    ++ "    " ++ bold ++ "--concurrency" ++ reset ++ " N       " ++ dim ++ "Parallel claude invocations (default: 1)" ++ reset ++ "\n"
+    ++ "    " ++ bold ++ "--clean" ++ reset ++ "                " ++ dim ++ "Reset checkpoint and start fresh" ++ reset ++ "\n"
+    ++ "\n"
+    ++ cyan ++ bold ++ "  Resumability" ++ reset ++ "\n"
+    ++ "    Progress is saved to " ++ dim ++ ".cog/bootstrap-checkpoint.json" ++ reset ++ ".\n"
+    ++ "    Re-run the command to resume from where it left off.\n"
+    ++ "    Use " ++ dim ++ "--clean" ++ reset ++ " to discard the checkpoint and start over.\n"
+    ++ "\n"
+    ++ cyan ++ bold ++ "  Examples" ++ reset ++ "\n"
+    ++ "    cog mem:bootstrap                  " ++ dim ++ "Bootstrap with defaults" ++ reset ++ "\n"
+    ++ "    cog mem:bootstrap --batch-size 10  " ++ dim ++ "Smaller batches" ++ reset ++ "\n"
+    ++ "    cog mem:bootstrap --concurrency 3  " ++ dim ++ "3 parallel invocations" ++ reset ++ "\n"
+    ++ "    cog mem:bootstrap --clean           " ++ dim ++ "Start fresh" ++ reset ++ "\n"
+    ++ "\n"
+    ++ dim ++ "  Requires: claude CLI installed and .mcp.json configured.\n"
+    ++ "  Run " ++ reset ++ bold ++ "cog code:index" ++ reset ++ dim ++ " first for best results." ++ reset ++ "\n"
+    ++ "\n"
+;
+
 // ── Extensions ────────────────────────────────────────────────────────
 
 pub const install =

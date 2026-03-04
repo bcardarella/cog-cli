@@ -114,6 +114,19 @@ fn mainInner() !void {
         return;
     }
 
+    // Handle group help: cog mem
+    if (std.mem.eql(u8, subcmd, "mem")) {
+        printMemHelp();
+        return;
+    }
+
+    // Handle mem:* commands (don't need config — use claude -p)
+    if (std.mem.startsWith(u8, subcmd, "mem:")) {
+        const bootstrap_mod = @import("cog").bootstrap;
+        try bootstrap_mod.dispatch(allocator, subcmd, cmd_args);
+        return;
+    }
+
     // Unknown command
     printErr("error: unknown command '");
     printErr(subcmd);
@@ -131,6 +144,7 @@ fn printHelp(allocator: std.mem.Allocator) void {
         ++ "    " ++ bold ++ "code" ++ reset ++ "                  " ++ dim ++ "Code indexing (CLI compatibility)" ++ reset ++ "\n"
         ++ "    " ++ bold ++ "mcp" ++ reset ++ "                   " ++ dim ++ "MCP server over stdio (primary interface)" ++ reset ++ "\n"
         ++ "    " ++ bold ++ "debug" ++ reset ++ "                 " ++ dim ++ "Debug daemon utilities" ++ reset ++ "\n"
+        ++ "    " ++ bold ++ "mem" ++ reset ++ "                   " ++ dim ++ "Memory utilities" ++ reset ++ "\n"
         ++ "    " ++ bold ++ "install" ++ reset ++ "               " ++ dim ++ "Install a language extension from a git URL" ++ reset ++ "\n"
         ++ "\n"
         ++ cyan ++ bold ++ "  Built-in" ++ reset ++ "\n"
@@ -195,6 +209,15 @@ fn printDebugHelp(allocator: std.mem.Allocator) void {
     } else {
         printErr(static_debug);
     }
+}
+
+fn printMemHelp() void {
+    tui.header();
+    printErr(bold ++ "  cog mem" ++ reset ++ " — Memory utilities\n"
+        ++ "\n"
+        ++ cyan ++ bold ++ "  Commands" ++ reset ++ "\n"
+        ++ "    " ++ bold ++ "mem:bootstrap" ++ reset ++ "         " ++ dim ++ "Scan project files and populate memory" ++ reset ++ "\n"
+        ++ "\n");
 }
 
 fn printMcpHelp() void {
