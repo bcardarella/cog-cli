@@ -1018,23 +1018,6 @@ fn codeIndex(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         tui.progressFinish(indexed_count, total_symbols, skipped, index_path);
     }
 
-    // Output JSON stats
-    var aw: Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    var s: Stringify = .{ .writer = &aw.writer };
-    try s.beginObject();
-    try s.objectField("files_indexed");
-    try s.write(indexed_count);
-    try s.objectField("documents");
-    try s.write(master_index.documents.len);
-    try s.objectField("symbols");
-    try s.write(total_symbols);
-    try s.objectField("path");
-    try s.write(index_path);
-    try s.endObject();
-    const result = try aw.toOwnedSlice();
-    defer allocator.free(result);
-    printStdout(result);
 }
 
 /// Result from loading/decoding a SCIP index.
