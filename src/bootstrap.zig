@@ -569,6 +569,7 @@ fn loadScipFiles(
     }
 }
 
+/// Recursively collect README*, CHANGELOG*, LICENSE* files.
 fn walkForDocs(
     allocator: std.mem.Allocator,
     dir_path: []const u8,
@@ -580,7 +581,6 @@ fn walkForDocs(
 
     var iter = dir.iterate();
     while (try iter.next()) |entry| {
-        // Skip hidden dirs and common non-source dirs
         if (entry.name[0] == '.') continue;
         if (std.mem.eql(u8, entry.name, "node_modules")) continue;
         if (std.mem.eql(u8, entry.name, "vendor")) continue;
@@ -588,6 +588,7 @@ fn walkForDocs(
         if (std.mem.eql(u8, entry.name, "zig-out")) continue;
         if (std.mem.eql(u8, entry.name, "zig-cache")) continue;
         if (std.mem.eql(u8, entry.name, "grammars")) continue;
+        if (std.mem.eql(u8, entry.name, "bench")) continue;
 
         const child_path = if (std.mem.eql(u8, dir_path, "."))
             try allocator.dupe(u8, entry.name)
@@ -611,14 +612,9 @@ fn walkForDocs(
 }
 
 fn isDocFile(name: []const u8) bool {
-    // Match *.md files
-    if (std.mem.endsWith(u8, name, ".md")) return true;
-
-    // Match README*, CHANGELOG*, LICENSE* (case-sensitive)
     if (std.mem.startsWith(u8, name, "README")) return true;
     if (std.mem.startsWith(u8, name, "CHANGELOG")) return true;
     if (std.mem.startsWith(u8, name, "LICENSE")) return true;
-
     return false;
 }
 
@@ -723,7 +719,7 @@ test "isDocFile" {
     try std.testing.expect(isDocFile("CHANGELOG.md"));
     try std.testing.expect(isDocFile("LICENSE"));
     try std.testing.expect(isDocFile("README"));
-    try std.testing.expect(isDocFile("docs.md"));
+    try std.testing.expect(!isDocFile("docs.md"));
     try std.testing.expect(!isDocFile("main.zig"));
     try std.testing.expect(!isDocFile("config.json"));
 }
