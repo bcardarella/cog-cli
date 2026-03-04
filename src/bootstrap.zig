@@ -15,8 +15,10 @@ const reset = "\x1B[0m";
 const green = "\x1B[32m";
 const red = "\x1B[31m";
 
-// ── SIGINT handling ─────────────────────────────────────────────────────
+// ── Ctrl+C handling ─────────────────────────────────────────────────────
 // Track active child PIDs so Ctrl+C can kill them immediately.
+// Uses a watchdog thread that reads stdin in raw mode, bypassing OS signal
+// delivery which can be unreliable when the terminal's ISIG flag is off.
 
 const max_active_children = 16;
 var g_active_children: [max_active_children]std.atomic.Value(i32) = initChildSlots();
@@ -39,6 +41,76 @@ fn unregisterChild(pid: i32) void {
     }
 }
 
+fn killAllChildren() void {
+    for (&g_active_children) |*slot| {
+        const pid = slot.load(.monotonic);
+        if (pid > 0) {
+            _ = std.c.kill(pid, posix.SIG.KILL);
+        }
+    }
+}
+
+/// Watchdog thread that monitors stdin for Ctrl+C (byte 0x03) in raw mode.
+/// More reliable than SIGINT signal handlers because it works regardless of
+/// the terminal's ISIG flag state.
+const CtrlCWatchdog = struct {
+    stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    original_termios: posix.termios = undefined,
+    has_termios: bool = false,
+    fd: posix.fd_t = 0,
+
+    fn start(self: *CtrlCWatchdog) ?std.Thread {
+        self.fd = std.fs.File.stdin().handle;
+        if (!posix.isatty(self.fd)) return null;
+
+        self.original_termios = posix.tcgetattr(self.fd) catch return null;
+        self.has_termios = true;
+
+        var raw = self.original_termios;
+        raw.lflag.ICANON = false;
+        raw.lflag.ECHO = false;
+        raw.lflag.ISIG = false;
+        raw.cc[@intFromEnum(std.c.V.MIN)] = 0;
+        raw.cc[@intFromEnum(std.c.V.TIME)] = 2; // 200ms timeout
+        posix.tcsetattr(self.fd, .NOW, raw) catch return null;
+
+        return std.Thread.spawn(.{}, watchFn, .{self}) catch {
+            self.restore();
+            return null;
+        };
+    }
+
+    fn watchFn(self: *CtrlCWatchdog) void {
+        while (!self.stop.load(.acquire)) {
+            var buf: [1]u8 = undefined;
+            const n = posix.read(self.fd, &buf) catch break;
+            if (n == 0) continue; // timeout
+            if (buf[0] == 3) self.cancel(); // Ctrl+C
+        }
+    }
+
+    fn cancel(self: *CtrlCWatchdog) noreturn {
+        killAllChildren();
+        self.restore();
+        const msg = "\x1B[0m\n  Cancelled.\n";
+        _ = std.c.write(2, msg, msg.len);
+        std.c._exit(130);
+    }
+
+    fn restore(self: *CtrlCWatchdog) void {
+        if (self.has_termios) {
+            posix.tcsetattr(self.fd, .NOW, self.original_termios) catch {};
+        }
+    }
+
+    fn stopAndJoin(self: *CtrlCWatchdog, thread: ?std.Thread) void {
+        self.stop.store(true, .release);
+        if (thread) |t| t.join();
+        self.restore();
+    }
+};
+
+/// Fallback SIGINT handler for programmatic signals (e.g. kill -INT).
 fn installSigintHandler() void {
     const sa = posix.Sigaction{
         .handler = .{ .handler = handleSigint },
@@ -49,17 +121,10 @@ fn installSigintHandler() void {
 }
 
 fn handleSigint(_: c_int) callconv(.c) void {
-    // Kill all active child processes
-    for (&g_active_children) |*slot| {
-        const pid = slot.load(.monotonic);
-        if (pid > 0) {
-            _ = std.c.kill(pid, posix.SIG.KILL);
-        }
-    }
-    // Write a newline so the terminal prompt isn't mangled
+    killAllChildren();
     const msg = "\n  Cancelled.\n";
     _ = std.c.write(2, msg, msg.len);
-    std.c._exit(130); // 128 + SIGINT
+    std.c._exit(130);
 }
 
 fn printErr(msg: []const u8) void {
@@ -255,8 +320,12 @@ fn runBootstrap(
     selected_agent: ?*const CliAgent,
     custom_cmd: ?[]const u8,
 ) !void {
-    // Install SIGINT handler so Ctrl+C kills active agent processes
+    // Ctrl+C handling: watchdog thread monitors stdin directly,
+    // SIGINT handler is a fallback for programmatic signals.
     installSigintHandler();
+    var watchdog = CtrlCWatchdog{};
+    const watchdog_thread = watchdog.start();
+    defer watchdog.stopAndJoin(watchdog_thread);
 
     // Get project root (cwd)
     const project_root = try std.fs.cwd().realpathAlloc(allocator, ".");
