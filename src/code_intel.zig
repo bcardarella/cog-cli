@@ -1097,7 +1097,7 @@ fn collectFiles(allocator: std.mem.Allocator, dir_path: []const u8, out: *std.Ar
 
 /// Match a path against a glob pattern.
 /// Supports: `*` (any non-`/` chars), `**` (any path segments), `?` (any single non-`/` char).
-fn globMatch(pattern: []const u8, path: []const u8) bool {
+pub fn globMatch(pattern: []const u8, path: []const u8) bool {
     var pi: usize = 0; // pattern index
     var si: usize = 0; // path (string) index
 

@@ -2,7 +2,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const posix = std.posix;
 const paths = @import("paths.zig");
-const extensions = @import("extensions.zig");
+const settings_mod = @import("settings.zig");
+const code_intel = @import("code_intel.zig");
 
 // ── Public API ──────────────────────────────────────────────────────────
 
@@ -13,6 +14,7 @@ pub const Watcher = struct {
     thread: ?std.Thread,
     stop_flag: std.atomic.Value(bool),
     project_root: []const u8,
+    index_patterns: []const []const u8,
     read_buf: [4096]u8,
     read_len: usize,
     read_start: usize,
@@ -32,6 +34,11 @@ pub const Watcher = struct {
         const index_path = std.fmt.allocPrint(allocator, "{s}/index.scip", .{cog_dir}) catch return null;
         defer allocator.free(index_path);
         std.fs.accessAbsolute(index_path, .{}) catch return null;
+
+        // Load index patterns from settings — no patterns means nothing to watch
+        const s = settings_mod.Settings.load(allocator) orelse return null;
+        const patterns = if (s.code) |code| code.index orelse return null else return null;
+        if (patterns.len == 0) return null;
 
         // Derive project root (parent of .cog)
         const project_root = std.fs.path.dirname(cog_dir) orelse return null;
@@ -53,6 +60,7 @@ pub const Watcher = struct {
             .thread = null,
             .stop_flag = std.atomic.Value(bool).init(false),
             .project_root = owned_root,
+            .index_patterns = patterns,
             .read_buf = undefined,
             .read_len = 0,
             .read_start = 0,
@@ -91,6 +99,8 @@ pub const Watcher = struct {
         posix.close(self.pipe_read);
         posix.close(self.pipe_write);
         self.allocator.free(self.project_root);
+        for (self.index_patterns) |p| self.allocator.free(p);
+        self.allocator.free(self.index_patterns);
     }
 
     /// File descriptor for the read end of the pipe, for use with poll().
@@ -136,24 +146,19 @@ pub const Watcher = struct {
 
 // ── Shared Filtering ────────────────────────────────────────────────────
 
-fn shouldWatchPath(rel_path: []const u8) bool {
-    // Check path components for excluded dirs and hidden files
+fn shouldWatchPath(rel_path: []const u8, patterns: []const []const u8) bool {
+    // Quick reject: hidden files/dirs
     var it = std.mem.splitScalar(u8, rel_path, '/');
-    var last_component: []const u8 = "";
     while (it.next()) |component| {
         if (component.len == 0) continue;
-        // Skip hidden directories/files
         if (component[0] == '.') return false;
-        // Skip common non-source directories
-        if (isExcludedDir(component)) return false;
-        last_component = component;
     }
-    if (last_component.len == 0) return false;
 
-    // Check file extension — only watch files with a recognized extension
-    const ext = std.fs.path.extension(last_component);
-    if (ext.len == 0) return false;
-    return extensions.isBuiltinSupported(ext);
+    // Match against configured index patterns
+    for (patterns) |pattern| {
+        if (code_intel.globMatch(pattern, rel_path)) return true;
+    }
+    return false;
 }
 
 fn isExcludedDir(name: []const u8) bool {
@@ -440,7 +445,7 @@ fn fseventsCallback(
         const abs_path = std.mem.span(event_paths[i]);
         const rel_path = makeRelative(abs_path, self.project_root) orelse continue;
 
-        if (!shouldWatchPath(rel_path)) continue;
+        if (!shouldWatchPath(rel_path, self.index_patterns)) continue;
 
         // Write "rel_path\n" to pipe (non-blocking, drop on EAGAIN)
         _ = posix.write(self.pipe_write, rel_path) catch continue;
@@ -521,7 +526,7 @@ fn watcherThreadLinux(self: *Watcher) void {
             // Only process file events
             if (event.mask & linux.IN.ISDIR != 0) continue;
 
-            if (!shouldWatchPath(rel_path)) continue;
+            if (!shouldWatchPath(rel_path, self.index_patterns)) continue;
 
             // Write "rel_path\n" to pipe
             _ = posix.write(self.pipe_write, rel_path) catch continue;
