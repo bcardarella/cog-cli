@@ -225,7 +225,7 @@ pub const mem_bootstrap =
     ++ "\n"
     ++ "  Scan project files and populate the Cog knowledge graph. Uses\n"
     ++ "  the SCIP code index for source files and globs for documentation\n"
-    ++ "  files, then invokes " ++ dim ++ "claude -p" ++ reset ++ " to extract and store concepts.\n"
+    ++ "  files, then invokes an AI agent CLI to extract and store concepts.\n"
     ++ "\n"
     ++ cyan ++ bold ++ "  Usage" ++ reset ++ "\n"
     ++ "    cog mem:bootstrap " ++ dim ++ "[options]" ++ reset ++ "\n"
@@ -246,8 +246,8 @@ pub const mem_bootstrap =
     ++ "    cog mem:bootstrap --concurrency 3  " ++ dim ++ "3 parallel invocations" ++ reset ++ "\n"
     ++ "    cog mem:bootstrap --clean           " ++ dim ++ "Start fresh" ++ reset ++ "\n"
     ++ "\n"
-    ++ dim ++ "  Requires: claude CLI installed and .mcp.json configured.\n"
-    ++ "  Run " ++ reset ++ bold ++ "cog code:index" ++ reset ++ dim ++ " first for best results." ++ reset ++ "\n"
+    ++ dim ++ "  Requires: an AI agent CLI and .mcp.json configured.\n"
+    ++ "  Run " ++ reset ++ bold ++ "cog code:index" ++ reset ++ dim ++ " first (required)." ++ reset ++ "\n"
     ++ "\n"
 ;
 

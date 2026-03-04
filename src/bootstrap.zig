@@ -33,6 +33,65 @@ const BatchResult = struct {
     file_count: usize,
 };
 
+// ── Agent CLI definitions ───────────────────────────────────────────────
+// Only agents that support non-interactive CLI prompting are listed here.
+
+const CliAgent = struct {
+    id: []const u8,
+    display_name: []const u8,
+    /// Command tokens to build argv. The prompt is inserted where {prompt} appears.
+    /// Example: &.{"claude", "-p", "{prompt}", "--dangerously-skip-permissions"}
+    cmd_prefix: []const []const u8,
+    cmd_suffix: []const []const u8,
+    /// Environment variables to unset (via env -u) before spawning.
+    env_unset: []const []const u8,
+};
+
+const cli_agents = [_]CliAgent{
+    .{
+        .id = "claude_code",
+        .display_name = "Claude Code",
+        .cmd_prefix = &.{ "claude", "-p" },
+        .cmd_suffix = &.{ "--output-format", "json", "--dangerously-skip-permissions" },
+        .env_unset = &.{ "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT" },
+    },
+    .{
+        .id = "gemini",
+        .display_name = "Gemini CLI",
+        .cmd_prefix = &.{ "gemini", "-p" },
+        .cmd_suffix = &.{"--yolo"},
+        .env_unset = &.{},
+    },
+    .{
+        .id = "codex",
+        .display_name = "OpenAI Codex CLI",
+        .cmd_prefix = &.{ "codex", "exec" },
+        .cmd_suffix = &.{"--full-auto"},
+        .env_unset = &.{},
+    },
+    .{
+        .id = "amp",
+        .display_name = "Amp",
+        .cmd_prefix = &.{ "amp", "-x" },
+        .cmd_suffix = &.{"--dangerously-allow-all"},
+        .env_unset = &.{},
+    },
+    .{
+        .id = "goose",
+        .display_name = "Goose",
+        .cmd_prefix = &.{ "goose", "run", "-t" },
+        .cmd_suffix = &.{},
+        .env_unset = &.{},
+    },
+    .{
+        .id = "opencode",
+        .display_name = "OpenCode",
+        .cmd_prefix = &.{ "opencode", "run" },
+        .cmd_suffix = &.{},
+        .env_unset = &.{},
+    },
+};
+
 /// Dispatch mem:* subcommands.
 pub fn dispatch(allocator: std.mem.Allocator, subcmd: []const u8, args: []const [:0]const u8) !void {
     if (std.mem.eql(u8, subcmd, "mem:bootstrap")) {
@@ -103,17 +162,71 @@ fn memBootstrap(allocator: std.mem.Allocator, args: []const [:0]const u8) !void 
 
     const clean = hasFlag(args, "--clean");
 
-    try runBootstrap(allocator, batch_size, concurrency, clean);
+    // Require SCIP index
+    const cog_dir = paths.findCogDir(allocator) catch {
+        printErr("error: no .cog directory found. Run " ++ dim ++ "cog code:index" ++ reset ++ " first.\n");
+        return error.Explained;
+    };
+    defer allocator.free(cog_dir);
+
+    const index_path = try std.fmt.allocPrint(allocator, "{s}/index.scip", .{cog_dir});
+    defer allocator.free(index_path);
+
+    {
+        const index_file = std.fs.openFileAbsolute(index_path, .{}) catch {
+            printErr("error: no SCIP index found. Run " ++ dim ++ "cog code:index" ++ reset ++ " first.\n");
+            return error.Explained;
+        };
+        index_file.close();
+    }
+
+    // Agent selection menu
+    var menu_items: [cli_agents.len + 1]tui.MenuItem = undefined;
+    for (cli_agents, 0..) |agent, i| {
+        menu_items[i] = .{ .label = agent.display_name };
+    }
+    menu_items[cli_agents.len] = .{ .label = "Custom command", .is_input_option = true };
+
+    printErr("\n");
+    const agent_result = try tui.select(allocator, .{
+        .prompt = "Select an agent to run bootstrap:",
+        .items = &menu_items,
+    });
+
+    const selected_agent: ?*const CliAgent = switch (agent_result) {
+        .selected => |idx| if (idx < cli_agents.len) &cli_agents[idx] else null,
+        .input => null,
+        .back, .cancelled => {
+            printErr("  Aborted.\n");
+            return;
+        },
+    };
+
+    // For custom command, extract the user-typed command string
+    const custom_cmd: ?[]const u8 = switch (agent_result) {
+        .input => |cmd| cmd,
+        else => null,
+    };
+
+    try runBootstrap(allocator, batch_size, concurrency, clean, cog_dir, selected_agent, custom_cmd);
 }
 
-fn runBootstrap(allocator: std.mem.Allocator, batch_size: usize, concurrency: usize, clean: bool) !void {
+fn runBootstrap(
+    allocator: std.mem.Allocator,
+    batch_size: usize,
+    concurrency: usize,
+    clean: bool,
+    cog_dir: []const u8,
+    selected_agent: ?*const CliAgent,
+    custom_cmd: ?[]const u8,
+) !void {
     // Get project root (cwd)
     const project_root = try std.fs.cwd().realpathAlloc(allocator, ".");
     defer allocator.free(project_root);
 
     // Collect files
     printErr("\n" ++ bold ++ "  Collecting files..." ++ reset ++ "\n");
-    var files = try collectSourceFiles(allocator);
+    var files = try collectSourceFiles(allocator, cog_dir);
     defer {
         for (files.items) |f| allocator.free(f);
         files.deinit(allocator);
@@ -124,16 +237,6 @@ fn runBootstrap(allocator: std.mem.Allocator, batch_size: usize, concurrency: us
         return;
     }
     printFmtErr(allocator, "  Found {d} files\n", .{files.items.len});
-
-    // Load checkpoint (unless --clean)
-    const cog_dir = paths.findCogDir(allocator) catch blk: {
-        // No .cog dir — try to create one
-        break :blk paths.findOrCreateCogDir(allocator) catch {
-            printErr("error: cannot find or create .cog directory\n");
-            return error.Explained;
-        };
-    };
-    defer allocator.free(cog_dir);
 
     const checkpoint_path = try std.fmt.allocPrint(allocator, "{s}/bootstrap-checkpoint.json", .{cog_dir});
     defer allocator.free(checkpoint_path);
@@ -169,6 +272,13 @@ fn runBootstrap(allocator: std.mem.Allocator, batch_size: usize, concurrency: us
         printFmtErr(allocator, "  Resuming: {d} remaining ({d} already processed)\n", .{ remaining.items.len, processed.count() });
     }
 
+    // Print agent info
+    if (selected_agent) |agent| {
+        printFmtErr(allocator, "  Agent: " ++ bold ++ "{s}" ++ reset ++ "\n", .{agent.display_name});
+    } else if (custom_cmd) |cmd| {
+        printFmtErr(allocator, "  Agent: " ++ bold ++ "{s}" ++ reset ++ "\n", .{cmd});
+    }
+
     // Split into batches
     const total_batches = (remaining.items.len + batch_size - 1) / batch_size;
     printFmtErr(allocator, "  Processing {d} files in {d} batches (size={d}, concurrency={d})\n\n", .{
@@ -196,7 +306,7 @@ fn runBootstrap(allocator: std.mem.Allocator, batch_size: usize, concurrency: us
                 batch_files.len,
             });
 
-            const result = runBatch(allocator, batch_files, project_root);
+            const result = runBatch(allocator, batch_files, project_root, selected_agent, custom_cmd);
             if (result.success) {
                 files_done += result.file_count;
                 // Update checkpoint
@@ -235,6 +345,8 @@ fn runBootstrap(allocator: std.mem.Allocator, batch_size: usize, concurrency: us
                     .batch_files = batch_files,
                     .project_root = project_root,
                     .allocator = allocator,
+                    .selected_agent = selected_agent,
+                    .custom_cmd = custom_cmd,
                 });
 
                 batch_start = batch_end;
@@ -298,14 +410,22 @@ const ThreadContext = struct {
     batch_files: []const []const u8,
     project_root: []const u8,
     allocator: std.mem.Allocator,
+    selected_agent: ?*const CliAgent,
+    custom_cmd: ?[]const u8,
     result: BatchResult = .{ .success = false, .file_count = 0 },
 };
 
 fn runBatchThread(ctx: *ThreadContext) void {
-    ctx.result = runBatch(ctx.allocator, ctx.batch_files, ctx.project_root);
+    ctx.result = runBatch(ctx.allocator, ctx.batch_files, ctx.project_root, ctx.selected_agent, ctx.custom_cmd);
 }
 
-fn runBatch(allocator: std.mem.Allocator, batch_files: []const []const u8, project_root: []const u8) BatchResult {
+fn runBatch(
+    allocator: std.mem.Allocator,
+    batch_files: []const []const u8,
+    project_root: []const u8,
+    selected_agent: ?*const CliAgent,
+    custom_cmd: ?[]const u8,
+) BatchResult {
     // Build prompt: template + file list
     const template = build_options.bootstrap_prompt;
 
@@ -322,30 +442,51 @@ fn runBatch(allocator: std.mem.Allocator, batch_files: []const []const u8, proje
     const prompt = replaceFileList(allocator, template, file_list_buf.items) catch return .{ .success = false, .file_count = 0 };
     defer allocator.free(prompt);
 
-    // Spawn claude -p via env -u to unset vars that prevent nested claude
-    const argv: []const []const u8 = &.{
-        "env",
-        "-u",
-        "CLAUDECODE",
-        "-u",
-        "CLAUDE_CODE_ENTRYPOINT",
-        "claude",
-        "-p",
-        prompt,
-        "--output-format",
-        "json",
-        "--dangerously-skip-permissions",
-    };
+    // Build argv for the selected agent
+    var argv_buf: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer argv_buf.deinit(allocator);
 
-    var child = std.process.Child.init(argv, allocator);
+    if (selected_agent) |agent| {
+        // env -u VAR1 -u VAR2 ... <command>
+        if (agent.env_unset.len > 0) {
+            argv_buf.append(allocator, "env") catch return .{ .success = false, .file_count = 0 };
+            for (agent.env_unset) |var_name| {
+                argv_buf.append(allocator, "-u") catch return .{ .success = false, .file_count = 0 };
+                argv_buf.append(allocator, var_name) catch return .{ .success = false, .file_count = 0 };
+            }
+        }
+        // cmd_prefix (e.g. "claude", "-p")
+        for (agent.cmd_prefix) |token| {
+            argv_buf.append(allocator, token) catch return .{ .success = false, .file_count = 0 };
+        }
+        // prompt
+        argv_buf.append(allocator, prompt) catch return .{ .success = false, .file_count = 0 };
+        // cmd_suffix (e.g. "--dangerously-skip-permissions")
+        for (agent.cmd_suffix) |token| {
+            argv_buf.append(allocator, token) catch return .{ .success = false, .file_count = 0 };
+        }
+    } else if (custom_cmd) |cmd| {
+        // Parse custom command: split on spaces, append prompt
+        // e.g. "my-agent -p" becomes ["my-agent", "-p", <prompt>]
+        var cmd_iter = std.mem.splitScalar(u8, cmd, ' ');
+        while (cmd_iter.next()) |token| {
+            if (token.len > 0) {
+                argv_buf.append(allocator, token) catch return .{ .success = false, .file_count = 0 };
+            }
+        }
+        argv_buf.append(allocator, prompt) catch return .{ .success = false, .file_count = 0 };
+    } else {
+        return .{ .success = false, .file_count = 0 };
+    }
+
+    var child = std.process.Child.init(argv_buf.items, allocator);
     child.cwd = project_root;
     child.stderr_behavior = .Inherit;
     child.stdout_behavior = .Pipe;
 
     child.spawn() catch return .{ .success = false, .file_count = 0 };
 
-    // Read stdout (JSON output)
-    // We need to drain stdout to prevent pipe blockage
+    // Drain stdout to prevent pipe blockage
     const stdout = child.stdout orelse {
         _ = child.wait() catch {};
         return .{ .success = false, .file_count = 0 };
@@ -377,18 +518,13 @@ fn replaceFileList(allocator: std.mem.Allocator, template: []const u8, file_list
 }
 
 /// Collect files from SCIP index + doc globs.
-fn collectSourceFiles(allocator: std.mem.Allocator) !std.ArrayListUnmanaged([]const u8) {
+fn collectSourceFiles(allocator: std.mem.Allocator, cog_dir: []const u8) !std.ArrayListUnmanaged([]const u8) {
     var files: std.ArrayListUnmanaged([]const u8) = .empty;
     var seen: std.StringHashMapUnmanaged(void) = .empty;
     defer seen.deinit(allocator);
 
-    // 1. Load SCIP index if available
-    const cog_dir = paths.findCogDir(allocator) catch null;
-    defer if (cog_dir) |d| allocator.free(d);
-
-    if (cog_dir) |cd| {
-        loadScipFiles(allocator, cd, &files, &seen);
-    }
+    // 1. Load SCIP index
+    loadScipFiles(allocator, cog_dir, &files, &seen);
 
     // 2. Walk for documentation files
     try walkForDocs(allocator, ".", &files, &seen);
@@ -479,10 +615,9 @@ fn isDocFile(name: []const u8) bool {
     if (std.mem.endsWith(u8, name, ".md")) return true;
 
     // Match README*, CHANGELOG*, LICENSE* (case-sensitive)
-    const upper = name;
-    if (std.mem.startsWith(u8, upper, "README")) return true;
-    if (std.mem.startsWith(u8, upper, "CHANGELOG")) return true;
-    if (std.mem.startsWith(u8, upper, "LICENSE")) return true;
+    if (std.mem.startsWith(u8, name, "README")) return true;
+    if (std.mem.startsWith(u8, name, "CHANGELOG")) return true;
+    if (std.mem.startsWith(u8, name, "LICENSE")) return true;
 
     return false;
 }
@@ -594,13 +729,11 @@ test "isDocFile" {
 }
 
 test "sortFiles" {
-    const allocator = std.testing.allocator;
     var items = [_][]const u8{ "c.zig", "a.zig", "b.zig" };
     sortFiles(&items);
     try std.testing.expectEqualStrings("a.zig", items[0]);
     try std.testing.expectEqualStrings("b.zig", items[1]);
     try std.testing.expectEqualStrings("c.zig", items[2]);
-    _ = allocator;
 }
 
 test "loadCheckpoint missing file" {
@@ -608,4 +741,16 @@ test "loadCheckpoint missing file" {
     var map = loadCheckpoint(allocator, "/tmp/nonexistent-bootstrap-checkpoint.json");
     defer map.deinit(allocator);
     try std.testing.expectEqual(@as(u32, 0), map.count());
+}
+
+test "cli_agents count" {
+    try std.testing.expectEqual(@as(usize, 6), cli_agents.len);
+}
+
+test "cli_agents have non-empty prefix" {
+    for (cli_agents) |agent| {
+        try std.testing.expect(agent.cmd_prefix.len > 0);
+        try std.testing.expect(agent.display_name.len > 0);
+        try std.testing.expect(agent.id.len > 0);
+    }
 }
