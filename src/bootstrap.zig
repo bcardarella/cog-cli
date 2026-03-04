@@ -741,9 +741,18 @@ fn runFile(
     };
     if (child_pid > 0) unregisterChild(child_pid);
 
-    if (term.Exited != 0) {
-        printFmtErr(allocator, "    " ++ red ++ "exited with code {d}" ++ reset ++ "\n", .{term.Exited});
-        return fail;
+    switch (term) {
+        .Exited => |code| {
+            if (code != 0) {
+                printFmtErr(allocator, "    " ++ red ++ "exited with code {d}" ++ reset ++ "\n", .{code});
+                return fail;
+            }
+        },
+        .Signal => |sig| {
+            printFmtErr(allocator, "    " ++ red ++ "killed by signal {d}" ++ reset ++ "\n", .{sig});
+            return fail;
+        },
+        else => return fail,
     }
 
     // Parse token usage from stdout
@@ -834,9 +843,18 @@ fn runAssociationPhase(
     };
     if (assoc_pid > 0) unregisterChild(assoc_pid);
 
-    if (term.Exited != 0) {
-        printFmtErr(allocator, "    " ++ red ++ "exited with code {d}" ++ reset ++ "\n", .{term.Exited});
-        return fail;
+    switch (term) {
+        .Exited => |code| {
+            if (code != 0) {
+                printFmtErr(allocator, "    " ++ red ++ "exited with code {d}" ++ reset ++ "\n", .{code});
+                return fail;
+            }
+        },
+        .Signal => |sig| {
+            printFmtErr(allocator, "    " ++ red ++ "killed by signal {d}" ++ reset ++ "\n", .{sig});
+            return fail;
+        },
+        else => return fail,
     }
 
     // Parse token usage
