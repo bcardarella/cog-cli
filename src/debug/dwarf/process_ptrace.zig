@@ -413,6 +413,16 @@ pub const PtraceProcessControl = struct {
         return null;
     }
 
+    /// Set a hardware watchpoint. Not yet implemented for Linux ptrace.
+    pub fn setHardwareWatchpoint(_: *PtraceProcessControl, _: u64, _: u8, _: u8) !u32 {
+        return error.NotSupported;
+    }
+
+    /// Clear a hardware watchpoint by slot. Not yet implemented for Linux ptrace.
+    pub fn clearHardwareWatchpoint(_: *PtraceProcessControl, _: u32) !void {
+        return error.NotSupported;
+    }
+
     pub fn detach(self: *PtraceProcessControl) !void {
         if (self.pid) |pid| {
             if (builtin.os.tag == .linux) {
