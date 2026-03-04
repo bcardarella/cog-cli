@@ -6,6 +6,57 @@
 - All tests must pass, do not ignore failing tests that you believe are unreleated to your work. Only fix those failing tests after you've completed and validated your work. The last step of any job you do should be to ensure all tests pass.
 - *NEVER* attempt to launch the Zig documentation, it is a web app that you cannot access. Instead you *MUST* search the documentation on the ziglang website
 
+## Release Process
+
+When the user says "release" (or similar), follow this procedure:
+
+### 1. Determine the version
+
+- If the user specifies a version, use it.
+- Otherwise, analyze all commits since the last release tag (`git log <last-tag>..HEAD --oneline`) and apply [Semantic Versioning](https://semver.org/):
+  - **patch** (0.0.x): bug fixes, build fixes, documentation, dependency updates
+  - **minor** (0.x.0): new features, new commands, non-breaking enhancements
+  - **major** (x.0.0): breaking changes to CLI interface, config format, or public API
+
+### 2. Update version strings
+
+Both files must be updated to the new version:
+- `build.zig` — `const version = "X.Y.Z";`
+- `build.zig.zon` — `.version = "X.Y.Z",`
+
+### 3. Update CHANGELOG.md
+
+Follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/):
+- Add a new `## [X.Y.Z] - YYYY-MM-DD` section below `## [Unreleased]` (or below the header if no Unreleased section exists)
+- Categorize changes under: Added, Changed, Deprecated, Removed, Fixed, Security
+- Add a link reference at the bottom: `[X.Y.Z]: https://github.com/trycog/cog-cli/releases/tag/vX.Y.Z`
+- Each entry should be a concise, user-facing description (not a commit message)
+
+### 4. Commit, tag, and push
+
+```sh
+git add build.zig build.zig.zon CHANGELOG.md
+git commit -m "Release X.Y.Z"
+git tag vX.Y.Z
+git push && git push origin vX.Y.Z
+```
+
+The GitHub Actions release workflow handles the rest: building binaries, creating the GitHub Release, and updating the Homebrew tap.
+
+## CLI Design Language
+
+The Cog CLI has a distinctive visual identity. All terminal output follows these conventions.
+
+### Brand
+
+- **Logo**: "COG" spelled with Unicode box-drawing characters (┌ ┐ └ ┘ ─ │) — see `tui.header()`
+- **Tagline**: "Memory for AI agents" in dim text below the logo
+- **Primary color**: Cyan (`\x1B[36m`) — the brand accent, used for the logo, section headers, interactive glyphs, and structural elements
+
+### Visual Hierarchy (3 levels)
+
+1. **Bold** (`\x1B[1m`) — primary content: command names, selected items, key labels
+
 <cog>
 # Cog
 
