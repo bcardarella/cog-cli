@@ -193,6 +193,33 @@ fn dismissReaper(handle: ?ReaperHandle) void {
     _ = posix.waitpid(h.reaper_pid, 0);
 }
 
+// ── Per-file timeout ─────────────────────────────────────────────────────
+// Kills the child process if it exceeds the allowed time. Runs in a
+// background thread, checking every 500ms whether it should fire.
+
+const TimeoutWatcher = struct {
+    pid: i32,
+    timeout_ms: u64,
+    cancelled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    fired: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn watch(self: *TimeoutWatcher) void {
+        const interval_ns = 500 * std.time.ns_per_ms;
+        var elapsed_ms: u64 = 0;
+        while (elapsed_ms < self.timeout_ms) {
+            if (self.cancelled.load(.acquire)) return;
+            std.Thread.sleep(interval_ns);
+            elapsed_ms += 500;
+        }
+        if (!self.cancelled.load(.acquire)) {
+            self.fired.store(true, .release);
+            if (self.pid > 0) {
+                _ = std.c.kill(self.pid, posix.SIG.KILL);
+            }
+        }
+    }
+};
+
 // ── Brain empty check ───────────────────────────────────────────────────
 // Calls cog_stats via the brain's MCP endpoint to check if the brain has
 // any engrams. Used to detect stale checkpoints after a brain reset.
@@ -384,6 +411,16 @@ fn memBootstrap(allocator: std.mem.Allocator, args: []const [:0]const u8) !void 
         return error.Explained;
     }
 
+    const timeout_minutes: u64 = if (getFlagValue(args, "--timeout")) |v|
+        std.fmt.parseInt(u64, v, 10) catch {
+            printErr("error: invalid --timeout value\n");
+            return error.Explained;
+        }
+    else
+        10; // default 10 minutes per file
+
+    const timeout_ms: u64 = timeout_minutes * 60 * 1000;
+
     const clean = hasFlag(args, "--clean");
     const debug = hasFlag(args, "--debug");
 
@@ -446,7 +483,7 @@ fn memBootstrap(allocator: std.mem.Allocator, args: []const [:0]const u8) !void 
         return;
     }
 
-    try runBootstrap(allocator, concurrency, clean, debug, cog_dir, selected_agent, custom_cmd);
+    try runBootstrap(allocator, concurrency, clean, debug, timeout_ms, cog_dir, selected_agent, custom_cmd);
 }
 
 fn runBootstrap(
@@ -454,6 +491,7 @@ fn runBootstrap(
     concurrency: usize,
     clean: bool,
     debug: bool,
+    timeout_ms: u64,
     cog_dir: []const u8,
     selected_agent: ?*const CliAgent,
     custom_cmd: ?[]const u8,
@@ -574,7 +612,7 @@ fn runBootstrap(
                 });
             }
 
-            const result = runFile(allocator, file_path, project_root, selected_agent, custom_cmd, debug);
+            const result = runFile(allocator, file_path, project_root, selected_agent, custom_cmd, debug, timeout_ms);
             if (result.success) {
                 files_done += 1;
                 total_input_tokens += result.input_tokens;
@@ -631,6 +669,7 @@ fn runBootstrap(
             .checkpoint_path = checkpoint_path,
             .processed = &processed,
             .debug = debug,
+            .timeout_ms = timeout_ms,
             .use_tui = use_tui,
             .tui_mutex = &tui_mutex,
             .ticker = if (use_tui) &ticker_ctx else null,
@@ -694,7 +733,7 @@ fn runBootstrap(
                     printFmtErr(allocator, "    Found {d} cross-file dependency pairs\n", .{cf.pair_count});
                 }
 
-                const assoc_result = runAssociationPhase(allocator, project_root, selected_agent, custom_cmd, cf.text, debug);
+                const assoc_result = runAssociationPhase(allocator, project_root, selected_agent, custom_cmd, cf.text, debug, timeout_ms);
 
                 stopTicker(&ticker_thread, &ticker_ctx);
 
@@ -743,6 +782,7 @@ const WorkerShared = struct {
     checkpoint_path: []const u8,
     processed: *std.StringHashMapUnmanaged(void),
     debug: bool,
+    timeout_ms: u64,
     use_tui: bool,
     tui_mutex: *std.Thread.Mutex,
     ticker: ?*TickerContext,
@@ -770,7 +810,7 @@ fn workerThread(shared: *WorkerShared) void {
             });
         }
 
-        const result = runFile(shared.allocator, file_path, shared.project_root, shared.selected_agent, shared.custom_cmd, shared.debug);
+        const result = runFile(shared.allocator, file_path, shared.project_root, shared.selected_agent, shared.custom_cmd, shared.debug, shared.timeout_ms);
         if (result.success) {
             const done = shared.done_count.fetchAdd(1, .monotonic) + 1;
             _ = shared.atomic_input_tokens.fetchAdd(result.input_tokens, .monotonic);
@@ -894,6 +934,7 @@ fn runFile(
     selected_agent: ?*const CliAgent,
     custom_cmd: ?[]const u8,
     debug: bool,
+    timeout_ms: u64,
 ) FileResult {
     const fail: FileResult = .{ .success = false, .input_tokens = 0, .output_tokens = 0, .cost_microdollars = 0 };
 
@@ -947,6 +988,13 @@ fn runFile(
     if (child_pid > 0) registerChild(child_pid);
     const reaper = spawnReaper(child_pid);
 
+    // Start timeout watcher
+    var tw = TimeoutWatcher{ .pid = child_pid, .timeout_ms = timeout_ms };
+    const tw_thread = if (timeout_ms > 0)
+        std.Thread.spawn(.{}, TimeoutWatcher.watch, .{&tw}) catch null
+    else
+        null;
+
     // Read stdout (JSON output from agents like Claude)
     const stdout_data = if (child.stdout) |stdout|
         stdout.readToEndAlloc(allocator, 10 * 1024 * 1024) catch null
@@ -955,11 +1003,15 @@ fn runFile(
     defer if (stdout_data) |d| allocator.free(d);
 
     const term = child.wait() catch |err| {
+        tw.cancelled.store(true, .release);
+        if (tw_thread) |t| t.join();
         if (child_pid > 0) unregisterChild(child_pid);
         dismissReaper(reaper);
         printFmtErr(allocator, "    " ++ red ++ "wait error: {s}" ++ reset ++ "\n", .{@errorName(err)});
         return fail;
     };
+    tw.cancelled.store(true, .release);
+    if (tw_thread) |t| t.join();
     if (child_pid > 0) unregisterChild(child_pid);
     dismissReaper(reaper);
 
@@ -971,7 +1023,11 @@ fn runFile(
             }
         },
         .Signal => |sig| {
-            printFmtErr(allocator, "    " ++ red ++ "killed by signal {d}" ++ reset ++ "\n", .{sig});
+            if (sig == posix.SIG.KILL and tw.fired.load(.acquire)) {
+                printFmtErr(allocator, "    " ++ red ++ "timed out after {d}m" ++ reset ++ "\n", .{timeout_ms / 60_000});
+            } else {
+                printFmtErr(allocator, "    " ++ red ++ "killed by signal {d}" ++ reset ++ "\n", .{sig});
+            }
             return fail;
         },
         else => return fail,
@@ -1001,6 +1057,7 @@ fn runAssociationPhase(
     custom_cmd: ?[]const u8,
     relationships_text: []const u8,
     debug: bool,
+    timeout_ms: u64,
 ) FileResult {
     const fail: FileResult = .{ .success = false, .input_tokens = 0, .output_tokens = 0, .cost_microdollars = 0 };
 
@@ -1053,6 +1110,13 @@ fn runAssociationPhase(
     if (assoc_pid > 0) registerChild(assoc_pid);
     const reaper = spawnReaper(assoc_pid);
 
+    // Start timeout watcher
+    var tw = TimeoutWatcher{ .pid = assoc_pid, .timeout_ms = timeout_ms };
+    const tw_thread = if (timeout_ms > 0)
+        std.Thread.spawn(.{}, TimeoutWatcher.watch, .{&tw}) catch null
+    else
+        null;
+
     const stdout_data = if (child.stdout) |stdout|
         stdout.readToEndAlloc(allocator, 10 * 1024 * 1024) catch null
     else
@@ -1060,11 +1124,15 @@ fn runAssociationPhase(
     defer if (stdout_data) |d| allocator.free(d);
 
     const term = child.wait() catch |err| {
+        tw.cancelled.store(true, .release);
+        if (tw_thread) |t| t.join();
         if (assoc_pid > 0) unregisterChild(assoc_pid);
         dismissReaper(reaper);
         printFmtErr(allocator, "    " ++ red ++ "wait error: {s}" ++ reset ++ "\n", .{@errorName(err)});
         return fail;
     };
+    tw.cancelled.store(true, .release);
+    if (tw_thread) |t| t.join();
     if (assoc_pid > 0) unregisterChild(assoc_pid);
     dismissReaper(reaper);
 
@@ -1076,7 +1144,11 @@ fn runAssociationPhase(
             }
         },
         .Signal => |sig| {
-            printFmtErr(allocator, "    " ++ red ++ "killed by signal {d}" ++ reset ++ "\n", .{sig});
+            if (sig == posix.SIG.KILL and tw.fired.load(.acquire)) {
+                printFmtErr(allocator, "    " ++ red ++ "timed out after {d}m" ++ reset ++ "\n", .{timeout_ms / 60_000});
+            } else {
+                printFmtErr(allocator, "    " ++ red ++ "killed by signal {d}" ++ reset ++ "\n", .{sig});
+            }
             return fail;
         },
         else => return fail,

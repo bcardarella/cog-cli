@@ -231,6 +231,7 @@ pub const mem_bootstrap =
     ++ "\n"
     ++ cyan ++ bold ++ "  Options" ++ reset ++ "\n"
     ++ "    " ++ bold ++ "--concurrency" ++ reset ++ " N       " ++ dim ++ "Parallel agent processes (default: 1)" ++ reset ++ "\n"
+    ++ "    " ++ bold ++ "--timeout" ++ reset ++ " N           " ++ dim ++ "Minutes per file before killing (default: 10)" ++ reset ++ "\n"
     ++ "    " ++ bold ++ "--clean" ++ reset ++ "                " ++ dim ++ "Reset checkpoint and start fresh" ++ reset ++ "\n"
     ++ "    " ++ bold ++ "--debug" ++ reset ++ "                " ++ dim ++ "Show agent stderr output" ++ reset ++ "\n"
     ++ "\n"
