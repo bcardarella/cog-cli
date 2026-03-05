@@ -869,6 +869,8 @@ fn freeDebuggerAllocs(allocator: std.mem.Allocator, debugger: ?AllocatedDebugger
         allocator.free(args);
     }
     if (dbg.launch_args_template) |l| allocator.free(l);
+    if (dbg.program_field) |f| allocator.free(f);
+    if (dbg.args_field) |f| allocator.free(f);
     for (dbg.boundary_markers) |m| allocator.free(m);
     if (dbg.boundary_markers.len > 0) allocator.free(dbg.boundary_markers);
 }
