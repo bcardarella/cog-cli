@@ -1459,7 +1459,7 @@ pub const DebugServer = struct {
 
         if (requireStopped(session)) |err_result| return err_result;
 
-        const thread_id: u32 = if (a.object.get("thread_id")) |v| (if (v == .integer) @intCast(v.integer) else 1) else 1;
+        const thread_id: u32 = if (a.object.get("thread_id")) |v| (if (v == .integer) @intCast(v.integer) else 0) else 0;
         const start_frame: u32 = if (a.object.get("start_frame")) |v| (if (v == .integer) @intCast(v.integer) else 0) else 0;
         const levels: u32 = if (a.object.get("levels")) |v| (if (v == .integer) @intCast(v.integer) else 20) else 20;
 
@@ -2060,7 +2060,7 @@ pub const DebugServer = struct {
 
         if (requireStopped(session)) |err_result| return err_result;
 
-        const thread_id: u32 = if (a.object.get("thread_id")) |v| (if (v == .integer) @intCast(v.integer) else 1) else 1;
+        const thread_id: u32 = if (a.object.get("thread_id")) |v| (if (v == .integer) @intCast(v.integer) else 0) else 0;
 
         const info = session.driver.exceptionInfo(allocator, thread_id) catch |err| {
             self.dashboard.onError("cog_debug_exception_info", @errorName(err));
@@ -2088,7 +2088,7 @@ pub const DebugServer = struct {
 
         if (requireStopped(session)) |err_result| return err_result;
 
-        const thread_id: u32 = if (a.object.get("thread_id")) |v| (if (v == .integer) @intCast(v.integer) else 1) else 1;
+        const thread_id: u32 = if (a.object.get("thread_id")) |v| (if (v == .integer) @intCast(v.integer) else 0) else 0;
 
         const regs = session.driver.readRegisters(allocator, thread_id) catch |err| {
             self.dashboard.onError("cog_debug_registers", @errorName(err));

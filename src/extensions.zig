@@ -48,6 +48,23 @@ pub const DapConfig = struct {
     boundary_markers: []const []const u8 = &.{},
     dependencies: []const DependencyCheck = &.{},
     adapter_install: ?AdapterInstall = null,
+    /// Override the JSON field name for the program value in the DAP launch request.
+    /// Default "program". Set to e.g. "task" for ElixirLS mix_task mode.
+    program_field: []const u8 = "program",
+    /// Override the JSON field name for the args array in the DAP launch request.
+    /// Default "args". Set to e.g. "taskArgs" for ElixirLS mix_task mode.
+    args_field: []const u8 = "args",
+    /// When true, args[0] is used as the program field value instead of the
+    /// program parameter, and args[1:] are sent as the args array. Used for
+    /// mix-task style launchers where the user passes program="mix"
+    /// args=["run", "-e", "..."] and the adapter expects task="run".
+    args_first_is_program: bool = false,
+    /// When true, the proxy will NOT force stopOnEntry=true in the launch
+    /// request and will NOT try to consume an entry-stop event.  Use this
+    /// for adapters that ignore stopOnEntry (e.g. ElixirLS) — forcing it
+    /// causes the proxy to consume the first real breakpoint hit as a
+    /// phantom "entry stop" and auto-continue past it.
+    skip_entry_stop: bool = false,
 };
 
 pub const NativeConfig = struct {
@@ -244,6 +261,20 @@ pub const builtins = [_]Extension{
                 .method = .compile_embedded,
                 .install_dir = "jdi-dap",
                 .entry_point = "jdi-dap/JdiDapServer.class",
+            },
+        } },
+    },
+    // Elixir
+    .{
+        .name = "elixir",
+        .file_extensions = &.{ ".ex", ".exs" },
+        .language_names = &.{"elixir"},
+        .debug = .{ .dap = .{
+            .adapter_command = "elixir_ls",
+            .adapter_args = &.{},
+            .transport = .stdio,
+            .dependencies = &.{
+                .{ .command = "elixir_ls", .check_args = &.{"--version"}, .error_message = "elixir_ls not found on PATH. Install ElixirLS: https://github.com/elixir-lsp/elixir-ls" },
             },
         } },
     },
@@ -509,6 +540,10 @@ const AllocatedDebuggerConfig = struct {
     adapter_args: ?[]const []const u8 = null,
     adapter_transport: ?[]const u8 = null,
     launch_args_template: ?[]const u8 = null,
+    program_field: ?[]const u8 = null,
+    args_field: ?[]const u8 = null,
+    args_first_is_program: bool = false,
+    skip_entry_stop: bool = false,
     boundary_markers: []const []const u8 = &.{},
 
     fn toDebugConfig(self: *const AllocatedDebuggerConfig) DebugConfig {
@@ -523,7 +558,13 @@ const AllocatedDebuggerConfig = struct {
                     if (std.mem.eql(u8, t, "tcp")) .tcp else .stdio
                 else
                     .stdio,
+                // launch_args from cog-extension.json flows into launch_extra_args_json
+                .launch_extra_args_json = self.launch_args_template,
                 .launch_args_template = self.launch_args_template,
+                .program_field = self.program_field orelse "program",
+                .args_field = self.args_field orelse "args",
+                .args_first_is_program = self.args_first_is_program,
+                .skip_entry_stop = self.skip_entry_stop,
                 .boundary_markers = self.boundary_markers,
             } },
         };
@@ -690,6 +731,28 @@ fn parseDebuggerConfig(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !?
         }
     }
 
+    // Parse program_field, args_field, args_first_is_program
+    if (dbg.get("program_field")) |pf| {
+        if (pf == .string) {
+            result.program_field = try allocator.dupe(u8, pf.string);
+        }
+    }
+    if (dbg.get("args_field")) |af| {
+        if (af == .string) {
+            result.args_field = try allocator.dupe(u8, af.string);
+        }
+    }
+    if (dbg.get("args_first_is_program")) |afip| {
+        if (afip == .bool) {
+            result.args_first_is_program = afip.bool;
+        }
+    }
+    if (dbg.get("skip_entry_stop")) |ses| {
+        if (ses == .bool) {
+            result.skip_entry_stop = ses.bool;
+        }
+    }
+
     // Parse boundary_markers
     if (dbg.get("boundary_markers")) |bm| {
         if (bm == .array) {
@@ -759,6 +822,9 @@ pub fn freeExtension(allocator: std.mem.Allocator, ext: *const Extension) void {
                 allocator.free(dap.adapter_command);
                 for (dap.adapter_args) |a| allocator.free(a);
                 if (dap.adapter_args.len > 0) allocator.free(dap.adapter_args);
+                // launch_extra_args_json and launch_args_template may alias the same allocation
+                // (for installed extensions, toDebugConfig copies launch_args_template to both).
+                // Only free launch_args_template to avoid double-free.
                 if (dap.launch_args_template) |l| allocator.free(l);
                 for (dap.boundary_markers) |m| allocator.free(m);
                 if (dap.boundary_markers.len > 0) allocator.free(dap.boundary_markers);
@@ -789,6 +855,8 @@ fn freeDebuggerLeftovers(allocator: std.mem.Allocator, debugger: ?AllocatedDebug
             allocator.free(args);
         }
         if (dbg.launch_args_template) |l| allocator.free(l);
+        if (dbg.program_field) |f| allocator.free(f);
+        if (dbg.args_field) |f| allocator.free(f);
     }
 }
 

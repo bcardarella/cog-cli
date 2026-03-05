@@ -232,6 +232,15 @@ pub const DapProxy = struct {
     // the program runs past breakpoint locations before they are set.
     // configurationDone is sent on the first proxyRun call.
     config_deferred: bool = false,
+    // When true, stopOnEntry was forced to true in the launch request
+    // (even though the user wanted stop_on_entry=false) to keep the
+    // adapter alive during configuration.  proxyRun will consume the
+    // entry stop and send continue after setting breakpoints.
+    forced_entry_stop: bool = false,
+    // Saved launch message bytes for deferred launch (sent in proxyRun
+    // after breakpoints are set, so breakpoints are in place before the
+    // program starts).
+    saved_launch_msg: ?[]const u8 = null,
 
     pub const MemoryEvent = struct {
         memory_reference: []const u8,
@@ -377,6 +386,8 @@ pub const DapProxy = struct {
             for (argv) |a| self.allocator.free(a);
             self.allocator.free(argv);
         }
+        // Clean up saved launch message
+        if (self.saved_launch_msg) |m| self.allocator.free(m);
         // Clean up child session state
         if (self.pending_child_config) |c| self.allocator.free(c);
         // parent_stream is closed by transportKill
@@ -461,15 +472,53 @@ pub const DapProxy = struct {
             .none => return error.NotInitialized,
             .stdio => |*t| {
                 if (t.process.stdin) |stdin| {
-                    var buf: [8192]u8 = undefined;
-                    var w = stdin.writer(&buf);
-                    w.interface.writeAll(data) catch return error.WriteFailed;
-                    w.interface.flush() catch return error.WriteFailed;
+                    // Check if the adapter process is still alive before writing.
+                    // If it exited, the pipe's read end is closed and write would
+                    // fail with BrokenPipe (EPIPE).
+                    std.posix.kill(t.process.id, 0) catch {
+                        dapLog("[DAP transportWrite] adapter process (pid={d}) is no longer alive", .{t.process.id});
+                        self.drainStderr(t);
+                    };
+                    // Use raw write(2) syscall directly to avoid issues with
+                    // buffered writer abstractions on pipe fds.
+                    const fd = stdin.handle;
+                    var remaining = data;
+                    while (remaining.len > 0) {
+                        const written = std.posix.write(fd, remaining) catch |err| {
+                            dapLog("[DAP transportWrite] write(fd={d}) failed: {s}, remaining={d}/{d} bytes", .{ fd, @errorName(err), remaining.len, data.len });
+                            self.drainStderr(t);
+                            return error.WriteFailed;
+                        };
+                        if (written == 0) {
+                            dapLog("[DAP transportWrite] write(fd={d}) returned 0, remaining={d}/{d} bytes", .{ fd, remaining.len, data.len });
+                            return error.WriteFailed;
+                        }
+                        remaining = remaining[written..];
+                    }
                 } else return error.NotInitialized;
             },
             .tcp => |*t| {
                 t.stream.writeAll(data) catch return error.WriteFailed;
             },
+        }
+    }
+
+    /// Read any available stderr from the adapter process and log it.
+    /// Uses poll() to avoid blocking if no data is available.
+    fn drainStderr(_: *DapProxy, t: *StdioTransport) void {
+        const stderr_file = t.process.stderr orelse return;
+        var poll_fds = [_]std.posix.pollfd{.{
+            .fd = stderr_file.handle,
+            .events = std.posix.POLL.IN,
+            .revents = 0,
+        }};
+        // Non-blocking poll: timeout 0
+        const poll_result = std.posix.poll(&poll_fds, 0) catch return;
+        if (poll_result == 0) return; // no data available
+        var stderr_buf: [4096]u8 = undefined;
+        const n = stderr_file.read(&stderr_buf) catch return;
+        if (n > 0) {
+            dapLog("[DAP stderr] {s}", .{stderr_buf[0..n]});
         }
     }
 
@@ -632,8 +681,13 @@ pub const DapProxy = struct {
                                             }
                                         }
                                     }
-                                    // Queue notification
+                                    // Queue notification for poll_events
                                     self.queueNotification("debug/stopped", decoded.body);
+                                    // Also buffer for waitForEvent so it isn't lost
+                                    self.buffered_events.append(self.allocator, .{
+                                        .event_name = self.allocator.dupe(u8, "stopped") catch "",
+                                        .body = self.allocator.dupe(u8, decoded.body) catch "",
+                                    }) catch {};
                                 } else if (std.mem.eql(u8, evt.string, "output")) {
                                     // Capture debuggee output (skip telemetry — adapter-internal metrics)
                                     if (parsed.value.object.get("body")) |body| {
@@ -648,6 +702,8 @@ pub const DapProxy = struct {
                                                 else
                                                     "";
                                                 if (text.len > 0) {
+                                                    const log_len = @min(text.len, 256);
+                                                    dapLog("[DAP readResponse] output({s}): {s}", .{ category, text[0..log_len] });
                                                     self.output_buffer.append(self.allocator, .{
                                                         .category = self.allocator.dupe(u8, category) catch "",
                                                         .text = self.allocator.dupe(u8, text) catch "",
@@ -732,10 +788,18 @@ pub const DapProxy = struct {
                                 } else if (std.mem.eql(u8, evt.string, "exited")) {
                                     // Exited event — process exited with exit code (per DAP spec)
                                     self.queueNotification("debug/exited", decoded.body);
+                                    self.buffered_events.append(self.allocator, .{
+                                        .event_name = self.allocator.dupe(u8, "exited") catch "",
+                                        .body = self.allocator.dupe(u8, decoded.body) catch "",
+                                    }) catch {};
                                 } else if (std.mem.eql(u8, evt.string, "terminated")) {
                                     // Terminated event — debug session end
                                     self.initialized = false;
                                     self.queueNotification("debug/terminated", decoded.body);
+                                    self.buffered_events.append(self.allocator, .{
+                                        .event_name = self.allocator.dupe(u8, "terminated") catch "",
+                                        .body = self.allocator.dupe(u8, decoded.body) catch "",
+                                    }) catch {};
                                 } else if (std.mem.eql(u8, evt.string, "invalidated")) {
                                     // Invalidated event — parse areas and stack frame ID
                                     if (parsed.value.object.get("body")) |body| {
@@ -897,12 +961,12 @@ pub const DapProxy = struct {
                                         .body = self.allocator.dupe(u8, decoded.body) catch "",
                                     }) catch {};
                                     // If the program exited/terminated while we're waiting
-                                    // for "stopped", the breakpoint will never hit — bail out
-                                    // so proxyRun can check the buffered "exited" event.
-                                    if (std.mem.eql(u8, event_name, "stopped") and
+                                    // for "stopped" or "initialized", bail out early — the
+                                    // expected event will never arrive.
+                                    if ((std.mem.eql(u8, event_name, "stopped") or std.mem.eql(u8, event_name, "initialized")) and
                                         (std.mem.eql(u8, evt.string, "exited") or std.mem.eql(u8, evt.string, "terminated")))
                                     {
-                                        dapLog("[DAP waitForEvent] Program exited while waiting for stopped — aborting wait", .{});
+                                        dapLog("[DAP waitForEvent] Program exited/terminated while waiting for {s} — aborting wait", .{event_name});
                                         return error.Timeout;
                                     }
                                     // Also queue notifications for important events so
@@ -920,6 +984,8 @@ pub const DapProxy = struct {
                                                     else
                                                         "";
                                                     if (text.len > 0) {
+                                                        const log_len = @min(text.len, 256);
+                                                        dapLog("[DAP waitForEvent] output({s}): {s}", .{ category, text[0..log_len] });
                                                         self.output_buffer.append(self.allocator, .{
                                                             .category = self.allocator.dupe(u8, category) catch "",
                                                             .text = self.allocator.dupe(u8, text) catch "",
@@ -1292,28 +1358,38 @@ pub const DapProxy = struct {
         dapLog("[DAP launch] Step 1: Initialize response received ({d} bytes)", .{init_resp.len});
         self.parseAdapterCapabilities(allocator, init_resp);
 
-        // 2. Send launch request WITHOUT waiting for response.
-        dapLog("[DAP launch] Step 2: Sending launch request (seq={d})...", .{self.seq});
-        const launch_msg = try protocol.launchRequestEx(allocator, self.nextSeq(), config.program, config.args, config.stop_on_entry, cfg.launch_extra_args_json, config.cwd, config.module, config.env);
-        defer allocator.free(launch_msg);
-        try self.sendRaw(allocator, launch_msg);
-        dapLog("[DAP launch] Step 2: Launch request sent", .{});
+        // 2. Build launch request and SAVE it for later.  The actual launch
+        // is deferred to proxyRun so breakpoints can be sent to the adapter
+        // BEFORE configurationDone triggers program execution.  This prevents
+        // the race where some adapters (e.g. ElixirLS) start the program
+        // immediately on launch and short programs finish before breakpoints
+        // are set.
+        // Force stopOnEntry=true to keep the adapter alive while we set
+        // breakpoints and send configurationDone.  Without this, adapters that
+        // start the program immediately on launch will exit before breakpoints
+        // can be confirmed.  If the user wanted stop_on_entry=false, we send
+        // "continue" after configuration.
+        //
+        // EXCEPTION: when skip_entry_stop is set (e.g. ElixirLS), the adapter
+        // ignores stopOnEntry — it defers execution until configurationDone
+        // and never sends a stopped(entry) event.  Forcing stopOnEntry=true
+        // causes the proxy to consume the first real breakpoint hit as a
+        // phantom "entry stop" and auto-continue past it.
+        const user_stop_on_entry = config.stop_on_entry;
+        const force_stop_on_entry = !cfg.skip_entry_stop;
+        const effective_stop_on_entry = if (force_stop_on_entry) true else user_stop_on_entry;
+        dapLog("[DAP launch] Step 2: Building launch request (seq={d}, stopOnEntry={}, user wanted {}, skip_entry_stop={}, deferred=true)...", .{ self.seq, effective_stop_on_entry, user_stop_on_entry, cfg.skip_entry_stop });
+        const launch_msg = try protocol.launchRequestEx(allocator, self.nextSeq(), config.program, config.args, effective_stop_on_entry, cfg.launch_extra_args_json, config.cwd, config.module, config.env, cfg.program_field, cfg.args_field, cfg.args_first_is_program);
+        // Save with persistent allocator (allocator may be an arena that is freed)
+        if (self.saved_launch_msg) |old| self.allocator.free(old);
+        self.saved_launch_msg = self.allocator.dupe(u8, launch_msg) catch null;
+        allocator.free(launch_msg);
+        dapLog("[DAP launch] Step 2: Launch request saved ({d} bytes), deferring send to proxyRun", .{if (self.saved_launch_msg) |m| m.len else 0});
 
-        // 3. Wait for 'initialized' event from the adapter
-        dapLog("[DAP launch] Step 3: Waiting for initialized event...", .{});
-        const init_event = try self.waitForEvent(allocator, "initialized");
-        allocator.free(init_event);
-        dapLog("[DAP launch] Step 3: initialized event received", .{});
-
-        // 4. Defer configurationDone until the first proxyRun call.
-        // The MCP interface is serial: launch → set breakpoints → run.
-        // If we send configurationDone here, the program starts immediately
-        // and may run past breakpoint locations before the user can set them.
-        // By deferring, breakpoints are stored locally during the config phase
-        // and re-armed right before configurationDone in proxyRun.
         self.initialized = true;
         self.config_deferred = true;
-        dapLog("[DAP launch] Deferring configurationDone (breakpoints can be set before run)", .{});
+        self.forced_entry_stop = if (force_stop_on_entry) !user_stop_on_entry else false;
+        dapLog("[DAP launch] Config phase active (launch deferred, breakpoints can be set before run)", .{});
     }
 
     /// Launch an adapter over TCP transport (vscode-js-debug, etc.)
@@ -1374,7 +1450,7 @@ pub const DapProxy = struct {
         const stop_on_entry = if (cfg.child_sessions.enabled) false else config.stop_on_entry;
         dapLog("[DAP launch] Sending launch request (stopOnEntry={})...", .{stop_on_entry});
         const cwd = config.cwd orelse if (config.program.len > 0) std.fs.path.dirname(config.program) else null;
-        const launch_msg = try protocol.launchRequestEx(allocator, self.nextSeq(), config.program, config.args, stop_on_entry, cfg.launch_extra_args_json, cwd, config.module, config.env);
+        const launch_msg = try protocol.launchRequestEx(allocator, self.nextSeq(), config.program, config.args, stop_on_entry, cfg.launch_extra_args_json, cwd, config.module, config.env, cfg.program_field, cfg.args_field, cfg.args_first_is_program);
         defer allocator.free(launch_msg);
         try self.sendRaw(allocator, launch_msg);
 
@@ -1715,30 +1791,145 @@ pub const DapProxy = struct {
         const self: *DapProxy = @ptrCast(@alignCast(ctx));
         if (!self.initialized) return error.NotInitialized;
 
-        if (self.config_deferred) {
-            // First run after a deferred launch (stdio or child session).
-            // Re-arm all tracked breakpoints as a final reconciliation before
-            // ending the configuration phase.  During the config phase, the user
-            // may have set and/or removed breakpoints — each operation only
-            // updated local state.  Re-arming sends the full breakpoint set
-            // to the adapter before configurationDone starts the program.
-            dapLog("[DAP proxyRun] Re-arming breakpoints before deferred configurationDone", .{});
+        if (self.config_deferred and self.saved_launch_msg != null) {
+            // Deferred launch: the launch request was saved during launchStdio
+            // so breakpoints can be sent BEFORE configurationDone triggers
+            // program execution.  This prevents the race where some adapters
+            // (e.g. ElixirLS) start the program immediately on launch and
+            // short programs finish before breakpoints are set.
+            //
+            // Spec-compliant flow:
+            //   launch → [wait for initialized] → setBreakpoints → configurationDone → program runs
+            // For non-compliant adapters (e.g. ElixirLS) that never send initialized,
+            // we fall through after a short timeout and proceed anyway.
+
+            // 1. Send the deferred launch request.
+            self.thread_id = 0; // Reset so we can detect entry stop
+            const launch_msg = self.saved_launch_msg.?;
+            dapLog("[DAP proxyRun] Sending deferred launch request ({d} bytes)...", .{launch_msg.len});
+            try self.sendRaw(allocator, launch_msg);
+            self.allocator.free(launch_msg);
+            self.saved_launch_msg = null;
+            dapLog("[DAP proxyRun] Deferred launch request sent", .{});
+
+            // 2. Wait for 'initialized' event (per DAP spec, adapter signals
+            // readiness for configuration).  Use a short timeout so non-compliant
+            // adapters that never send it don't block indefinitely.
+            {
+                const saved_timeout = self.request_timeout_ms;
+                self.request_timeout_ms = 10_000; // 10s for initialized
+                dapLog("[DAP proxyRun] Waiting for initialized event (10s timeout)...", .{});
+                if (self.waitForEvent(allocator, "initialized")) |init_event| {
+                    allocator.free(init_event);
+                    dapLog("[DAP proxyRun] initialized event received", .{});
+                } else |err| {
+                    dapLog("[DAP proxyRun] initialized event not received: {s} (proceeding anyway)", .{@errorName(err)});
+                }
+                self.request_timeout_ms = saved_timeout;
+            }
+
+            // 3. Re-arm all tracked breakpoints before configurationDone.
+            // The adapter will queue these after processing the launch request.
+            dapLog("[DAP proxyRun] Sending breakpoints to adapter (before configurationDone)...", .{});
             self.rearmBreakpoints(allocator);
+            dapLog("[DAP proxyRun] Breakpoints sent", .{});
 
-            // Clear exception breakpoints so the adapter only stops at our
-            // explicit breakpoints, not on uncaught exceptions during startup
-            // or import resolution.
-            dapLog("[DAP proxyRun] Clearing exception breakpoints (empty filters)", .{});
-            const empty_filters: []const []const u8 = &.{};
-            try self.sendExceptionBreakpoints(allocator, empty_filters);
-
-            dapLog("[DAP proxyRun] Sending deferred configurationDone to start program", .{});
+            // 4. Send configurationDone to signal the adapter to start the
+            // program.  At this point breakpoints are already in place.
+            dapLog("[DAP proxyRun] Sending configurationDone...", .{});
             const cd_msg = try protocol.configurationDoneRequest(allocator, self.nextSeq());
             defer allocator.free(cd_msg);
-            const cd_resp = try self.sendRequest(allocator, cd_msg);
+            const cd_resp = self.sendRequest(allocator, cd_msg) catch |err| {
+                // Some adapters may not respond to configurationDone if they
+                // already started (fallback: continue anyway).
+                dapLog("[DAP proxyRun] configurationDone response error: {s} (continuing)", .{@errorName(err)});
+                _ = &err;
+                self.config_deferred = false;
+                // Fall through to wait for stopped/exited
+                return self.waitForStopOrExit(allocator);
+            };
             allocator.free(cd_resp);
+            dapLog("[DAP proxyRun] configurationDone response received", .{});
+
+            // 5. If stopOnEntry was forced (user wanted false), consume the
+            // entry stop and resume execution.  The "stopped" event may have
+            // already been consumed by readResponse during steps 3-4 (which
+            // sets self.thread_id), or it may still be in the pipe.
+            if (self.forced_entry_stop) {
+                self.forced_entry_stop = false;
+                if (self.thread_id != 0) {
+                    // Entry stop already consumed by readResponse
+                    dapLog("[DAP proxyRun] Entry stop already consumed (thread_id={d}), sending continue", .{self.thread_id});
+                } else {
+                    // Wait for the entry stop event
+                    dapLog("[DAP proxyRun] Waiting for entry stop event...", .{});
+                    if (self.waitForEvent(allocator, "stopped")) |entry_stop| {
+                        // waitForEvent returns the body but doesn't extract threadId
+                        // for the target event, so parse it here.
+                        if (self.thread_id == 0) {
+                            if (std.json.parseFromSlice(std.json.Value, allocator, entry_stop, .{})) |parsed| {
+                                defer parsed.deinit();
+                                if (parsed.value == .object) {
+                                    // threadId is inside the "body" object in DAP messages
+                                    if (parsed.value.object.get("body")) |body| {
+                                        if (body == .object) {
+                                            if (body.object.get("threadId")) |tid| {
+                                                if (tid == .integer) self.thread_id = tid.integer;
+                                            }
+                                        }
+                                    }
+                                }
+                            } else |_| {}
+                        }
+                        allocator.free(entry_stop);
+                        dapLog("[DAP proxyRun] Entry stop received (thread_id={d})", .{self.thread_id});
+                    } else |err| {
+                        dapLog("[DAP proxyRun] No entry stop: {s}", .{@errorName(err)});
+                    }
+                }
+                {
+                    // Use thread_id from the stopped event, or 0 (all threads)
+                    // as a fallback if the adapter didn't provide one.
+                    const continue_tid = self.thread_id;
+                    dapLog("[DAP proxyRun] Sending continue to resume from entry stop (thread_id={d})", .{continue_tid});
+                    const cont_msg = try protocol.continueRequest(allocator, self.nextSeq(), continue_tid);
+                    defer allocator.free(cont_msg);
+                    if (self.sendRequest(allocator, cont_msg)) |cont_resp| {
+                        allocator.free(cont_resp);
+                        dapLog("[DAP proxyRun] Resumed from entry stop", .{});
+                    } else |err| {
+                        dapLog("[DAP proxyRun] Continue error: {s}", .{@errorName(err)});
+                    }
+                }
+            }
+
             self.config_deferred = false;
-            // Don't send a separate continue — configurationDone starts the program.
+        } else if (self.config_deferred) {
+            // Deferred configurationDone (child session with stopOnEntry=true).
+            // The launch was already sent; program is paused at entry.
+
+            // 1. Wait for the entry "stopped" event (may already be buffered).
+            dapLog("[DAP proxyRun] Waiting for entry stop event (stopOnEntry deferred config)...", .{});
+            const entry_stop = self.waitForEvent(allocator, "stopped") catch |err| {
+                dapLog("[DAP proxyRun] Failed to receive entry stop: {s}", .{@errorName(err)});
+                return err;
+            };
+            allocator.free(entry_stop);
+            dapLog("[DAP proxyRun] Entry stop received", .{});
+
+            // 2. Re-arm breakpoints while program is paused.
+            dapLog("[DAP proxyRun] Re-arming breakpoints", .{});
+            self.rearmBreakpoints(allocator);
+
+            // 3. Resume execution.
+            dapLog("[DAP proxyRun] Sending continue to resume from entry stop", .{});
+            const cont_msg = try protocol.continueRequest(allocator, self.nextSeq(), self.thread_id);
+            defer allocator.free(cont_msg);
+            const cont_resp = try self.sendRequest(allocator, cont_msg);
+            allocator.free(cont_resp);
+
+            self.config_deferred = false;
+            self.forced_entry_stop = false;
         } else {
             // Normal case: send the appropriate DAP run command
             const msg = try self.mapRunActionEx(allocator, action, options);
@@ -1747,6 +1938,11 @@ pub const DapProxy = struct {
             allocator.free(resp);
         }
 
+        return self.waitForStopOrExit(allocator);
+    }
+
+    /// Wait for a stopped or exited event, fetch stack trace, and return state.
+    fn waitForStopOrExit(self: *DapProxy, allocator: std.mem.Allocator) anyerror!StopState {
         // Wait for a stopped or exited event
         // Try stopped first, fall back to exited
         const event_data = self.waitForEvent(allocator, "stopped") catch {
@@ -1768,6 +1964,27 @@ pub const DapProxy = struct {
         {
             const log_len = @min(event_data.len, 512);
             dapLog("[DAP proxyRun] stopped event body[0..{d}]: {s}", .{ log_len, event_data[0..log_len] });
+        }
+
+        // Extract threadId from the stopped event. waitForEvent returns the
+        // target event without setting self.thread_id, so parse it here to
+        // ensure the subsequent stackTraceRequest uses the correct thread.
+        {
+            if (std.json.parseFromSlice(std.json.Value, allocator, event_data, .{})) |parsed| {
+                defer parsed.deinit();
+                if (parsed.value == .object) {
+                    if (parsed.value.object.get("body")) |body| {
+                        if (body == .object) {
+                            if (body.object.get("threadId")) |tid| {
+                                if (tid == .integer) {
+                                    self.thread_id = tid.integer;
+                                    dapLog("[DAP waitForStopOrExit] Set thread_id={d} from stopped event", .{tid.integer});
+                                }
+                            }
+                        }
+                    }
+                }
+            } else |_| {}
         }
 
         var state = try translateStoppedEvent(allocator, event_data);
@@ -2466,7 +2683,9 @@ pub const DapProxy = struct {
         const self: *DapProxy = @ptrCast(@alignCast(ctx));
         if (!self.initialized or self.transport == .none) return &.{};
 
-        const msg = try protocol.stackTraceRequest(allocator, self.nextSeq(), @intCast(thread_id), @intCast(start_frame), @intCast(levels));
+        // Use the current stopped thread if no specific thread requested
+        const effective_tid: i64 = if (thread_id == 0) self.thread_id else @intCast(thread_id);
+        const msg = try protocol.stackTraceRequest(allocator, self.nextSeq(), effective_tid, @intCast(start_frame), @intCast(levels));
         defer allocator.free(msg);
         const resp = try self.sendRequest(allocator, msg);
         defer allocator.free(resp);
@@ -3067,7 +3286,8 @@ pub const DapProxy = struct {
         const self: *DapProxy = @ptrCast(@alignCast(ctx));
         if (!self.initialized or self.transport == .none) return error.NotSupported;
 
-        const msg = try protocol.exceptionInfoRequest(allocator, self.nextSeq(), @intCast(thread_id));
+        const effective_tid: i64 = if (thread_id == 0) self.thread_id else @intCast(thread_id);
+        const msg = try protocol.exceptionInfoRequest(allocator, self.nextSeq(), effective_tid);
         defer allocator.free(msg);
         const resp = try self.sendRequest(allocator, msg);
         defer allocator.free(resp);
@@ -3451,6 +3671,9 @@ pub const DapProxy = struct {
                 if (program.len > 0) std.fs.path.dirname(program) else null,
                 self.saved_launch_module,
                 null,
+                cfg.program_field,
+                cfg.args_field,
+                cfg.args_first_is_program,
             );
             defer allocator.free(launch_msg);
             try self.sendRaw(allocator, launch_msg);

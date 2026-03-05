@@ -233,12 +233,12 @@ pub fn initializeRequestParams(allocator: std.mem.Allocator, seq: i64, adapter_i
 }
 
 pub fn launchRequest(allocator: std.mem.Allocator, seq: i64, program: []const u8, args: []const []const u8, stop_on_entry: bool) ![]const u8 {
-    return launchRequestEx(allocator, seq, program, args, stop_on_entry, null, null, null, null);
+    return launchRequestEx(allocator, seq, program, args, stop_on_entry, null, null, null, null, "program", "args", false);
 }
 
 /// Build a launch request with optional extra arguments merged from JSON and optional cwd.
 /// extra_args_json, when non-null, is parsed and each field is written into the arguments object.
-pub fn launchRequestEx(allocator: std.mem.Allocator, seq: i64, program: []const u8, args: []const []const u8, stop_on_entry: bool, extra_args_json: ?[]const u8, cwd: ?[]const u8, module: ?[]const u8, env: ?std.json.ObjectMap) ![]const u8 {
+pub fn launchRequestEx(allocator: std.mem.Allocator, seq: i64, program: []const u8, args: []const []const u8, stop_on_entry: bool, extra_args_json: ?[]const u8, cwd: ?[]const u8, module: ?[]const u8, env: ?std.json.ObjectMap, program_field: []const u8, args_field: []const u8, args_first_is_program: bool) ![]const u8 {
     var aw: Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
     var s: Stringify = .{ .writer = &aw.writer };
@@ -284,21 +284,32 @@ pub fn launchRequestEx(allocator: std.mem.Allocator, seq: i64, program: []const 
         }
     }
 
+    // Determine the effective program value and args slice.
+    // When args_first_is_program is true (e.g. ElixirLS mix_task mode),
+    // args[0] becomes the program field value ("task") and args[1:] become
+    // the args field value ("taskArgs").
+    const effective_program = if (args_first_is_program and args.len > 0) args[0] else program;
+    const effective_args = if (args_first_is_program and args.len > 0) args[1..] else args;
+
     // debugpy supports "module" for `python -m <module>` launch mode
     // (e.g. module="pytest" for `python -m pytest <args>`).
     if (module) |m| {
         try s.objectField("module");
         try s.write(m);
     } else {
-        try s.objectField("program");
-        try s.write(program);
+        try s.objectField(program_field);
+        try s.write(effective_program);
     }
-    if (args.len > 0) {
-        try s.objectField("args");
+    if (effective_args.len > 0) {
+        try s.objectField(args_field);
         try s.beginArray();
-        for (args) |arg| try s.write(arg);
+        for (effective_args) |arg| try s.write(arg);
         try s.endArray();
     }
+    // "request" inside arguments mirrors VS Code behavior — some adapters
+    // (e.g. ElixirLS) read it from the config map to determine launch vs attach mode.
+    try s.objectField("request");
+    try s.write("launch");
     try s.objectField("stopOnEntry");
     try s.write(stop_on_entry);
     // Use internalConsole to prevent adapters from spawning a terminal
