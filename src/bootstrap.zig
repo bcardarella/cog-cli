@@ -1632,20 +1632,57 @@ fn replacePlaceholder(allocator: std.mem.Allocator, template: []const u8, placeh
     return result;
 }
 
-/// Collect files from SCIP index + settings.json patterns.
+/// Collect files for bootstrap using settings.json code.index patterns as the
+/// source of truth.  When patterns are defined, only SCIP-indexed files that
+/// match a pattern are included — plus any pattern-matched files that aren't
+/// in the SCIP index (e.g. "**/*.md").  When no patterns are defined, all
+/// SCIP-indexed files are included (backwards-compatible default).
 fn collectSourceFiles(allocator: std.mem.Allocator, cog_dir: []const u8) !std.ArrayListUnmanaged([]const u8) {
     var files: std.ArrayListUnmanaged([]const u8) = .empty;
     var seen: std.StringHashMapUnmanaged(void) = .empty;
     defer seen.deinit(allocator);
 
-    // 1. Load SCIP index
-    loadScipFiles(allocator, cog_dir, &files, &seen);
+    const settings = settings_mod.Settings.load(allocator);
+    defer if (settings) |s| s.deinit(allocator);
 
-    // 2. Collect additional files from settings.json code.index patterns
-    //    (e.g. "**/*.md" for markdown files that aren't in the SCIP index)
-    loadSettingsPatternFiles(allocator, &files, &seen);
+    const patterns = if (settings) |s| if (s.code) |c| c.index else null else null;
 
-    // 3. Sort alphabetically
+    if (patterns) |pats| {
+        // Patterns defined — they are the source of truth.
+        // 1. Collect SCIP paths but only keep those matching a pattern.
+        var scip_paths: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer scip_paths.deinit(allocator);
+        loadScipFiles(allocator, cog_dir, &scip_paths, &seen);
+
+        for (scip_paths.items) |path| {
+            var matched = false;
+            for (pats) |pat| {
+                if (code_intel.globMatch(pat, path)) {
+                    matched = true;
+                    break;
+                }
+            }
+            if (matched) {
+                files.append(allocator, path) catch {
+                    allocator.free(path);
+                    continue;
+                };
+            } else {
+                // Remove from seen so pattern collection can re-add if needed
+                _ = seen.fetchRemove(path);
+                allocator.free(path);
+            }
+        }
+
+        // 2. Collect additional pattern-matched files not in the SCIP index
+        //    (e.g. **/*.md files that have no indexer).
+        loadSettingsPatternFiles(allocator, pats, &files, &seen);
+    } else {
+        // No patterns — include all SCIP-indexed files (legacy behavior).
+        loadScipFiles(allocator, cog_dir, &files, &seen);
+    }
+
+    // Sort alphabetically
     sortFiles(files.items);
 
     return files;
@@ -1704,18 +1741,13 @@ fn extractDocumentPath(data: []const u8) ?[]const u8 {
     return null;
 }
 
-/// Collect files matching settings.json code.index patterns that aren't already in the file list.
+/// Collect files matching patterns that aren't already in the file list.
 fn loadSettingsPatternFiles(
     allocator: std.mem.Allocator,
+    patterns: []const []const u8,
     files: *std.ArrayListUnmanaged([]const u8),
     seen: *std.StringHashMapUnmanaged(void),
 ) void {
-    const settings = settings_mod.Settings.load(allocator) orelse return;
-    defer settings.deinit(allocator);
-
-    const code = settings.code orelse return;
-    const patterns = code.index orelse return;
-
     for (patterns) |pattern| {
         var pattern_files: std.ArrayListUnmanaged([]const u8) = .empty;
         defer pattern_files.deinit(allocator);
