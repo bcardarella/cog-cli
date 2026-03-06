@@ -1,4 +1,5 @@
 const std = @import("std");
+const debug_log = @import("debug_log.zig");
 
 /// Find .cog directory by walking up from cwd.
 /// Stops at project boundaries (.git) to avoid escaping the current project.

@@ -11,6 +11,7 @@ const debug_server_mod = @import("debug/server.zig");
 const debug_mod = @import("debug.zig");
 const watcher_mod = @import("watcher.zig");
 const paths = @import("paths.zig");
+const debug_log_mod = @import("debug_log.zig");
 
 const Config = config_mod.Config;
 const DebugServer = debug_server_mod.DebugServer;

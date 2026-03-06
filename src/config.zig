@@ -1,5 +1,6 @@
 const std = @import("std");
 const paths = @import("paths.zig");
+const debug_log = @import("debug_log.zig");
 
 pub const Config = struct {
     api_key: []const u8,

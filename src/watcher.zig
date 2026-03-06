@@ -4,6 +4,7 @@ const posix = std.posix;
 const paths = @import("paths.zig");
 const settings_mod = @import("settings.zig");
 const code_intel = @import("code_intel.zig");
+const debug_log = @import("debug_log.zig");
 
 // ── Public API ──────────────────────────────────────────────────────────
 

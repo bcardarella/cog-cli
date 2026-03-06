@@ -18,6 +18,7 @@ pub const mcp = @import("mcp.zig");
 pub const hooks = @import("hooks.zig");
 pub const watcher = @import("watcher.zig");
 pub const bootstrap = @import("bootstrap.zig");
+pub const debug_log = @import("debug_log.zig");
 
 test {
     _ = config;
@@ -40,4 +41,5 @@ test {
     _ = hooks;
     _ = watcher;
     _ = bootstrap;
+    _ = debug_log;
 }

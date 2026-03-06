@@ -9,6 +9,7 @@ const config_mod = @import("config.zig");
 const client = @import("client.zig");
 const settings_mod = @import("settings.zig");
 const code_intel = @import("code_intel.zig");
+const debug_log = @import("debug_log.zig");
 
 // ANSI styles
 const cyan = "\x1B[36m";

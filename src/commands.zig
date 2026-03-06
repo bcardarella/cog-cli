@@ -10,6 +10,7 @@ const tui = @import("tui.zig");
 const agents_mod = @import("agents.zig");
 const settings_mod = @import("settings.zig");
 const hooks_mod = @import("hooks.zig");
+const debug_log = @import("debug_log.zig");
 
 const Config = config_mod.Config;
 const help = @import("help_text.zig");

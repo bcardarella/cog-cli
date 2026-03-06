@@ -2,6 +2,7 @@ const std = @import("std");
 const json = std.json;
 const Writer = std.io.Writer;
 const curl = @import("curl.zig");
+const debug_log = @import("debug_log.zig");
 
 pub const ClientError = error{
     Explained,

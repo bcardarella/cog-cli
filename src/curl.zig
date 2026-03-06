@@ -1,5 +1,6 @@
 const std = @import("std");
 const c = @import("curl").libcurl;
+const debug_log = @import("debug_log.zig");
 
 pub const HttpResponse = struct {
     status_code: u16,

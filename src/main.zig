@@ -4,6 +4,7 @@ const commands = @import("cog").commands;
 const code_intel = @import("cog").code_intel;
 const extensions_mod = @import("cog").extensions;
 const debug_mod = @import("cog").debug;
+const debug_log = @import("cog").debug_log;
 const tui = @import("cog").tui;
 const help = @import("cog").help_text;
 
@@ -34,6 +35,26 @@ fn mainInner() !void {
     while (iter.next()) |arg| {
         try args_list.append(allocator, arg);
     }
+
+    // Scan for --debug flag and strip it from args
+    var debug_flag = false;
+    {
+        var i: usize = 1; // skip argv[0]
+        while (i < args_list.items.len) {
+            if (std.mem.eql(u8, args_list.items[i], "--debug")) {
+                debug_flag = true;
+                _ = args_list.orderedRemove(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    if (debug_flag) {
+        debug_log.initFromCwd(allocator);
+    }
+    defer debug_log.deinit();
+
     const args = args_list.items;
 
     if (args.len < 2) {

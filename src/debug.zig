@@ -23,6 +23,7 @@ pub const daemon = @import("debug/daemon.zig");
 const std = @import("std");
 const help = @import("help_text.zig");
 const tui = @import("tui.zig");
+const debug_log = @import("debug_log.zig");
 
 // ANSI styles
 const cyan = "\x1B[36m";

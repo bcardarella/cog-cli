@@ -1,6 +1,7 @@
 const std = @import("std");
 const scip = @import("scip.zig");
 const extensions = @import("extensions.zig");
+const debug_log = @import("debug_log.zig");
 
 // ── Tree-sitter C API ───────────────────────────────────────────────────
 

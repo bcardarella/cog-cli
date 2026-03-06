@@ -12,6 +12,7 @@ const settings_mod = @import("settings.zig");
 const paths = @import("paths.zig");
 const extensions = @import("extensions.zig");
 const tree_sitter_indexer = @import("tree_sitter_indexer.zig");
+const debug_log = @import("debug_log.zig");
 
 // Advisory file locking via flock(2). Auto-released on close/process exit.
 extern "c" fn flock(fd: c_int, operation: c_int) c_int;
