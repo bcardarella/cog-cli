@@ -19,11 +19,12 @@ When the user says "release" (or similar), follow this procedure:
   - **minor** (0.x.0): new features, new commands, non-breaking enhancements
   - **major** (x.0.0): breaking changes to CLI interface, config format, or public API
 
-### 2. Update version strings
+### 2. Update version string
 
-Both files must be updated to the new version:
-- `build.zig` — `const version = "X.Y.Z";`
+Update the version in the single source of truth:
 - `build.zig.zon` — `.version = "X.Y.Z",`
+
+(`build.zig` reads the version from `build.zig.zon` via `@import`)
 
 ### 3. Update CHANGELOG.md
 
@@ -36,7 +37,7 @@ Follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/):
 ### 4. Commit, tag, and push
 
 ```sh
-git add build.zig build.zig.zon CHANGELOG.md
+git add build.zig.zon CHANGELOG.md
 git commit -m "Release X.Y.Z"
 git tag vX.Y.Z
 git push && git push origin vX.Y.Z

@@ -1,6 +1,7 @@
 const std = @import("std");
+const zon = @import("build.zig.zon");
 
-const version = "0.7.1";
+const version = zon.version;
 
 const tree_sitter_version = "v0.25.4";
 
