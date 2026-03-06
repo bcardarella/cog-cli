@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-03-06
+
+### Changed
+
+- Bootstrap prompt refined: 4 dimensions (from 6), concrete example, predicate quality guidance, lower volume targets
+- System prompt (PROMPT.md) updated with term quality examples and predicate strength recommendations
+- `mem:bootstrap` now requires `.cog/MEM_BOOTSTRAP.md` files from `cog init` instead of falling back to embedded copies
+
+### Fixed
+
+- Illegal instruction crash in `code:index` when parsing JavaScript after other grammars (missing `ts_parser_reset`)
+- O(n²) memory allocation in `code:index` for projects with 1000+ files (grow-by-1 document array replaced with ArrayList)
+- Extension manifest re-read from disk for every file during indexing (now cached by file extension)
+
 ## [0.6.0] - 2026-03-06
 
 ### Added
@@ -188,6 +202,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GitHub Actions workflow for automated releases and Homebrew tap updates
 - Homebrew installation via `trycog/tap/cog`
 
+[0.6.1]: https://github.com/trycog/cog-cli/releases/tag/v0.6.1
 [0.6.0]: https://github.com/trycog/cog-cli/releases/tag/v0.6.0
 [0.5.1]: https://github.com/trycog/cog-cli/releases/tag/v0.5.1
 [0.5.0]: https://github.com/trycog/cog-cli/releases/tag/v0.5.0
