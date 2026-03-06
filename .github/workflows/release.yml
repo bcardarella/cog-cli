@@ -129,3 +129,56 @@ jobs:
           git add Formula/cog.rb
           git commit -m "cog ${VERSION}"
           git push
+
+  notify:
+    needs: [release, update-tap]
+    runs-on: ubuntu-latest
+    env:
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract changelog and notify Discord
+        if: ${{ env.DISCORD_WEBHOOK_URL != '' }}
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          SEMVER="${VERSION#v}"
+          RELEASE_URL="https://github.com/trycog/cog-cli/releases/tag/${VERSION}"
+
+          # Extract changelog section for this version
+          CHANGELOG=$(sed -n "/^## \[${SEMVER}\]/,/^## \[/{/^## \[${SEMVER}\]/d;/^## \[/d;p;}" CHANGELOG.md)
+
+          # Build the embed description with changelog + update instructions
+          DESCRIPTION=$(cat <<'INNEREOF'
+          CHANGELOG_PLACEHOLDER
+
+          **Update:**
+          ```
+          brew upgrade trycog/tap/cog
+          ```
+          or
+          ```
+          curl -fsSL https://trycog.ai/cli/install | bash
+          ```
+          INNEREOF
+          )
+          DESCRIPTION="${DESCRIPTION/CHANGELOG_PLACEHOLDER/$CHANGELOG}"
+
+          # Build JSON payload with jq for proper escaping
+          PAYLOAD=$(jq -n \
+            --arg title "Cog ${VERSION} Released" \
+            --arg url "$RELEASE_URL" \
+            --arg desc "$DESCRIPTION" \
+            '{
+              embeds: [{
+                title: $title,
+                url: $url,
+                description: $desc,
+                color: 65535
+              }]
+            }')
+
+          curl -f -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "$DISCORD_WEBHOOK_URL"
