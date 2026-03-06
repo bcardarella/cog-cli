@@ -150,10 +150,14 @@ pub const Indexer = struct {
 
         const ts_lang = getGrammar(parser_grammar) orelse return error.UnknownGrammar;
 
-        // Set parser language
+        // Set parser language and reset state from any previous parse.
+        // Without the reset, stale parser state (especially from languages
+        // with external scanners like JavaScript) causes illegal-instruction
+        // crashes when the parser is reused across different grammars.
         if (!c.ts_parser_set_language(self.parser, ts_lang)) {
             return error.LanguageVersionMismatch;
         }
+        c.ts_parser_reset(self.parser);
 
         // Parse the source
         const tree = c.ts_parser_parse_string(
