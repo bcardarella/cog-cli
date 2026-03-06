@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-03-06
+
+### Added
+
+- Configurable model for `mem:bootstrap` via `memory.model` in settings.json
+- Bootstrap files filtered through `code.index` patterns in settings.json
+
+### Changed
+
+- Rewrote bootstrap extraction prompt: 6 optional dimensions (from 5 mandatory), 7 categories (from 14), explicit volume guidance
+- Removed "Connect Orphans" step from bootstrap association prompt (expensive, marginal value)
+- Updated README and help text with `--concurrency`, `--timeout`, and model override documentation
+
+### Fixed
+
+- Ctrl+C during concurrent bootstrap now kills all spawned agents (was only killing one)
+- `cog init` no longer overwrites `memory.model` and other sibling keys in settings.json
+- Memory leak: freed `program_field` and `args_field` in debugger alloc cleanup
+- OOM during bootstrap by not fully decoding SCIP index
+- DAP proxy for adapters that don't support `stopOnEntry` (e.g. ElixirLS)
+
 ## [0.5.1] - 2026-03-04
 
 ### Fixed
@@ -167,6 +188,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GitHub Actions workflow for automated releases and Homebrew tap updates
 - Homebrew installation via `trycog/tap/cog`
 
+[0.6.0]: https://github.com/trycog/cog-cli/releases/tag/v0.6.0
 [0.5.1]: https://github.com/trycog/cog-cli/releases/tag/v0.5.1
 [0.5.0]: https://github.com/trycog/cog-cli/releases/tag/v0.5.0
 [0.4.0]: https://github.com/trycog/cog-cli/releases/tag/v0.4.0
