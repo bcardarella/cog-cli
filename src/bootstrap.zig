@@ -19,6 +19,8 @@ const reset = "\x1B[0m";
 const green = "\x1B[32m";
 const red = "\x1B[31m";
 
+const max_consecutive_errors = 5;
+
 // ── Ctrl+C handling ─────────────────────────────────────────────────────
 // Track active child PIDs so Ctrl+C can kill them immediately.
 // Uses a watchdog thread that reads stdin in raw mode, bypassing OS signal
@@ -26,6 +28,7 @@ const red = "\x1B[31m";
 
 const max_active_children = 16;
 var g_active_children: [max_active_children]std.atomic.Value(i32) = initChildSlots();
+var g_cancel_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
 fn initChildSlots() [max_active_children]std.atomic.Value(i32) {
     var slots: [max_active_children]std.atomic.Value(i32) = undefined;
@@ -35,20 +38,24 @@ fn initChildSlots() [max_active_children]std.atomic.Value(i32) {
 
 fn registerChild(pid: i32) void {
     for (&g_active_children) |*slot| {
-        if (slot.cmpxchgStrong(0, pid, .monotonic, .monotonic) == null) return;
+        if (slot.cmpxchgStrong(0, pid, .release, .monotonic) == null) return;
     }
 }
 
 fn unregisterChild(pid: i32) void {
     for (&g_active_children) |*slot| {
-        if (slot.cmpxchgStrong(pid, 0, .monotonic, .monotonic) == null) return;
+        if (slot.cmpxchgStrong(pid, 0, .release, .monotonic) == null) return;
     }
 }
 
 fn killAllChildren() void {
     for (&g_active_children) |*slot| {
-        const pid = slot.load(.monotonic);
+        const pid = slot.load(.acquire);
         if (pid > 0) {
+            // Kill the process group first — catches subprocesses spawned by agents
+            // (returns ESRCH harmlessly if pid is not a process group leader)
+            _ = std.c.kill(-pid, posix.SIG.KILL);
+            // Then kill the individual process
             _ = std.c.kill(pid, posix.SIG.KILL);
         }
     }
@@ -94,6 +101,7 @@ const CtrlCWatchdog = struct {
     }
 
     fn cancel(self: *CtrlCWatchdog) noreturn {
+        g_cancel_requested.store(true, .release);
         killAllChildren();
         self.restore();
         const msg = "\x1B[0m\n  Cancelled.\n";
@@ -125,6 +133,7 @@ fn installSigintHandler() void {
 }
 
 fn handleSigint(_: c_int) callconv(.c) void {
+    g_cancel_requested.store(true, .release);
     killAllChildren();
     const msg = "\n  Cancelled.\n";
     _ = std.c.write(2, msg, msg.len);
@@ -556,6 +565,15 @@ fn runBootstrap(
         processed.deinit(allocator);
     }
 
+    // Load custom prompts from .cog/ directory, falling back to compiled-in defaults
+    const custom_bootstrap = loadCustomPrompt(allocator, cog_dir, "MEM_BOOTSTRAP.md");
+    defer if (custom_bootstrap) |p| allocator.free(p);
+    const bootstrap_prompt = custom_bootstrap orelse build_options.bootstrap_prompt;
+
+    const custom_associate = loadCustomPrompt(allocator, cog_dir, "MEM_BOOTSTRAP_ASSOCIATE.md");
+    defer if (custom_associate) |p| allocator.free(p);
+    const associate_prompt = custom_associate orelse build_options.bootstrap_associate_prompt;
+
     // Filter out already-processed files
     var remaining: std.ArrayListUnmanaged([]const u8) = .empty;
     defer remaining.deinit(allocator);
@@ -617,8 +635,11 @@ fn runBootstrap(
         ticker_thread = std.Thread.spawn(.{}, tickerFn, .{&ticker_ctx}) catch null;
     }
 
+    var aborted = false;
+
     if (concurrency <= 1) {
         // Sequential processing — one file at a time
+        var consecutive_errors: usize = 0;
         for (remaining.items) |file_path| {
             if (use_tui) {
                 tui_mutex.lock();
@@ -632,9 +653,10 @@ fn runBootstrap(
                 });
             }
 
-            const result = runFile(allocator, file_path, project_root, selected_agent, custom_cmd, debug, timeout_ms, model);
+            const result = runFile(allocator, file_path, project_root, selected_agent, custom_cmd, debug, timeout_ms, model, bootstrap_prompt, use_tui);
             if (result.success) {
                 files_done += 1;
+                consecutive_errors = 0;
                 total_input_tokens += result.input_tokens;
                 total_output_tokens += result.output_tokens;
                 total_cost_microdollars += result.cost_microdollars;
@@ -645,6 +667,7 @@ fn runBootstrap(
                 saveCheckpoint(allocator, checkpoint_path, &processed);
             } else {
                 errors += 1;
+                consecutive_errors += 1;
             }
 
             if (use_tui) {
@@ -665,6 +688,11 @@ fn runBootstrap(
             } else {
                 printErr("    " ++ red ++ "failed" ++ reset ++ "\n");
             }
+
+            if (consecutive_errors >= max_consecutive_errors) {
+                aborted = true;
+                break;
+            }
         }
     } else {
         // Concurrent processing — thread pool of `concurrency` workers
@@ -674,6 +702,8 @@ fn runBootstrap(
         var atomic_input_tokens = std.atomic.Value(usize).init(0);
         var atomic_output_tokens = std.atomic.Value(usize).init(0);
         var atomic_cost = std.atomic.Value(usize).init(0);
+        var abort_flag = std.atomic.Value(bool).init(false);
+        var consec_errors = std.atomic.Value(usize).init(0);
 
         var shared = WorkerShared{
             .file_index = &file_index,
@@ -682,12 +712,15 @@ fn runBootstrap(
             .atomic_input_tokens = &atomic_input_tokens,
             .atomic_output_tokens = &atomic_output_tokens,
             .atomic_cost = &atomic_cost,
+            .abort = &abort_flag,
+            .consecutive_errors = &consec_errors,
             .remaining = remaining.items,
             .total_files = total_files,
             .project_root = project_root,
             .selected_agent = selected_agent,
             .custom_cmd = custom_cmd,
             .model = model,
+            .bootstrap_prompt = bootstrap_prompt,
             .allocator = allocator,
             .checkpoint_path = checkpoint_path,
             .processed = &processed,
@@ -718,11 +751,16 @@ fn runBootstrap(
         total_input_tokens = atomic_input_tokens.load(.acquire);
         total_output_tokens = atomic_output_tokens.load(.acquire);
         total_cost_microdollars = atomic_cost.load(.acquire);
+        if (abort_flag.load(.acquire)) aborted = true;
     }
 
     // Stop ticker before phase 1 finish
     const finish_extra_lines = ticker_ctx.prev_lines;
     stopTicker(&ticker_thread, &ticker_ctx);
+
+    if (aborted) {
+        printFmtErr(allocator, "\n  " ++ red ++ "Aborting: {d} consecutive failures — possible API rate limit." ++ reset ++ "\n  Resume later with: " ++ dim ++ "cog mem:bootstrap" ++ reset ++ "\n", .{max_consecutive_errors});
+    }
 
     // Phase 1 finish
     if (use_tui) {
@@ -757,7 +795,7 @@ fn runBootstrap(
                     printFmtErr(allocator, "    Found {d} cross-file dependency pairs\n", .{cf.pair_count});
                 }
 
-                const assoc_result = runAssociationPhase(allocator, project_root, selected_agent, custom_cmd, cf.text, debug, timeout_ms, model);
+                const assoc_result = runAssociationPhase(allocator, project_root, selected_agent, custom_cmd, cf.text, debug, timeout_ms, model, associate_prompt, use_tui);
 
                 const phase2_extra = ticker_ctx.prev_lines;
                 stopTicker(&ticker_thread, &ticker_ctx);
@@ -798,12 +836,15 @@ const WorkerShared = struct {
     atomic_input_tokens: *std.atomic.Value(usize),
     atomic_output_tokens: *std.atomic.Value(usize),
     atomic_cost: *std.atomic.Value(usize),
+    abort: *std.atomic.Value(bool),
+    consecutive_errors: *std.atomic.Value(usize),
     remaining: []const []const u8,
     total_files: usize,
     project_root: []const u8,
     selected_agent: ?*const CliAgent,
     custom_cmd: ?[]const u8,
     model: ?[]const u8,
+    bootstrap_prompt: []const u8,
     allocator: std.mem.Allocator,
     checkpoint_path: []const u8,
     processed: *std.StringHashMapUnmanaged(void),
@@ -816,6 +857,8 @@ const WorkerShared = struct {
 
 fn workerThread(shared: *WorkerShared) void {
     while (true) {
+        if (shared.abort.load(.acquire) or g_cancel_requested.load(.acquire)) break;
+
         const idx = shared.file_index.fetchAdd(1, .monotonic);
         if (idx >= shared.remaining.len) break;
 
@@ -836,8 +879,9 @@ fn workerThread(shared: *WorkerShared) void {
             });
         }
 
-        const result = runFile(shared.allocator, file_path, shared.project_root, shared.selected_agent, shared.custom_cmd, shared.debug, shared.timeout_ms, shared.model);
+        const result = runFile(shared.allocator, file_path, shared.project_root, shared.selected_agent, shared.custom_cmd, shared.debug, shared.timeout_ms, shared.model, shared.bootstrap_prompt, shared.use_tui);
         if (result.success) {
+            shared.consecutive_errors.store(0, .release);
             const done = shared.done_count.fetchAdd(1, .monotonic) + 1;
             _ = shared.atomic_input_tokens.fetchAdd(result.input_tokens, .monotonic);
             _ = shared.atomic_output_tokens.fetchAdd(result.output_tokens, .monotonic);
@@ -879,6 +923,10 @@ fn workerThread(shared: *WorkerShared) void {
                 });
             }
         } else {
+            const consec = shared.consecutive_errors.fetchAdd(1, .monotonic) + 1;
+            if (consec >= max_consecutive_errors) {
+                shared.abort.store(true, .release);
+            }
             const errs = shared.error_count.fetchAdd(1, .monotonic) + 1;
 
             if (shared.use_tui) {
@@ -1013,11 +1061,13 @@ fn runFile(
     debug: bool,
     timeout_ms: u64,
     model: ?[]const u8,
+    bootstrap_prompt: []const u8,
+    use_tui: bool,
 ) FileResult {
     const fail: FileResult = .{ .success = false, .input_tokens = 0, .output_tokens = 0, .cost_microdollars = 0 };
 
     // Build prompt: template with file path
-    const template = build_options.bootstrap_prompt;
+    const template = bootstrap_prompt;
     const prompt = replacePlaceholder(allocator, template, "{file_path}", file_path) catch return fail;
     defer allocator.free(prompt);
 
@@ -1057,18 +1107,34 @@ fn runFile(
         return fail;
     }
 
+    // Bail out if cancellation was requested before spawning
+    if (g_cancel_requested.load(.acquire)) return fail;
+
     var child = std.process.Child.init(argv_buf.items, allocator);
     child.cwd = project_root;
+    child.stdin_behavior = .Ignore; // Prevent children from consuming Ctrl+C bytes on stdin
     child.stderr_behavior = if (debug) .Inherit else .Ignore;
     child.stdout_behavior = .Pipe;
+    child.pgid = 0; // Make child its own process group leader for reliable group kill
 
     child.spawn() catch |err| {
-        printFmtErr(allocator, "    " ++ red ++ "spawn error: {s}" ++ reset ++ "\n", .{@errorName(err)});
+        if (!use_tui) printFmtErr(allocator, "    " ++ red ++ "spawn error: {s}" ++ reset ++ "\n", .{@errorName(err)});
         return fail;
     };
     const child_pid: i32 = child.id;
     if (child_pid > 0) registerChild(child_pid);
     const reaper = spawnReaper(child_pid);
+
+    // If cancel arrived during spawn, kill this child immediately
+    if (g_cancel_requested.load(.acquire)) {
+        if (child_pid > 0) {
+            _ = std.c.kill(-child_pid, posix.SIG.KILL);
+            _ = std.c.kill(child_pid, posix.SIG.KILL);
+            unregisterChild(child_pid);
+        }
+        dismissReaper(reaper);
+        return fail;
+    }
 
     // Start timeout watcher
     var tw = TimeoutWatcher{ .pid = child_pid, .timeout_ms = timeout_ms };
@@ -1089,7 +1155,7 @@ fn runFile(
         if (tw_thread) |t| t.join();
         if (child_pid > 0) unregisterChild(child_pid);
         dismissReaper(reaper);
-        printFmtErr(allocator, "    " ++ red ++ "wait error: {s}" ++ reset ++ "\n", .{@errorName(err)});
+        if (!use_tui) printFmtErr(allocator, "    " ++ red ++ "wait error: {s}" ++ reset ++ "\n", .{@errorName(err)});
         return fail;
     };
     tw.cancelled.store(true, .release);
@@ -1100,15 +1166,17 @@ fn runFile(
     switch (term) {
         .Exited => |code| {
             if (code != 0) {
-                printFmtErr(allocator, "    " ++ red ++ "exited with code {d}" ++ reset ++ "\n", .{code});
+                if (!use_tui) printFmtErr(allocator, "    " ++ red ++ "exited with code {d}" ++ reset ++ "\n", .{code});
                 return fail;
             }
         },
         .Signal => |sig| {
-            if (sig == posix.SIG.KILL and tw.fired.load(.acquire)) {
-                printFmtErr(allocator, "    " ++ red ++ "timed out after {d}m" ++ reset ++ "\n", .{timeout_ms / 60_000});
-            } else {
-                printFmtErr(allocator, "    " ++ red ++ "killed by signal {d}" ++ reset ++ "\n", .{sig});
+            if (!use_tui) {
+                if (sig == posix.SIG.KILL and tw.fired.load(.acquire)) {
+                    printFmtErr(allocator, "    " ++ red ++ "timed out after {d}m" ++ reset ++ "\n", .{timeout_ms / 60_000});
+                } else {
+                    printFmtErr(allocator, "    " ++ red ++ "killed by signal {d}" ++ reset ++ "\n", .{sig});
+                }
             }
             return fail;
         },
@@ -1141,11 +1209,13 @@ fn runAssociationPhase(
     debug: bool,
     timeout_ms: u64,
     model: ?[]const u8,
+    associate_prompt: []const u8,
+    use_tui: bool,
 ) FileResult {
     const fail: FileResult = .{ .success = false, .input_tokens = 0, .output_tokens = 0, .cost_microdollars = 0 };
 
     // Build prompt from association template with SCIP-derived relationships
-    const template = build_options.bootstrap_associate_prompt;
+    const template = associate_prompt;
     const prompt = replacePlaceholder(allocator, template, "{relationships}", relationships_text) catch return fail;
     defer allocator.free(prompt);
 
@@ -1184,18 +1254,34 @@ fn runAssociationPhase(
         return fail;
     }
 
+    // Bail out if cancellation was requested before spawning
+    if (g_cancel_requested.load(.acquire)) return fail;
+
     var child = std.process.Child.init(argv_buf.items, allocator);
     child.cwd = project_root;
+    child.stdin_behavior = .Ignore; // Prevent children from consuming Ctrl+C bytes on stdin
     child.stderr_behavior = if (debug) .Inherit else .Ignore;
     child.stdout_behavior = .Pipe;
+    child.pgid = 0; // Make child its own process group leader for reliable group kill
 
     child.spawn() catch |err| {
-        printFmtErr(allocator, "    " ++ red ++ "spawn error: {s}" ++ reset ++ "\n", .{@errorName(err)});
+        if (!use_tui) printFmtErr(allocator, "    " ++ red ++ "spawn error: {s}" ++ reset ++ "\n", .{@errorName(err)});
         return fail;
     };
     const assoc_pid: i32 = child.id;
     if (assoc_pid > 0) registerChild(assoc_pid);
     const reaper = spawnReaper(assoc_pid);
+
+    // If cancel arrived during spawn, kill this child immediately
+    if (g_cancel_requested.load(.acquire)) {
+        if (assoc_pid > 0) {
+            _ = std.c.kill(-assoc_pid, posix.SIG.KILL);
+            _ = std.c.kill(assoc_pid, posix.SIG.KILL);
+            unregisterChild(assoc_pid);
+        }
+        dismissReaper(reaper);
+        return fail;
+    }
 
     // Start timeout watcher
     var tw = TimeoutWatcher{ .pid = assoc_pid, .timeout_ms = timeout_ms };
@@ -1215,7 +1301,7 @@ fn runAssociationPhase(
         if (tw_thread) |t| t.join();
         if (assoc_pid > 0) unregisterChild(assoc_pid);
         dismissReaper(reaper);
-        printFmtErr(allocator, "    " ++ red ++ "wait error: {s}" ++ reset ++ "\n", .{@errorName(err)});
+        if (!use_tui) printFmtErr(allocator, "    " ++ red ++ "wait error: {s}" ++ reset ++ "\n", .{@errorName(err)});
         return fail;
     };
     tw.cancelled.store(true, .release);
@@ -1226,15 +1312,17 @@ fn runAssociationPhase(
     switch (term) {
         .Exited => |code| {
             if (code != 0) {
-                printFmtErr(allocator, "    " ++ red ++ "exited with code {d}" ++ reset ++ "\n", .{code});
+                if (!use_tui) printFmtErr(allocator, "    " ++ red ++ "exited with code {d}" ++ reset ++ "\n", .{code});
                 return fail;
             }
         },
         .Signal => |sig| {
-            if (sig == posix.SIG.KILL and tw.fired.load(.acquire)) {
-                printFmtErr(allocator, "    " ++ red ++ "timed out after {d}m" ++ reset ++ "\n", .{timeout_ms / 60_000});
-            } else {
-                printFmtErr(allocator, "    " ++ red ++ "killed by signal {d}" ++ reset ++ "\n", .{sig});
+            if (!use_tui) {
+                if (sig == posix.SIG.KILL and tw.fired.load(.acquire)) {
+                    printFmtErr(allocator, "    " ++ red ++ "timed out after {d}m" ++ reset ++ "\n", .{timeout_ms / 60_000});
+                } else {
+                    printFmtErr(allocator, "    " ++ red ++ "killed by signal {d}" ++ reset ++ "\n", .{sig});
+                }
             }
             return fail;
         },
@@ -1863,6 +1951,21 @@ fn saveCheckpoint(allocator: std.mem.Allocator, checkpoint_path: []const u8, pro
     const file = std.fs.createFileAbsolute(checkpoint_path, .{}) catch return;
     defer file.close();
     file.writeAll(buf.items) catch {};
+}
+
+fn loadCustomPrompt(allocator: std.mem.Allocator, cog_dir: []const u8, filename: []const u8) ?[]const u8 {
+    const path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ cog_dir, filename }) catch return null;
+    defer allocator.free(path);
+
+    const file = std.fs.openFileAbsolute(path, .{}) catch return null;
+    defer file.close();
+
+    const content = file.readToEndAlloc(allocator, 1024 * 1024) catch return null;
+    if (content.len == 0) {
+        allocator.free(content);
+        return null;
+    }
+    return content;
 }
 
 // Tests
