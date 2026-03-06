@@ -51,13 +51,11 @@ fn mainInner() !void {
         }
     }
 
-    // Enable debug logging from --debug flag or settings.json {"debug":{"log":true}}
+    // Enable debug logging from --debug flag or settings.json {"debug": true}
     if (!debug_flag) {
         if (settings_mod.Settings.load(allocator)) |s| {
             if (s.debug) |d| {
-                if (d.log) |log_enabled| {
-                    debug_flag = log_enabled;
-                }
+                debug_flag = d.log;
             }
         }
     }

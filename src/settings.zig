@@ -13,7 +13,7 @@ pub const BrainConfig = struct {
 
 pub const DebugConfig = struct {
     timeout: ?i64 = null,
-    log: ?bool = null,
+    log: bool = false,
 };
 
 pub const MemoryConfig = struct {
@@ -240,15 +240,15 @@ fn freeCodeConfig(allocator: std.mem.Allocator, config: *const CodeConfig) void 
 }
 
 fn parseDebugConfig(value: std.json.Value) ?DebugConfig {
+    // "debug": true  →  enable debug logging
+    if (value == .bool) return .{ .log = value.bool };
+
     if (value != .object) return null;
     const obj = value.object;
 
     var result: DebugConfig = .{};
     if (obj.get("timeout")) |v| {
         if (v == .integer) result.timeout = v.integer;
-    }
-    if (obj.get("log")) |v| {
-        if (v == .bool) result.log = v.bool;
     }
     return result;
 }
@@ -309,7 +309,7 @@ fn mergeDebugConfig(local: ?DebugConfig, global: ?DebugConfig) ?DebugConfig {
     const g = global orelse return local;
     return .{
         .timeout = l.timeout orelse g.timeout,
-        .log = l.log orelse g.log,
+        .log = l.log or g.log,
     };
 }
 
