@@ -882,6 +882,21 @@ fn codeIndex(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     var indexed_count: usize = 0;
     var total_symbols: usize = 0;
 
+    // Use an ArrayList for documents to avoid O(n²) reallocation.
+    // mergeDocument grows by 1 each time — with 1000+ files that's
+    // ~500K copies and as many intermediate allocations freed.
+    var doc_list: std.ArrayListUnmanaged(scip.Document) = .empty;
+    defer {
+        for (doc_list.items) |*doc| scip.freeDocument(allocator, doc);
+        doc_list.deinit(allocator);
+    }
+    try doc_list.ensureTotalCapacity(allocator, master_index.documents.len + files.items.len);
+    doc_list.appendSliceAssumeCapacity(master_index.documents);
+    // master_index.documents was decoded from protobuf (or empty); the individual
+    // doc internals are now owned by doc_list. Free just the documents slice itself.
+    if (master_index.documents.len > 0) allocator.free(master_index.documents);
+    master_index.documents = &.{};
+
     // Tree-sitter per-file indexing
     var indexer = tree_sitter_indexer.Indexer.init();
     defer indexer.deinit();
@@ -892,20 +907,42 @@ fn codeIndex(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     var ext_files: [16]std.ArrayListUnmanaged([]const u8) = [_]std.ArrayListUnmanaged([]const u8){.empty} ** 16;
     var num_unique: usize = 0;
 
+    // Cache extension resolution by file extension to avoid re-reading
+    // manifests from disk for every file (1000+ files = 1000+ JSON parses).
+    var ext_cache_keys: [32][]const u8 = undefined;
+    var ext_cache_vals: [32]?extensions.Extension = undefined;
+    var ext_cache_installed: [32]bool = [_]bool{false} ** 32;
+    var ext_cache_len: usize = 0;
+    defer for (0..ext_cache_len) |ci| {
+        if (ext_cache_installed[ci]) {
+            if (ext_cache_vals[ci]) |*val| extensions.freeExtension(allocator, val);
+        }
+    };
+
     for (files.items) |file_path| {
         const ext = std.fs.path.extension(file_path);
         if (ext.len == 0) continue;
 
-        var resolved = extensions.resolveByExtension(allocator, ext) orelse continue;
-        const idx = resolved.indexer orelse {
-            extensions.freeExtension(allocator, &resolved);
-            continue;
-        };
+        // Resolve extension with cache — avoids re-reading manifests from disk
+        const resolved = blk: {
+            for (ext_cache_keys[0..ext_cache_len], ext_cache_vals[0..ext_cache_len]) |key, val| {
+                if (std.mem.eql(u8, key, ext)) break :blk val;
+            }
+            // Cache miss — resolve and store
+            const r = extensions.resolveByExtension(allocator, ext);
+            if (ext_cache_len < 32) {
+                ext_cache_keys[ext_cache_len] = ext;
+                ext_cache_vals[ext_cache_len] = r;
+                ext_cache_installed[ext_cache_len] = if (r) |v| v.installed else false;
+                ext_cache_len += 1;
+            }
+            break :blk r;
+        } orelse continue;
+
+        const idx = resolved.indexer orelse continue;
 
         switch (idx) {
             .tree_sitter => |ts_config| {
-                defer extensions.freeExtension(allocator, &resolved);
-
                 if (show_progress) {
                     tui.progressUpdate(indexed_count, total_files, total_symbols, file_path);
                 }
@@ -917,14 +954,14 @@ fn codeIndex(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
                 // Index with tree-sitter
                 if (indexer.indexFile(allocator, source, file_path, ts_config)) |result| {
                     backing_buffers.append(allocator, result.string_data) catch {};
-                    mergeDocument(allocator, &master_index, result.doc);
+                    mergeDocumentList(allocator, &doc_list, result.doc);
                     indexed_count += 1;
                     total_symbols += result.doc.symbols.len;
                 } else |_| {
                     // Indexing failed (e.g. Flow-typed JS parsed as plain JS).
                     // Still add a stub document so the file appears in the index
                     // and queries report "no symbols" instead of "file not found".
-                    mergeDocument(allocator, &master_index, .{
+                    mergeDocumentList(allocator, &doc_list, .{
                         .language = ts_config.scip_name,
                         .relative_path = file_path,
                         .occurrences = &.{},
@@ -955,9 +992,6 @@ fn codeIndex(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
                     num_unique += 1;
                 } else if (found) {
                     ext_files[found_idx].append(allocator, file_path) catch {};
-                    extensions.freeExtension(allocator, &resolved);
-                } else {
-                    extensions.freeExtension(allocator, &resolved);
                 }
             },
         }
@@ -977,7 +1011,7 @@ fn codeIndex(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
             const result = invokeIndexerForFile(allocator, ext_file_path, scip_config) catch continue;
 
             backing_buffers.append(allocator, result.backing_data) catch {};
-            mergeDocument(allocator, &master_index, result.doc);
+            mergeDocumentList(allocator, &doc_list, result.doc);
             indexed_count += 1;
             total_symbols += result.doc.symbols.len;
 
@@ -987,11 +1021,15 @@ fn codeIndex(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         }
     }
 
-    // Free installed extensions and file lists tracked during indexing
+    // Free external indexer file lists (extensions freed from unique_exts
+    // are also in the cache, which owns the allocations now)
     for (0..num_unique) |ext_idx| {
-        extensions.freeExtension(allocator, &unique_exts[ext_idx]);
         ext_files[ext_idx].deinit(allocator);
     }
+
+    // Transfer documents back to master_index for encoding/freeing
+    master_index.documents = try doc_list.toOwnedSlice(allocator);
+    // doc_list is now empty; its defer is a no-op
 
     // Encode and write the master index
     const encoded = scip_encode.encodeIndex(allocator, master_index) catch {
@@ -1478,6 +1516,21 @@ fn invokeProjectIndexer(allocator: std.mem.Allocator, target_path: []const u8, c
 }
 
 /// Merge a document into the master index (replace existing or append).
+/// Merge a document into an ArrayList (amortized O(1) append).
+/// Used by bulk indexing paths to avoid O(n²) reallocation.
+fn mergeDocumentList(allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged(scip.Document), new_doc: scip.Document) void {
+    for (list.items, 0..) |*doc, i| {
+        if (std.mem.eql(u8, doc.relative_path, new_doc.relative_path)) {
+            scip.freeDocument(allocator, doc);
+            list.items[i] = new_doc;
+            return;
+        }
+    }
+    list.append(allocator, new_doc) catch {};
+}
+
+/// Merge a document into the master index (replace existing or append).
+/// Used by single-file update paths (watcher, manual re-index).
 fn mergeDocument(allocator: std.mem.Allocator, index: *scip.Index, new_doc: scip.Document) void {
     // Look for existing document with same relative_path
     for (index.documents, 0..) |*doc, i| {
@@ -3315,6 +3368,17 @@ pub fn codeIndexInner(allocator: std.mem.Allocator, pattern_list: ?[]const []con
     var indexed_count: usize = 0;
     var total_symbols: usize = 0;
 
+    // Use an ArrayList for documents to avoid O(n²) reallocation
+    var doc_list: std.ArrayListUnmanaged(scip.Document) = .empty;
+    defer {
+        for (doc_list.items) |*doc| scip.freeDocument(allocator, doc);
+        doc_list.deinit(allocator);
+    }
+    try doc_list.ensureTotalCapacity(allocator, master_index.documents.len + files.items.len);
+    doc_list.appendSliceAssumeCapacity(master_index.documents);
+    if (master_index.documents.len > 0) allocator.free(master_index.documents);
+    master_index.documents = &.{};
+
     var indexer = tree_sitter_indexer.Indexer.init();
     defer indexer.deinit();
 
@@ -3323,28 +3387,48 @@ pub fn codeIndexInner(allocator: std.mem.Allocator, pattern_list: ?[]const []con
     var ext_files: [16]std.ArrayListUnmanaged([]const u8) = [_]std.ArrayListUnmanaged([]const u8){.empty} ** 16;
     var num_unique: usize = 0;
 
+    // Cache extension resolution by file extension
+    var ext_cache_keys: [32][]const u8 = undefined;
+    var ext_cache_vals: [32]?extensions.Extension = undefined;
+    var ext_cache_installed: [32]bool = [_]bool{false} ** 32;
+    var ext_cache_len: usize = 0;
+    defer for (0..ext_cache_len) |ci| {
+        if (ext_cache_installed[ci]) {
+            if (ext_cache_vals[ci]) |*val| extensions.freeExtension(allocator, val);
+        }
+    };
+
     for (files.items) |file_path| {
         const ext = std.fs.path.extension(file_path);
         if (ext.len == 0) continue;
 
-        var resolved = extensions.resolveByExtension(allocator, ext) orelse continue;
-        const idx_config = resolved.indexer orelse {
-            extensions.freeExtension(allocator, &resolved);
-            continue;
-        };
+        const resolved = blk: {
+            for (ext_cache_keys[0..ext_cache_len], ext_cache_vals[0..ext_cache_len]) |key, val| {
+                if (std.mem.eql(u8, key, ext)) break :blk val;
+            }
+            const r = extensions.resolveByExtension(allocator, ext);
+            if (ext_cache_len < 32) {
+                ext_cache_keys[ext_cache_len] = ext;
+                ext_cache_vals[ext_cache_len] = r;
+                ext_cache_installed[ext_cache_len] = if (r) |v| v.installed else false;
+                ext_cache_len += 1;
+            }
+            break :blk r;
+        } orelse continue;
+
+        const idx_config = resolved.indexer orelse continue;
 
         switch (idx_config) {
             .tree_sitter => |ts_config| {
-                defer extensions.freeExtension(allocator, &resolved);
                 const source = readFileContents(allocator, file_path) orelse continue;
                 defer allocator.free(source);
                 if (indexer.indexFile(allocator, source, file_path, ts_config)) |result| {
                     backing_buffers.append(allocator, result.string_data) catch {};
-                    mergeDocument(allocator, &master_index, result.doc);
+                    mergeDocumentList(allocator, &doc_list, result.doc);
                     indexed_count += 1;
                     total_symbols += result.doc.symbols.len;
                 } else |_| {
-                    mergeDocument(allocator, &master_index, .{
+                    mergeDocumentList(allocator, &doc_list, .{
                         .language = ts_config.scip_name,
                         .relative_path = file_path,
                         .occurrences = &.{},
@@ -3370,9 +3454,6 @@ pub fn codeIndexInner(allocator: std.mem.Allocator, pattern_list: ?[]const []con
                     num_unique += 1;
                 } else if (found) {
                     ext_files[found_idx].append(allocator, file_path) catch {};
-                    extensions.freeExtension(allocator, &resolved);
-                } else {
-                    extensions.freeExtension(allocator, &resolved);
                 }
             },
         }
@@ -3386,16 +3467,18 @@ pub fn codeIndexInner(allocator: std.mem.Allocator, pattern_list: ?[]const []con
         for (ext_files[ext_idx].items) |ext_file_path| {
             const result = invokeIndexerForFile(allocator, ext_file_path, scip_config) catch continue;
             backing_buffers.append(allocator, result.backing_data) catch {};
-            mergeDocument(allocator, &master_index, result.doc);
+            mergeDocumentList(allocator, &doc_list, result.doc);
             indexed_count += 1;
             total_symbols += result.doc.symbols.len;
         }
     }
 
     for (0..num_unique) |ext_idx| {
-        extensions.freeExtension(allocator, &unique_exts[ext_idx]);
         ext_files[ext_idx].deinit(allocator);
     }
+
+    // Transfer documents back to master_index for encoding/freeing
+    master_index.documents = try doc_list.toOwnedSlice(allocator);
 
     const encoded = scip_encode.encodeIndex(allocator, master_index) catch return error.EncodeFailed;
     defer allocator.free(encoded);
