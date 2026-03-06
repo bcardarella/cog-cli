@@ -54,6 +54,7 @@ fn mainInner() !void {
     // Enable debug logging from --debug flag or settings.json {"debug": true}
     if (!debug_flag) {
         if (settings_mod.Settings.load(allocator)) |s| {
+            defer s.deinit(allocator);
             if (s.debug) |d| {
                 debug_flag = d.log;
             }
