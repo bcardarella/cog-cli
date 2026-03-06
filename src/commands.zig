@@ -241,6 +241,7 @@ pub fn init(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
 
         printErr("\n");
         try initBrain(allocator, effective_host, existing_brain_parts);
+        deployBootstrapTemplates();
     }
 
     tui.separator();
@@ -548,6 +549,26 @@ fn initBrain(allocator: std.mem.Allocator, host: []const u8, existing_parts: ?Br
 
         try writeSettingsMerge(allocator, brain_url);
     }
+}
+
+fn deployBootstrapTemplates() void {
+    const cog_dir = std.fs.cwd().openDir(".cog", .{}) catch return;
+
+    // Write MEM_BOOTSTRAP.md only if it doesn't already exist
+    cog_dir.access("MEM_BOOTSTRAP.md", .{}) catch {
+        if (cog_dir.createFile("MEM_BOOTSTRAP.md", .{})) |file| {
+            defer file.close();
+            file.writeAll(build_options.bootstrap_prompt) catch {};
+        } else |_| {}
+    };
+
+    // Write MEM_BOOTSTRAP_ASSOCIATE.md only if it doesn't already exist
+    cog_dir.access("MEM_BOOTSTRAP_ASSOCIATE.md", .{}) catch {
+        if (cog_dir.createFile("MEM_BOOTSTRAP_ASSOCIATE.md", .{})) |file| {
+            defer file.close();
+            file.writeAll(build_options.bootstrap_associate_prompt) catch {};
+        } else |_| {}
+    };
 }
 
 fn buildAccountLabel(allocator: std.mem.Allocator, account: json.Value) ![]const u8 {
@@ -860,14 +881,23 @@ fn writeSettingsMerge(allocator: std.mem.Allocator, brain_url: []const u8) !void
                     try s.write(entry.value_ptr.*);
                 }
 
-                // Write memory.brain, preserving non-url keys from existing brain
+                // Deep merge memory, preserving all existing keys
                 try s.objectField("memory");
-                try s.beginObject();
-                try s.objectField("brain");
                 try s.beginObject();
 
                 if (parsed.value.object.get("memory")) |memory| {
                     if (memory == .object) {
+                        // Preserve all non-brain keys (e.g. model)
+                        var mem_iter = memory.object.iterator();
+                        while (mem_iter.next()) |entry| {
+                            if (std.mem.eql(u8, entry.key_ptr.*, "brain")) continue;
+                            try s.objectField(entry.key_ptr.*);
+                            try s.write(entry.value_ptr.*);
+                        }
+
+                        // Merge brain, preserving non-url keys
+                        try s.objectField("brain");
+                        try s.beginObject();
                         if (memory.object.get("brain")) |brain| {
                             if (brain == .object) {
                                 var brain_iter = brain.object.iterator();
@@ -878,12 +908,24 @@ fn writeSettingsMerge(allocator: std.mem.Allocator, brain_url: []const u8) !void
                                 }
                             }
                         }
+                        try s.objectField("url");
+                        try s.write(brain_url);
+                        try s.endObject(); // brain
+                    } else {
+                        try s.objectField("brain");
+                        try s.beginObject();
+                        try s.objectField("url");
+                        try s.write(brain_url);
+                        try s.endObject(); // brain
                     }
+                } else {
+                    try s.objectField("brain");
+                    try s.beginObject();
+                    try s.objectField("url");
+                    try s.write(brain_url);
+                    try s.endObject(); // brain
                 }
 
-                try s.objectField("url");
-                try s.write(brain_url);
-                try s.endObject(); // brain
                 try s.endObject(); // memory
             } else {
                 // Root isn't an object, write fresh
