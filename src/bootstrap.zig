@@ -103,6 +103,10 @@ const CtrlCWatchdog = struct {
     fn cancel(self: *CtrlCWatchdog) noreturn {
         g_cancel_requested.store(true, .release);
         killAllChildren();
+        // Allow in-flight spawns to complete and register, then kill again.
+        // Covers the race between child.spawn() and registerChild().
+        std.Thread.sleep(5 * std.time.ns_per_ms);
+        killAllChildren();
         self.restore();
         const msg = "\x1B[0m\n  Cancelled.\n";
         _ = std.c.write(2, msg, msg.len);
@@ -134,6 +138,9 @@ fn installSigintHandler() void {
 
 fn handleSigint(_: c_int) callconv(.c) void {
     g_cancel_requested.store(true, .release);
+    killAllChildren();
+    // Allow in-flight spawns to complete and register, then kill again.
+    std.Thread.sleep(5 * std.time.ns_per_ms);
     killAllChildren();
     const msg = "\n  Cancelled.\n";
     _ = std.c.write(2, msg, msg.len);
@@ -1132,8 +1139,9 @@ fn runFile(
         return fail;
     };
     const child_pid: i32 = child.id;
-    debug_log.log("runFile: spawned child pid={d}", .{child_pid});
+    // Register immediately — minimize the window where cancel() can't see this child.
     if (child_pid > 0) registerChild(child_pid);
+    debug_log.log("runFile: spawned child pid={d}", .{child_pid});
     const reaper = spawnReaper(child_pid);
 
     // If cancel arrived during spawn, kill this child immediately
