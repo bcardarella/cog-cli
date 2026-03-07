@@ -401,17 +401,34 @@ pub fn listInstalled(allocator: std.mem.Allocator) ![]InstalledInfo {
 
         const manifest = readManifest(allocator, manifest_path) catch continue;
         defer {
-            for (manifest.language_names) |n| allocator.free(n);
-            if (manifest.language_names.len > 0) allocator.free(manifest.language_names);
             for (manifest.args) |a| allocator.free(a);
             allocator.free(manifest.args);
             allocator.free(manifest.build_cmd);
             allocator.free(manifest.ext_dir);
             freeDebuggerAllocs(allocator, manifest.debugger);
         }
-        // Keep name and file_extensions, free the rest
+
+        // Use first language_name for display (e.g. "elixir" not "cog-elixir"),
+        // fall back to manifest name with "cog-" prefix stripped.
+        const display_name = if (manifest.language_names.len > 0) blk: {
+            const kept = manifest.language_names[0];
+            for (manifest.language_names[1..]) |n| allocator.free(n);
+            allocator.free(manifest.language_names);
+            allocator.free(manifest.name);
+            break :blk kept;
+        } else blk: {
+            const name: []const u8 = manifest.name;
+            const prefix = "cog-";
+            if (std.mem.startsWith(u8, name, prefix) and name.len > prefix.len) {
+                const stripped = allocator.dupe(u8, name[prefix.len..]) catch break :blk name;
+                allocator.free(manifest.name);
+                break :blk stripped;
+            }
+            break :blk name;
+        };
+
         try result.append(allocator, .{
-            .name = manifest.name,
+            .name = display_name,
             .file_extensions = manifest.file_extensions,
             .has_debugger = manifest.debugger != null,
         });
