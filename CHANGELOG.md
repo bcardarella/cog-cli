@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] - 2026-03-06
+
+### Changed
+
+- Installed extensions in `--help` show language name (e.g. "elixir") instead of repo name ("cog-elixir")
+- Version defined only in `build.zig.zon`; `build.zig` reads it via `@import`
+
+### Fixed
+
+- Ctrl+C during `mem:bootstrap` could orphan a newly spawned agent if it hadn't registered yet
+
 ## [0.7.1] - 2026-03-06
 
 ### Fixed
@@ -217,6 +228,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GitHub Actions workflow for automated releases and Homebrew tap updates
 - Homebrew installation via `trycog/tap/cog`
 
+[0.7.2]: https://github.com/trycog/cog-cli/releases/tag/v0.7.2
 [0.7.1]: https://github.com/trycog/cog-cli/releases/tag/v0.7.1
 [0.7.0]: https://github.com/trycog/cog-cli/releases/tag/v0.7.0
 [0.6.1]: https://github.com/trycog/cog-cli/releases/tag/v0.6.1
