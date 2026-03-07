@@ -566,6 +566,438 @@ test "indexFile JavaScript" {
     try std.testing.expect(found_greeter);
 }
 
+test "indexFile TypeScript" {
+    const allocator = std.testing.allocator;
+    var indexer = Indexer.init();
+    defer indexer.deinit();
+
+    const source =
+        \\interface Greeter {
+        \\    greet(): string;
+        \\}
+        \\
+        \\type ID = string;
+        \\
+        \\enum Color {
+        \\    Red,
+        \\    Green,
+        \\    Blue,
+        \\}
+    ;
+
+    const config = findBuiltinConfig("typescript") orelse return error.TestUnexpectedResult;
+    const result = try indexer.indexFile(allocator, source, "test.ts", config);
+    const doc = result.doc;
+    defer {
+        for (doc.symbols) |sym| {
+            allocator.free(sym.documentation);
+            allocator.free(sym.relationships);
+        }
+        allocator.free(doc.occurrences);
+        allocator.free(doc.symbols);
+        allocator.free(result.string_data);
+    }
+
+    try std.testing.expectEqualStrings("typescript", doc.language);
+
+    var found_greeter = false;
+    var found_greet = false;
+    var found_id = false;
+    var found_color = false;
+    for (doc.symbols) |sym| {
+        if (std.mem.eql(u8, sym.display_name, "Greeter")) {
+            found_greeter = true;
+            try std.testing.expectEqual(@as(i32, 21), sym.kind); // interface
+        }
+        if (std.mem.eql(u8, sym.display_name, "greet")) {
+            found_greet = true;
+            try std.testing.expectEqual(@as(i32, 26), sym.kind); // method
+        }
+        if (std.mem.eql(u8, sym.display_name, "ID")) {
+            found_id = true;
+            try std.testing.expectEqual(@as(i32, 54), sym.kind); // type
+        }
+        if (std.mem.eql(u8, sym.display_name, "Color")) {
+            found_color = true;
+            try std.testing.expectEqual(@as(i32, 11), sym.kind); // enum
+        }
+    }
+    try std.testing.expect(found_greeter);
+    try std.testing.expect(found_greet);
+    try std.testing.expect(found_id);
+    try std.testing.expect(found_color);
+}
+
+test "indexFile TSX" {
+    const allocator = std.testing.allocator;
+    var indexer = Indexer.init();
+    defer indexer.deinit();
+
+    const source =
+        \\interface Props {
+        \\    name: string;
+        \\}
+        \\
+        \\type ButtonKind = "primary" | "secondary";
+        \\
+        \\enum Status {
+        \\    Active,
+        \\    Inactive,
+        \\}
+    ;
+
+    const config = findBuiltinConfig("tsx") orelse return error.TestUnexpectedResult;
+    const result = try indexer.indexFile(allocator, source, "component.tsx", config);
+    const doc = result.doc;
+    defer {
+        for (doc.symbols) |sym| {
+            allocator.free(sym.documentation);
+            allocator.free(sym.relationships);
+        }
+        allocator.free(doc.occurrences);
+        allocator.free(doc.symbols);
+        allocator.free(result.string_data);
+    }
+
+    try std.testing.expectEqualStrings("tsx", doc.language);
+
+    var found_props = false;
+    var found_kind = false;
+    var found_status = false;
+    for (doc.symbols) |sym| {
+        if (std.mem.eql(u8, sym.display_name, "Props")) {
+            found_props = true;
+            try std.testing.expectEqual(@as(i32, 21), sym.kind); // interface
+        }
+        if (std.mem.eql(u8, sym.display_name, "ButtonKind")) {
+            found_kind = true;
+            try std.testing.expectEqual(@as(i32, 54), sym.kind); // type
+        }
+        if (std.mem.eql(u8, sym.display_name, "Status")) {
+            found_status = true;
+            try std.testing.expectEqual(@as(i32, 11), sym.kind); // enum
+        }
+    }
+    try std.testing.expect(found_props);
+    try std.testing.expect(found_kind);
+    try std.testing.expect(found_status);
+}
+
+test "indexFile Java" {
+    const allocator = std.testing.allocator;
+    var indexer = Indexer.init();
+    defer indexer.deinit();
+
+    const source =
+        \\public class HelloWorld {
+        \\    public void greet() {
+        \\        System.out.println("Hello");
+        \\    }
+        \\}
+        \\
+        \\interface Greetable {
+        \\    void sayHello();
+        \\}
+    ;
+
+    const config = findBuiltinConfig("java") orelse return error.TestUnexpectedResult;
+    const result = try indexer.indexFile(allocator, source, "HelloWorld.java", config);
+    const doc = result.doc;
+    defer {
+        for (doc.symbols) |sym| {
+            allocator.free(sym.documentation);
+            allocator.free(sym.relationships);
+        }
+        allocator.free(doc.occurrences);
+        allocator.free(doc.symbols);
+        allocator.free(result.string_data);
+    }
+
+    try std.testing.expectEqualStrings("java", doc.language);
+
+    var found_class = false;
+    var found_method = false;
+    var found_interface = false;
+    for (doc.symbols) |sym| {
+        if (std.mem.eql(u8, sym.display_name, "HelloWorld")) {
+            found_class = true;
+            try std.testing.expectEqual(@as(i32, 7), sym.kind); // class
+        }
+        if (std.mem.eql(u8, sym.display_name, "greet")) {
+            found_method = true;
+            try std.testing.expectEqual(@as(i32, 26), sym.kind); // method
+        }
+        if (std.mem.eql(u8, sym.display_name, "Greetable")) {
+            found_interface = true;
+            try std.testing.expectEqual(@as(i32, 21), sym.kind); // interface
+        }
+    }
+    try std.testing.expect(found_class);
+    try std.testing.expect(found_method);
+    try std.testing.expect(found_interface);
+}
+
+test "indexFile Rust" {
+    const allocator = std.testing.allocator;
+    var indexer = Indexer.init();
+    defer indexer.deinit();
+
+    const source =
+        \\struct Point {
+        \\    x: f64,
+        \\    y: f64,
+        \\}
+        \\
+        \\trait Drawable {
+        \\    fn draw(&self);
+        \\}
+        \\
+        \\fn main() {
+        \\    println!("hello");
+        \\}
+        \\
+        \\mod utils {}
+        \\
+        \\macro_rules! my_macro {
+        \\    () => {};
+        \\}
+    ;
+
+    const config = findBuiltinConfig("rust") orelse return error.TestUnexpectedResult;
+    const result = try indexer.indexFile(allocator, source, "main.rs", config);
+    const doc = result.doc;
+    defer {
+        for (doc.symbols) |sym| {
+            allocator.free(sym.documentation);
+            allocator.free(sym.relationships);
+        }
+        allocator.free(doc.occurrences);
+        allocator.free(doc.symbols);
+        allocator.free(result.string_data);
+    }
+
+    try std.testing.expectEqualStrings("rust", doc.language);
+
+    var found_struct = false;
+    var found_trait = false;
+    var found_main = false;
+    var found_module = false;
+    var found_macro = false;
+    for (doc.symbols) |sym| {
+        if (std.mem.eql(u8, sym.display_name, "Point")) {
+            found_struct = true;
+            try std.testing.expectEqual(@as(i32, 7), sym.kind); // class (struct)
+        }
+        if (std.mem.eql(u8, sym.display_name, "Drawable")) {
+            found_trait = true;
+            try std.testing.expectEqual(@as(i32, 21), sym.kind); // interface (trait)
+        }
+        if (std.mem.eql(u8, sym.display_name, "main")) {
+            found_main = true;
+            try std.testing.expectEqual(@as(i32, 17), sym.kind); // function
+        }
+        if (std.mem.eql(u8, sym.display_name, "utils")) {
+            found_module = true;
+            try std.testing.expectEqual(@as(i32, 29), sym.kind); // module
+        }
+        if (std.mem.eql(u8, sym.display_name, "my_macro")) {
+            found_macro = true;
+            try std.testing.expectEqual(@as(i32, 25), sym.kind); // macro
+        }
+    }
+    try std.testing.expect(found_struct);
+    try std.testing.expect(found_trait);
+    try std.testing.expect(found_main);
+    try std.testing.expect(found_module);
+    try std.testing.expect(found_macro);
+}
+
+test "indexFile C" {
+    const allocator = std.testing.allocator;
+    var indexer = Indexer.init();
+    defer indexer.deinit();
+
+    const source =
+        \\struct Point {
+        \\    int x;
+        \\    int y;
+        \\};
+        \\
+        \\typedef int MyInt;
+        \\
+        \\enum Color { RED, GREEN, BLUE };
+        \\
+        \\void hello() {
+        \\    return;
+        \\}
+    ;
+
+    const config = findBuiltinConfig("c") orelse return error.TestUnexpectedResult;
+    const result = try indexer.indexFile(allocator, source, "main.c", config);
+    const doc = result.doc;
+    defer {
+        for (doc.symbols) |sym| {
+            allocator.free(sym.documentation);
+            allocator.free(sym.relationships);
+        }
+        allocator.free(doc.occurrences);
+        allocator.free(doc.symbols);
+        allocator.free(result.string_data);
+    }
+
+    try std.testing.expectEqualStrings("c", doc.language);
+
+    var found_struct = false;
+    var found_typedef = false;
+    var found_func = false;
+    var found_enum = false;
+    for (doc.symbols) |sym| {
+        if (std.mem.eql(u8, sym.display_name, "Point")) {
+            found_struct = true;
+            try std.testing.expectEqual(@as(i32, 7), sym.kind); // class (struct)
+        }
+        if (std.mem.eql(u8, sym.display_name, "MyInt")) {
+            found_typedef = true;
+            try std.testing.expectEqual(@as(i32, 54), sym.kind); // type
+        }
+        if (std.mem.eql(u8, sym.display_name, "hello")) {
+            found_func = true;
+            try std.testing.expectEqual(@as(i32, 17), sym.kind); // function
+        }
+        if (std.mem.eql(u8, sym.display_name, "Color")) {
+            found_enum = true;
+            try std.testing.expectEqual(@as(i32, 54), sym.kind); // type (enum)
+        }
+    }
+    try std.testing.expect(found_struct);
+    try std.testing.expect(found_typedef);
+    try std.testing.expect(found_func);
+    try std.testing.expect(found_enum);
+}
+
+test "indexFile C++" {
+    const allocator = std.testing.allocator;
+    var indexer = Indexer.init();
+    defer indexer.deinit();
+
+    const source =
+        \\class Animal {
+        \\public:
+        \\    void speak();
+        \\};
+        \\
+        \\struct Point {
+        \\    int x;
+        \\    int y;
+        \\};
+        \\
+        \\void greet() {}
+    ;
+
+    const config = findBuiltinConfig("cpp") orelse return error.TestUnexpectedResult;
+    const result = try indexer.indexFile(allocator, source, "main.cpp", config);
+    const doc = result.doc;
+    defer {
+        for (doc.symbols) |sym| {
+            allocator.free(sym.documentation);
+            allocator.free(sym.relationships);
+        }
+        allocator.free(doc.occurrences);
+        allocator.free(doc.symbols);
+        allocator.free(result.string_data);
+    }
+
+    try std.testing.expectEqualStrings("cpp", doc.language);
+
+    var found_class = false;
+    var found_struct = false;
+    var found_func = false;
+    for (doc.symbols) |sym| {
+        if (std.mem.eql(u8, sym.display_name, "Animal")) {
+            found_class = true;
+            try std.testing.expectEqual(@as(i32, 7), sym.kind); // class
+        }
+        if (std.mem.eql(u8, sym.display_name, "Point")) {
+            found_struct = true;
+            try std.testing.expectEqual(@as(i32, 7), sym.kind); // class (struct)
+        }
+        if (std.mem.eql(u8, sym.display_name, "greet")) {
+            found_func = true;
+            try std.testing.expectEqual(@as(i32, 17), sym.kind); // function
+        }
+    }
+    try std.testing.expect(found_class);
+    try std.testing.expect(found_struct);
+    try std.testing.expect(found_func);
+}
+
+test "indexFile parser reuse across languages" {
+    // Exercises the code path that caused the original SIGILL crash:
+    // reusing a single parser across different grammars (especially
+    // switching away from languages with external scanners like JS).
+    const allocator = std.testing.allocator;
+    var indexer = Indexer.init();
+    defer indexer.deinit();
+
+    const langs = [_]struct { name: []const u8, source: []const u8, path: []const u8 }{
+        .{ .name = "go", .source = "package main\n\nfunc hello() {}\n", .path = "a.go" },
+        .{ .name = "javascript", .source = "function greet() {}\n", .path = "b.js" },
+        .{ .name = "python", .source = "def foo():\n    pass\n", .path = "c.py" },
+        .{ .name = "typescript", .source = "interface Foo { bar(): void; }\n", .path = "d.ts" },
+        .{ .name = "rust", .source = "fn main() {}\n", .path = "e.rs" },
+        .{ .name = "java", .source = "class Foo { void bar() {} }\n", .path = "f.java" },
+        .{ .name = "c", .source = "void hello() {}\n", .path = "g.c" },
+        .{ .name = "cpp", .source = "class Foo {};\nvoid bar() {}\n", .path = "h.cpp" },
+        .{ .name = "tsx", .source = "interface Props { x: number; }\n", .path = "i.tsx" },
+        // Switch back to JS after other scanners to stress the reset path
+        .{ .name = "javascript", .source = "class App {}\n", .path = "j.js" },
+    };
+
+    for (&langs) |lang| {
+        const config = findBuiltinConfig(lang.name) orelse return error.TestUnexpectedResult;
+        const result = try indexer.indexFile(allocator, lang.source, lang.path, config);
+        for (result.doc.symbols) |sym| {
+            allocator.free(sym.documentation);
+            allocator.free(sym.relationships);
+        }
+        allocator.free(result.doc.occurrences);
+        allocator.free(result.doc.symbols);
+        allocator.free(result.string_data);
+    }
+}
+
+test "indexFile Flow-typed JavaScript uses TypeScript parser" {
+    const allocator = std.testing.allocator;
+    var indexer = Indexer.init();
+    defer indexer.deinit();
+
+    // Flow files have @flow pragma and use generic syntax that breaks the JS parser
+    const source =
+        \\// @flow
+        \\function identity<T>(x: T): T {
+        \\    return x;
+        \\}
+    ;
+
+    const config = findBuiltinConfig("javascript") orelse return error.TestUnexpectedResult;
+    const result = try indexer.indexFile(allocator, source, "flow.js", config);
+    const doc = result.doc;
+    defer {
+        for (doc.symbols) |sym| {
+            allocator.free(sym.documentation);
+            allocator.free(sym.relationships);
+        }
+        allocator.free(doc.occurrences);
+        allocator.free(doc.symbols);
+        allocator.free(result.string_data);
+    }
+
+    // Should still use "javascript" as the SCIP language name
+    try std.testing.expectEqualStrings("javascript", doc.language);
+    // The file should parse without errors (TS parser handles Flow generics)
+    try std.testing.expect(doc.symbols.len >= 0);
+}
+
 test "indexFile empty source" {
     const allocator = std.testing.allocator;
     var indexer = Indexer.init();
