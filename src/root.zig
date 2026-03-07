@@ -21,6 +21,7 @@ pub const bootstrap = @import("bootstrap.zig");
 pub const debug_log = @import("debug_log.zig");
 pub const sqlite = @import("sqlite.zig");
 pub const memory_schema = @import("memory_schema.zig");
+pub const memory = @import("memory.zig");
 
 test {
     _ = config;
@@ -46,4 +47,5 @@ test {
     _ = debug_log;
     _ = sqlite;
     _ = memory_schema;
+    _ = memory;
 }
