@@ -46,6 +46,8 @@ pub fn build(b: *std.Build) void {
     });
     addTreeSitter(b, mod);
     addCurl(b, mod, target, optimize);
+    addSqlite(b, mod);
+    addUuid(b, mod, target, optimize);
     // Build options (version + embedded prompts)
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", version);
@@ -212,6 +214,28 @@ fn addCurl(b: *std.Build, mod: *std.Build.Module, target: std.Build.ResolvedTarg
     mod.addImport("curl", curl_dep.module("curl"));
 }
 
+/// Add the vendored SQLite amalgamation to a module (with FTS5 enabled).
+fn addSqlite(b: *std.Build, mod: *std.Build.Module) void {
+    mod.addIncludePath(b.path("deps/sqlite"));
+    mod.addCSourceFile(.{
+        .file = b.path("deps/sqlite/sqlite3.c"),
+        .flags = &.{
+            "-DSQLITE_THREADSAFE=0",
+            "-DSQLITE_ENABLE_FTS5",
+            "-DSQLITE_DQS=0",
+            "-DSQLITE_DEFAULT_MEMSTATUS=0",
+            "-DSQLITE_OMIT_DEPRECATED",
+            "-DSQLITE_OMIT_SHARED_CACHE",
+        },
+    });
+}
+
+/// Add uuid-zig for v4 UUID generation.
+fn addUuid(b: *std.Build, mod: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
+    const dep = b.dependency("uuid", .{ .target = target, .optimize = optimize });
+    mod.addImport("uuid", dep.module("uuid"));
+}
+
 // Platform frameworks (CoreFoundation, CoreServices) are loaded dynamically
 // at runtime via std.DynLib so cross-compilation works without macOS SDK stubs.
 
@@ -234,6 +258,8 @@ fn addRelease(
     });
     addTreeSitter(b, release_mod);
     addCurl(b, release_mod, release_target, .ReleaseSafe);
+    addSqlite(b, release_mod);
+    addUuid(b, release_mod, release_target, .ReleaseSafe);
     const release_options = b.addOptions();
     release_options.addOption([]const u8, "version", version);
     release_options.addOption([]const u8, "prompt_md", @embedFile("priv/prompts/PROMPT.md"));
