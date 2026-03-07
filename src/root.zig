@@ -19,6 +19,7 @@ pub const hooks = @import("hooks.zig");
 pub const watcher = @import("watcher.zig");
 pub const bootstrap = @import("bootstrap.zig");
 pub const debug_log = @import("debug_log.zig");
+pub const sqlite = @import("sqlite.zig");
 
 test {
     _ = config;
@@ -42,4 +43,5 @@ test {
     _ = watcher;
     _ = bootstrap;
     _ = debug_log;
+    _ = sqlite;
 }

@@ -217,16 +217,21 @@ fn addCurl(b: *std.Build, mod: *std.Build.Module, target: std.Build.ResolvedTarg
 /// Add the vendored SQLite amalgamation to a module (with FTS5 enabled).
 fn addSqlite(b: *std.Build, mod: *std.Build.Module) void {
     mod.addIncludePath(b.path("deps/sqlite"));
+    const sqlite_flags: []const []const u8 = &.{
+        "-DSQLITE_THREADSAFE=0",
+        "-DSQLITE_ENABLE_FTS5",
+        "-DSQLITE_DQS=0",
+        "-DSQLITE_DEFAULT_MEMSTATUS=0",
+        "-DSQLITE_OMIT_DEPRECATED",
+        "-DSQLITE_OMIT_SHARED_CACHE",
+    };
     mod.addCSourceFile(.{
         .file = b.path("deps/sqlite/sqlite3.c"),
-        .flags = &.{
-            "-DSQLITE_THREADSAFE=0",
-            "-DSQLITE_ENABLE_FTS5",
-            "-DSQLITE_DQS=0",
-            "-DSQLITE_DEFAULT_MEMSTATUS=0",
-            "-DSQLITE_OMIT_DEPRECATED",
-            "-DSQLITE_OMIT_SHARED_CACHE",
-        },
+        .flags = sqlite_flags,
+    });
+    mod.addCSourceFile(.{
+        .file = b.path("deps/sqlite/sqlite3_helpers.c"),
+        .flags = sqlite_flags,
     });
 }
 
