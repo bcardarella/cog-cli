@@ -12,6 +12,7 @@ const debug_mod = @import("debug.zig");
 const watcher_mod = @import("watcher.zig");
 const paths = @import("paths.zig");
 const debug_log_mod = @import("debug_log.zig");
+const memory_mod = @import("memory.zig");
 
 const Config = config_mod.Config;
 const DebugServer = debug_server_mod.DebugServer;
@@ -33,19 +34,28 @@ const ToolTier = debug_server_mod.ToolTier;
 const Runtime = struct {
     allocator: std.mem.Allocator,
     mem_config: ?Config,
+    brain_type: config_mod.BrainType,
+    mem_db: ?memory_mod.MemoryDb = null,
     debug_server: DebugServer,
     code_cache: ?code_intel.CodeIndex = null,
     remote_tools: ?[]RemoteTool = null,
     mcp_session_id: ?[]const u8 = null,
     watcher: ?watcher_mod.Watcher = null,
     debug_tool_tier: ToolTier = .specialist,
-    /// Protects code_cache, remote_tools, and mcp_session_id from concurrent access.
+    /// Protects code_cache, remote_tools, mcp_session_id, and mem_db from concurrent access.
     mutex: std.Thread.Mutex = .{},
 
     fn init(allocator: std.mem.Allocator, debug_tool_tier: ToolTier) Runtime {
+        const brain = config_mod.resolveBrain(allocator);
+        debug_log_mod.log("Runtime.init: brain_type={s}", .{@tagName(brain)});
         return .{
             .allocator = allocator,
-            .mem_config = Config.load(allocator) catch null,
+            .mem_config = switch (brain) {
+                .remote => |r| r,
+                else => null,
+            },
+            .brain_type = brain,
+            .mem_db = null,
             .debug_server = DebugServer.init(allocator),
             .code_cache = null,
             .remote_tools = null,
@@ -57,7 +67,9 @@ const Runtime = struct {
 
     fn deinit(self: *Runtime) void {
         if (self.watcher) |*w| w.deinit();
-        if (self.mem_config) |cfg| cfg.deinit(self.allocator);
+        if (self.mem_db) |*mdb| mdb.close();
+        // brain_type owns the Config when .remote — don't also free via mem_config
+        self.brain_type.deinit(self.allocator);
         if (self.code_cache) |*ci| ci.deinit(self.allocator);
         if (self.remote_tools) |tools| {
             for (tools) |tool| {
@@ -73,7 +85,25 @@ const Runtime = struct {
     }
 
     fn hasMemory(self: *const Runtime) bool {
-        return self.mem_config != null;
+        return self.brain_type != .none;
+    }
+
+    fn isLocalBrain(self: *const Runtime) bool {
+        return self.brain_type == .local;
+    }
+
+    fn ensureMemoryDb(self: *Runtime) !*memory_mod.MemoryDb {
+        if (self.mem_db != null) return &self.mem_db.?;
+        const local = switch (self.brain_type) {
+            .local => |l| l,
+            else => return error.NotConfigured,
+        };
+        debug_log_mod.log("Runtime: lazy-opening local brain at {s}", .{local.path});
+        // Convert path to null-terminated
+        const path_z = try self.allocator.dupeZ(u8, local.path);
+        defer self.allocator.free(path_z);
+        self.mem_db = try memory_mod.MemoryDb.open(self.allocator, path_z, local.brain_id);
+        return &self.mem_db.?;
     }
 
     fn ensureCodeCache(self: *Runtime) !*code_intel.CodeIndex {
@@ -970,16 +1000,25 @@ fn writeToolCatalog(runtime: *Runtime, allocator: std.mem.Allocator, s: *Stringi
         \\{"type":"object","properties":{"queries":{"type":"array","description":"List of symbol queries. Each finds a symbol and returns source code around its definition.","items":{"type":"object","properties":{"name":{"type":"string","description":"Symbol name (supports glob: '*init*', 'get*')"},"kind":{"type":"string","description":"Filter by symbol kind (function, struct, method, variable, etc.)"}},"required":["name"]}},"context_lines":{"type":"number","description":"Fallback context lines for simple definitions without braces (default: 15)"}},"required":["queries"]}
     );
 
-    // Lazily discover remote memory tools on first tools/list
-    if (runtime.hasMemory() and runtime.remote_tools == null) {
-        discoverRemoteTools(runtime) catch |err| {
-            debugLog("Remote tool discovery failed: {s}", .{@errorName(err)});
-        };
-    }
-
-    if (runtime.remote_tools) |tools| {
-        for (tools) |tool| {
-            try writeToolDefWithSchemaJson(allocator, s, tool.name, tool.description, tool.input_schema);
+    // Memory tools: local definitions or remote discovery
+    if (runtime.hasMemory()) {
+        if (runtime.isLocalBrain()) {
+            // Emit hardcoded local tool definitions
+            for (memory_mod.tool_definitions) |tool| {
+                try writeToolDefWithSchemaJson(allocator, s, tool.name, tool.description, tool.input_schema);
+            }
+        } else {
+            // Lazily discover remote memory tools on first tools/list
+            if (runtime.remote_tools == null) {
+                discoverRemoteTools(runtime) catch |err| {
+                    debugLog("Remote tool discovery failed: {s}", .{@errorName(err)});
+                };
+            }
+            if (runtime.remote_tools) |tools| {
+                for (tools) |tool| {
+                    try writeToolDefWithSchemaJson(allocator, s, tool.name, tool.description, tool.input_schema);
+                }
+            }
         }
     }
 
@@ -1009,9 +1048,16 @@ fn runtimeCallTool(runtime: *Runtime, tool_name: []const u8, arguments: ?json.Va
         return callCodeExplore(runtime, arguments);
     }
 
-    // Memory tools — proxy to remote MCP server
+    // Memory tools — local SQLite or remote MCP server
     if (std.mem.startsWith(u8, tool_name, "cog_mem_")) {
-        return callRemoteMcpTool(runtime, tool_name, arguments);
+        if (runtime.isLocalBrain()) {
+            const mem_db = runtime.ensureMemoryDb() catch {
+                return runtime.allocator.dupe(u8, "Error: failed to open local memory database.");
+            };
+            return memory_mod.callLocalTool(mem_db, tool_name, arguments);
+        } else {
+            return callRemoteMcpTool(runtime, tool_name, arguments);
+        }
     }
 
     return error.Explained;
