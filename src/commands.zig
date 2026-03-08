@@ -174,75 +174,88 @@ pub fn init(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     else
         null;
 
-    // Ask which features to set up
-    const feature_options = [_]tui.MenuItem{
-        .{ .label = "Memory + Tools" },
-        .{ .label = "Tools only" },
-    };
-    const feature_result = try tui.select(allocator, .{
-        .prompt = "What would you like to set up?",
-        .items = &feature_options,
-    });
-    const setup_mem = switch (feature_result) {
-        .selected => |idx| idx == 0,
-        .back, .cancelled => {
-            printErr("  Aborted.\n");
-            return;
-        },
-        .input => unreachable,
-    };
-
-    if (setup_mem) {
-        printErr("\n");
-        printErr("  Cog Memory gives your AI agents persistent, associative\n");
-        printErr("  memory powered by a knowledge graph with biological\n");
-        printErr("  memory dynamics.\n\n");
-
-        // Ask for host (--host flag overrides the interactive prompt)
-        const effective_host: []const u8 = if (findFlag(args, "--host")) |h| h else blk: {
-            var host_items_buf: [3]tui.MenuItem = undefined;
-            var host_count: usize = 0;
-            var host_initial: usize = 0;
-
-            const existing_custom_host: ?[]const u8 = if (existing_brain_parts) |parts|
-                if (!std.mem.eql(u8, parts.host, "trycog.ai")) parts.host else null
-            else
-                null;
-
-            if (existing_custom_host) |custom| {
-                host_items_buf[host_count] = .{ .label = custom };
-                host_count += 1;
-            }
-            const trycog_idx = host_count;
-            host_items_buf[host_count] = .{ .label = "trycog.ai" };
-            host_count += 1;
-            host_items_buf[host_count] = .{ .label = "Custom host", .is_input_option = true };
-            host_count += 1;
-
-            if (existing_brain_parts != null) {
-                host_initial = if (existing_custom_host != null) 0 else trycog_idx;
-            }
-
-            const host_result = try tui.select(allocator, .{
-                .prompt = "Server host:",
-                .items = host_items_buf[0..host_count],
-                .initial = host_initial,
-            });
-            break :blk switch (host_result) {
-                .selected => |idx| if (idx == trycog_idx)
-                    @as([]const u8, "trycog.ai")
-                else
-                    (existing_custom_host orelse unreachable),
-                .input => |custom| custom,
-                .back, .cancelled => {
-                    printErr("  Aborted.\n");
-                    return;
-                },
-            };
+    // Ask which memory backend to use
+    const setup_mem = true;
+    {
+        const mem_options = [_]tui.MenuItem{
+            .{ .label = "Local (SQLite)" },
+            .{ .label = "Hosted (trycog.ai)" },
         };
 
-        printErr("\n");
-        try initBrain(allocator, effective_host, existing_brain_parts);
+        // Pre-select based on existing config
+        const mem_initial: usize = if (existing_brain_parts != null) 1 else 0;
+
+        const mem_result = try tui.select(allocator, .{
+            .prompt = "Memory backend:",
+            .items = &mem_options,
+            .initial = mem_initial,
+        });
+        switch (mem_result) {
+            .selected => |idx| {
+                if (idx == 0) {
+                    // Local SQLite — write file: brain to settings
+                    printErr("\n");
+                    try writeSettingsMerge(allocator, "file:.cog/brain.db");
+                } else {
+                    // Hosted — existing host/brain selection flow
+                    printErr("\n");
+                    printErr("  Cog Memory gives your AI agents persistent, associative\n");
+                    printErr("  memory powered by a knowledge graph with biological\n");
+                    printErr("  memory dynamics.\n\n");
+
+                    // Ask for host (--host flag overrides the interactive prompt)
+                    const effective_host: []const u8 = if (findFlag(args, "--host")) |h| h else blk: {
+                        var host_items_buf: [3]tui.MenuItem = undefined;
+                        var host_count: usize = 0;
+                        var host_initial: usize = 0;
+
+                        const existing_custom_host: ?[]const u8 = if (existing_brain_parts) |parts|
+                            if (!std.mem.eql(u8, parts.host, "trycog.ai")) parts.host else null
+                        else
+                            null;
+
+                        if (existing_custom_host) |custom| {
+                            host_items_buf[host_count] = .{ .label = custom };
+                            host_count += 1;
+                        }
+                        const trycog_idx = host_count;
+                        host_items_buf[host_count] = .{ .label = "trycog.ai" };
+                        host_count += 1;
+                        host_items_buf[host_count] = .{ .label = "Custom host", .is_input_option = true };
+                        host_count += 1;
+
+                        if (existing_brain_parts != null) {
+                            host_initial = if (existing_custom_host != null) 0 else trycog_idx;
+                        }
+
+                        const host_result = try tui.select(allocator, .{
+                            .prompt = "Server host:",
+                            .items = host_items_buf[0..host_count],
+                            .initial = host_initial,
+                        });
+                        break :blk switch (host_result) {
+                            .selected => |sel| if (sel == trycog_idx)
+                                @as([]const u8, "trycog.ai")
+                            else
+                                (existing_custom_host orelse unreachable),
+                            .input => |custom| custom,
+                            .back, .cancelled => {
+                                printErr("  Aborted.\n");
+                                return;
+                            },
+                        };
+                    };
+
+                    printErr("\n");
+                    try initBrain(allocator, effective_host, existing_brain_parts);
+                }
+            },
+            .back, .cancelled => {
+                printErr("  Aborted.\n");
+                return;
+            },
+            .input => unreachable,
+        }
         deployBootstrapTemplates();
     }
 
@@ -883,62 +896,32 @@ fn writeSettingsMerge(allocator: std.mem.Allocator, brain_url: []const u8) !void
                     try s.write(entry.value_ptr.*);
                 }
 
-                // Deep merge memory, preserving all existing keys
+                // Deep merge memory, preserving all existing non-brain keys
                 try s.objectField("memory");
                 try s.beginObject();
 
                 if (parsed.value.object.get("memory")) |memory| {
                     if (memory == .object) {
-                        // Preserve all non-brain keys (e.g. model)
                         var mem_iter = memory.object.iterator();
                         while (mem_iter.next()) |entry| {
                             if (std.mem.eql(u8, entry.key_ptr.*, "brain")) continue;
                             try s.objectField(entry.key_ptr.*);
                             try s.write(entry.value_ptr.*);
                         }
-
-                        // Merge brain, preserving non-url keys
-                        try s.objectField("brain");
-                        try s.beginObject();
-                        if (memory.object.get("brain")) |brain| {
-                            if (brain == .object) {
-                                var brain_iter = brain.object.iterator();
-                                while (brain_iter.next()) |entry| {
-                                    if (std.mem.eql(u8, entry.key_ptr.*, "url")) continue;
-                                    try s.objectField(entry.key_ptr.*);
-                                    try s.write(entry.value_ptr.*);
-                                }
-                            }
-                        }
-                        try s.objectField("url");
-                        try s.write(brain_url);
-                        try s.endObject(); // brain
-                    } else {
-                        try s.objectField("brain");
-                        try s.beginObject();
-                        try s.objectField("url");
-                        try s.write(brain_url);
-                        try s.endObject(); // brain
                     }
-                } else {
-                    try s.objectField("brain");
-                    try s.beginObject();
-                    try s.objectField("url");
-                    try s.write(brain_url);
-                    try s.endObject(); // brain
                 }
 
+                // Write brain as flat string
+                try s.objectField("brain");
+                try s.write(brain_url);
                 try s.endObject(); // memory
             } else {
-                // Root isn't an object, write fresh
                 try writeFreshMemoryBrain(&s, brain_url);
             }
         } else |_| {
-            // Parse failed, write fresh
             try writeFreshMemoryBrain(&s, brain_url);
         }
     } else {
-        // No existing file, write fresh
         try writeFreshMemoryBrain(&s, brain_url);
     }
 
@@ -964,10 +947,7 @@ fn writeFreshMemoryBrain(s: *Stringify, brain_url: []const u8) !void {
     try s.objectField("memory");
     try s.beginObject();
     try s.objectField("brain");
-    try s.beginObject();
-    try s.objectField("url");
     try s.write(brain_url);
-    try s.endObject(); // brain
     try s.endObject(); // memory
 }
 
