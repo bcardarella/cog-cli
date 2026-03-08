@@ -20,7 +20,7 @@ AI coding can feel fast but it's still limited by suboptimal methods and tooling
 
 We built Cog to fix that. It's a single native binary that runs as an MCP server and gives your agent three capabilities it doesn't have on its own:
 
-1. **Persistent memory** that carries across sessions, hosted on [trycog.ai](https://trycog.ai). Your agent learns your architecture, remembers past bugs, and builds knowledge that compounds over time. Memory can be shared across your team so everyone benefits from what any one agent learns.
+1. **Persistent memory** that carries across sessions. Your agent learns your architecture, remembers past bugs, and builds knowledge that compounds over time. Memory can run locally (SQLite) or hosted on [trycog.ai](https://trycog.ai) for team sharing.
 2. **Structured code intelligence** that returns definitions, references, and symbols in one tool call instead of 15 rounds of grep and file reads.
 3. **An interactive debugger** your agent drives directly. Breakpoints, variable inspection, stepping through code. No more print statement debugging.
 
@@ -84,7 +84,7 @@ cog init
 
 That's it. The interactive setup walks you through everything:
 
-1. **Memory or Tools-only**: full setup with a [trycog.ai](https://trycog.ai) brain, or just local code intelligence and debugging
+1. **Memory backend**: local (SQLite) or hosted ([trycog.ai](https://trycog.ai))
 2. **Agent selection**: pick which AI coding agents you use
 3. **Tool permissions**: optionally auto-allow all Cog tools so your agent doesn't prompt you on every call
 
@@ -113,7 +113,7 @@ Cog runs as an [MCP server](https://modelcontextprotocol.io/) over stdio. Your A
 
 ```
 Your Agent  <->  MCP (stdio)  <->  cog mcp
-                                     |-- Memory (trycog.ai API)
+                                     |-- Memory (local SQLite or trycog.ai)
                                      |-- Code Intelligence (local SCIP index)
                                      |-- Debug (local daemon)
 ```
@@ -140,7 +140,7 @@ Sub-agents keep the primary agent's context clean by offloading specialized work
 
 Your agent gets a persistent knowledge graph. It learns concepts, links them with typed relationships, and recalls them using spreading activation. Queries return not just direct matches but connected concepts across the graph.
 
-Memory is hosted on [trycog.ai](https://trycog.ai) and requires an account and API key.
+Memory runs **locally** (SQLite at `.cog/brain.db`) or **hosted** on [trycog.ai](https://trycog.ai). Local memory works out of the box with no account required. Hosted memory enables team sharing and cross-project knowledge.
 
 ### How it works
 
@@ -181,7 +181,7 @@ On first run, `cog mem:bootstrap` presents an interactive agent selector — pic
 ```json
 {
   "memory": {
-    "brain": { "url": "https://trycog.ai/you/brain" },
+    "brain": "https://trycog.ai/you/brain",
     "model": "claude-sonnet-4-20250514"
   }
 }
@@ -213,11 +213,17 @@ If you'd rather not use `cog init`, you can set things up by hand.
 
 **1.** Place a `.cog/settings.json` in your project (or any parent directory up to `$HOME`):
 
+For local memory:
 ```json
-{"memory": {"brain": {"url": "https://trycog.ai/username/brain"}}}
+{"memory": {"brain": "file:.cog/brain.db"}}
 ```
 
-**2.** Set your API key:
+For hosted memory:
+```json
+{"memory": {"brain": "https://trycog.ai/username/brain"}}
+```
+
+**2.** For hosted memory, set your API key:
 
 ```sh
 export COG_API_KEY=your-key-here

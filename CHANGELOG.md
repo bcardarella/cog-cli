@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-03-08
+
+### Changed
+
+- CI now tests on all 4 release architectures (x86_64/aarch64 Linux, x86_64/aarch64 macOS)
+- README updated to document local SQLite memory backend and new brain config format
+
+### Fixed
+
+- SIGILL crash on x86_64 Linux in release builds: removed `-DNDEBUG` from tree-sitter C flags which silenced a safety assertion, allowing undefined behavior that LLVM compiled to an illegal instruction
+- Memory leak in `freeExtension`: `program_field` and `args_field` were not freed for DAP debug configs
+
 ## [0.8.0] - 2026-03-08
 
 ### Added
@@ -269,6 +281,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GitHub Actions workflow for automated releases and Homebrew tap updates
 - Homebrew installation via `trycog/tap/cog`
 
+[0.8.1]: https://github.com/trycog/cog-cli/releases/tag/v0.8.1
 [0.8.0]: https://github.com/trycog/cog-cli/releases/tag/v0.8.0
 [0.7.4]: https://github.com/trycog/cog-cli/releases/tag/v0.7.4
 [0.7.3]: https://github.com/trycog/cog-cli/releases/tag/v0.7.3
