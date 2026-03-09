@@ -32,22 +32,39 @@ fn printErr(msg: []const u8) void {
 
 /// Returns true if the file should be written (new file, user said yes, or accept-all).
 /// Updates accept_all when the user picks 'a'.
-fn shouldWriteFile(path: []const u8, accept_all: *bool) bool {
+/// When new_content is provided, 'd' shows a diff against the existing file.
+fn shouldWriteFile(allocator: std.mem.Allocator, path: []const u8, new_content: []const u8, accept_all: *bool) bool {
     if (!hooks_mod.fileExistsInCwd(path)) return true;
     if (accept_all.*) {
         debug_log.log("shouldWriteFile: accept_all for {s}", .{path});
         return true;
     }
-    const action = tui.confirmOverwrite(path) catch return false;
-    debug_log.log("shouldWriteFile: user chose {s} for {s}", .{ @tagName(action), path });
-    switch (action) {
-        .yes => return true,
-        .no => return false,
-        .all => {
-            accept_all.* = true;
-            return true;
-        },
+    while (true) {
+        const action = tui.confirmOverwrite(path) catch return false;
+        debug_log.log("shouldWriteFile: user chose {s} for {s}", .{ @tagName(action), path });
+        switch (action) {
+            .yes => return true,
+            .no => return false,
+            .all => {
+                accept_all.* = true;
+                return true;
+            },
+            .diff => {
+                showFileDiff(allocator, path, new_content);
+                continue;
+            },
+        }
     }
+}
+
+fn showFileDiff(allocator: std.mem.Allocator, path: []const u8, new_content: []const u8) void {
+    const f = std.fs.cwd().openFile(path, .{}) catch return;
+    defer f.close();
+    const old_content = f.readToEndAlloc(allocator, 1048576) catch return;
+    defer allocator.free(old_content);
+    printErr("\n");
+    showDiff(allocator, old_content, new_content);
+    printErr("\n");
 }
 
 fn findFlag(args: []const [:0]const u8, flag: []const u8) ?[:0]const u8 {
@@ -403,7 +420,7 @@ pub fn init(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
 
         if (std.mem.eql(u8, agent.id, "opencode")) {
             const override_path = ".opencode/plugin/cog-override.ts";
-            if (shouldWriteFile(override_path, &accept_all)) {
+            if (shouldWriteFile(allocator, override_path, hooks_mod.opencode_override_content, &accept_all)) {
                 hooks_mod.configureOverridePlugin(agent) catch {};
                 printErr("    ");
                 tui.checkmark();
@@ -428,7 +445,12 @@ pub fn init(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
                 }
             }
             if (!agent_already_written) {
-                if (shouldWriteFile(agent_path, &accept_all)) {
+                const should_write = if (agent.agent_file_header) |header| blk: {
+                    const content = hooks_mod.buildMarkdownAgentContent(allocator, header, build_options.agent_body) catch break :blk true;
+                    defer allocator.free(content);
+                    break :blk shouldWriteFile(allocator, agent_path, content, &accept_all);
+                } else true; // codex/roo: upsert, always write
+                if (should_write) {
                     hooks_mod.configureAgentFile(allocator, agent) catch {};
                     printErr("    ");
                     tui.checkmark();
@@ -469,7 +491,12 @@ pub fn init(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
                     }
                 }
                 if (!debug_already_written) {
-                    if (shouldWriteFile(debug_path, &accept_all)) {
+                    const should_write = if (agent.debug_file_header) |header| blk: {
+                        const content = hooks_mod.buildMarkdownAgentContent(allocator, header, build_options.debug_agent_body) catch break :blk true;
+                        defer allocator.free(content);
+                        break :blk shouldWriteFile(allocator, debug_path, content, &accept_all);
+                    } else true;
+                    if (should_write) {
                         hooks_mod.configureDebugAgentFile(allocator, agent) catch {};
                         printErr("    ");
                         tui.checkmark();
@@ -510,7 +537,12 @@ pub fn init(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
                         }
                     }
                     if (!mem_already_written) {
-                        if (shouldWriteFile(mem_path, &accept_all)) {
+                        const should_write = if (agent.mem_file_header) |header| blk: {
+                            const content = hooks_mod.buildMarkdownAgentContent(allocator, header, build_options.mem_agent_body) catch break :blk true;
+                            defer allocator.free(content);
+                            break :blk shouldWriteFile(allocator, mem_path, content, &accept_all);
+                        } else true;
+                        if (should_write) {
                             hooks_mod.configureMemAgentFile(allocator, agent) catch {};
                             printErr("    ");
                             tui.checkmark();

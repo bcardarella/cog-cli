@@ -958,6 +958,7 @@ pub const OverwriteAction = enum {
     yes,
     no,
     all,
+    diff,
 };
 
 pub fn confirmOverwrite(path: []const u8) !OverwriteAction {
@@ -969,7 +970,7 @@ pub fn confirmOverwrite(path: []const u8) !OverwriteAction {
 
     stderrWrite("  " ++ cyan ++ "?" ++ reset ++ " Overwrite " ++ bold);
     stderrWrite(path);
-    stderrWrite(reset ++ "? " ++ dim ++ "(y/N/a)" ++ reset ++ " ");
+    stderrWrite(reset ++ "? " ++ dim ++ "(y/N/a/d)" ++ reset ++ " ");
 
     var term = try RawTerminal.enter(fd);
     defer term.leave();
@@ -981,6 +982,8 @@ pub fn confirmOverwrite(path: []const u8) !OverwriteAction {
             .yes
         else if (c == 'a' or c == 'A')
             .all
+        else if (c == 'd' or c == 'D')
+            .diff
         else
             .no,
         else => .no,
@@ -990,13 +993,14 @@ pub fn confirmOverwrite(path: []const u8) !OverwriteAction {
 fn confirmOverwriteFallback(path: []const u8) !OverwriteAction {
     stderrWrite("  ? Overwrite ");
     stderrWrite(path);
-    stderrWrite("? (y/N/a) ");
+    stderrWrite("? (y/N/a/d) ");
 
     var buf: [64]u8 = undefined;
     const n = posix.read(std.fs.File.stdin().handle, &buf) catch return .no;
     if (n == 0) return .no;
     if (buf[0] == 'y' or buf[0] == 'Y') return .yes;
     if (buf[0] == 'a' or buf[0] == 'A') return .all;
+    if (buf[0] == 'd' or buf[0] == 'D') return .diff;
     return .no;
 }
 

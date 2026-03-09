@@ -669,26 +669,7 @@ fn writeOpenCodeOverridePlugin(path: []const u8) !void {
         try ensureDir(parent);
     }
 
-    const content =
-        \\export default async () => ({
-        \\  "tool.definition": async (input, output) => {
-        \\    if (input.toolID === "glob" || input.toolID === "grep") {
-        \\      output.description =
-        \\        "Fallback only. Use cog_code_explore and cog_code_query for code exploration."
-        \\    }
-        \\  },
-        \\  "tool.execute.before": async (input) => {
-        \\    if (input.tool === "glob" || input.tool === "grep") {
-        \\      throw new Error(
-        \\        "Cog override policy: use cog_code_explore or cog_code_query. Glob and grep are disabled for OpenCode exploration workflows."
-        \\      )
-        \\    }
-        \\  },
-        \\})
-        \\
-    ;
-
-    try writeCwdFile(path, content);
+    try writeCwdFile(path, opencode_override_content);
 }
 
 // ── Agent File Deployment ────────────────────────────────────────────
@@ -728,6 +709,29 @@ pub fn configureMemAgentFile(allocator: std.mem.Allocator, agent: agents_mod.Age
         try writeRooAgent(allocator, mem_path, "cog-mem", "Cog Memory", "You are a memory sub-agent for Cog's persistent associative knowledge graph. Search memory with cog_mem_recall, consolidate short-term memories with cog_mem_list_short_term and cog_mem_reinforce, and check brain health with cog_mem_stats. Return concise summaries with engram IDs.");
     }
 }
+
+pub fn buildMarkdownAgentContent(allocator: std.mem.Allocator, header: []const u8, body: []const u8) ![]const u8 {
+    return try std.fmt.allocPrint(allocator, "{s}\n{s}", .{ header, body });
+}
+
+pub const opencode_override_content =
+    \\export default async () => ({
+    \\  "tool.definition": async (input, output) => {
+    \\    if (input.toolID === "glob" || input.toolID === "grep") {
+    \\      output.description =
+    \\        "Fallback only. Use cog_code_explore and cog_code_query for code exploration."
+    \\    }
+    \\  },
+    \\  "tool.execute.before": async (input) => {
+    \\    if (input.tool === "glob" || input.tool === "grep") {
+    \\      throw new Error(
+    \\        "Cog override policy: use cog_code_explore or cog_code_query. Glob and grep are disabled for OpenCode exploration workflows."
+    \\      )
+    \\    }
+    \\  },
+    \\})
+    \\
+;
 
 fn writeMarkdownAgent(allocator: std.mem.Allocator, path: []const u8, header: []const u8, body: []const u8) !void {
     if (std.fs.path.dirname(path)) |parent| {
