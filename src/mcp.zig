@@ -974,7 +974,7 @@ fn writeToolCatalog(runtime: *Runtime, allocator: std.mem.Allocator, s: *Stringi
     // guides the agent to only use 5 direct memory tools; everything else
     // is accessed through sub-agents (code, debug, memory).
 
-    try writeToolDef(s, "code_query", "Query the SCIP code index for targeted follow-up only. Returns concise plain-text results that an agent can read directly: use mode 'find' to locate definitions, 'refs' to list references, or 'symbols' to outline one already-identified file. Do not use repeated `symbols` or `find` calls as an exploration strategy when the work can be batched into `code_explore`.", &.{
+    try writeToolDef(s, "code_query", "Query the SCIP code index for targeted follow-up only. Returns concise plain-text results that an agent can read directly: use mode 'find' to locate definitions, 'refs' to list references, or 'symbols' to outline one already-identified file. Do not use repeated `symbols` or `find` calls as an exploration strategy when the work can be batched into `cog_code_explore`.", &.{
         .{ .name = "mode", .typ = "string", .desc = "Query mode: 'find' (locate a symbol's definition), 'refs' (find all references to a symbol), 'symbols' (list all symbols in a file)", .required = true },
         .{ .name = "name", .typ = "string", .desc = "Symbol name to search for (required for find and refs modes). Supports glob patterns: '*' (zero or more chars) and '?' (one char). Examples: '*init*', 'get*', 'Handle?'. Use '|' for alternation to search multiple names: 'banner|header|splash'", .required = false },
         .{ .name = "file", .typ = "string", .desc = "File path filter. Required for symbols mode. Optional for find/refs to scope results to a specific file.", .required = false },
