@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2026-03-09
+
+### Changed
+
+- `cog_code_query` and `cog_code_explore` now return compact plain-text results that agents can read directly, including symbol locations, snippets, references, and file outlines
+
+### Fixed
+
+- Hardened `cog code:index` against tree-sitter parser state leaks by recreating the parser per indexed file, preventing Linux x86_64 illegal-instruction crashes in mixed-language repos
+- Added offline indexing integration coverage to CI so real `cog code:index` runs on each release architecture, including x86_64 Ubuntu
+
 ## [0.9.0] - 2026-03-09
 
 ### Added
@@ -318,4 +329,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.2.0]: https://github.com/trycog/cog-cli/releases/tag/v0.2.0
 [0.1.0]: https://github.com/trycog/cog-cli/releases/tag/v0.1.0
 [0.0.1]: https://github.com/trycog/cog-cli/releases/tag/v0.0.1
+[0.9.1]: https://github.com/trycog/cog-cli/releases/tag/v0.9.1
 [0.9.0]: https://github.com/trycog/cog-cli/releases/tag/v0.9.0

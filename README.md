@@ -247,8 +247,8 @@ This runs entirely locally. No account required.
 
 | Tool | Description |
 |------|-------------|
-| `cog_code_explore` | Find symbols by name, return full definition bodies, file symbol table of contents, and references. Primary tool for code exploration. |
-| `cog_code_query` | Low-level index query with three modes: `find` (locate definitions), `refs` (find all references), `symbols` (list symbols in a file). |
+| `cog_code_explore` | Find symbols by name, return readable definition bodies, file outlines, and references in one response. Primary tool for code exploration. |
+| `cog_code_query` | Low-level index query with three modes: `find` (locate definitions), `refs` (find all references), `symbols` (list symbols in a file), all returned as concise plain text. |
 | `cog_code_status` | Check index availability and coverage. |
 
 ### Pattern matching
@@ -342,6 +342,7 @@ See **[Writing a Language Extension](EXTENSIONS.md)** to build your own.
 
 ```sh
 zig build test            # Run tests
+zig build test-indexing-integration  # Run real code:index integration coverage
 zig build run             # Build and run
 zig build run -- mcp      # Start MCP server
 ```
