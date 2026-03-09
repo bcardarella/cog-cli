@@ -281,7 +281,9 @@ CLI commands for managing files with automatic index updates:
 
 ### Built-in language support
 
-Go, TypeScript, TSX, JavaScript, Python, Java, Rust, C, C++
+- Source code: Go, TypeScript, TSX, JavaScript, Python, Java, Rust, C, C++
+- Docs/content: Markdown, MDX, reStructuredText, AsciiDoc
+- Config/data: YAML, TOML, JSON, JSONC
 
 Additional languages are supported through [extensions](#extensions).
 

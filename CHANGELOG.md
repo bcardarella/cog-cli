@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-03-09
+
+### Added
+
+- Built-in document and config indexing for Markdown, MDX, reStructuredText, AsciiDoc, YAML, TOML, JSON, and JSONC
+- Dedicated MDX tree-sitter indexing with heading, exported symbol, and JSX component captures
+
+### Changed
+
+- `cog init` now writes richer OpenCode integration config, including local plugin wiring alongside MCP setup
+- Built-in language support now covers source code, documentation, and structured config files without requiring extensions
+
 ## [0.8.2] - 2026-03-08
 
 ### Removed
@@ -306,3 +318,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.2.0]: https://github.com/trycog/cog-cli/releases/tag/v0.2.0
 [0.1.0]: https://github.com/trycog/cog-cli/releases/tag/v0.1.0
 [0.0.1]: https://github.com/trycog/cog-cli/releases/tag/v0.0.1
+[0.9.0]: https://github.com/trycog/cog-cli/releases/tag/v0.9.0
