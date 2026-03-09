@@ -27,3 +27,6 @@ jobs:
 
       - name: Run tests
         run: zig build test
+
+      - name: Run indexing integration tests
+        run: zig build test-indexing-integration

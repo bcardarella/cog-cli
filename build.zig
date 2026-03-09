@@ -159,6 +159,21 @@ pub fn build(b: *std.Build) void {
     integ_step.dependOn(&integ_run.step);
     if (b.args) |args| integ_run.addArgs(args);
 
+    const indexing_integ_exe = b.addExecutable(.{
+        .name = "test-indexing-integration",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/test_indexing_integration.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    const indexing_integ_run = b.addRunArtifact(indexing_integ_exe);
+    indexing_integ_run.step.dependOn(b.getInstallStep());
+    const indexing_integ_step = b.step("test-indexing-integration", "Run offline indexing integration tests");
+    indexing_integ_step.dependOn(&indexing_integ_run.step);
+    if (b.args) |args| indexing_integ_run.addArgs(args);
+
     // Grammar check: compilation depends on it, setup does not
     exe.step.dependOn(&check_grammars.step);
     mod_tests.step.dependOn(&check_grammars.step);

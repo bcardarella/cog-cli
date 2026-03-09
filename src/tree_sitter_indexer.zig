@@ -155,6 +155,12 @@ pub const Indexer = struct {
         c.ts_parser_delete(self.parser);
     }
 
+    fn resetParser(self: *Indexer) !void {
+        debug_log.log("Indexer.resetParser: recreating tree-sitter parser", .{});
+        c.ts_parser_delete(self.parser);
+        self.parser = c.ts_parser_new() orelse return error.OutOfMemory;
+    }
+
     /// Index a single file and return a document with its backing string data.
     /// The caller owns all allocated memory in the returned result.
     /// `string_data` must be freed separately from the document — it holds
@@ -179,14 +185,14 @@ pub const Indexer = struct {
 
         const ts_lang = getGrammar(parser_grammar) orelse return error.UnknownGrammar;
 
-        // Set parser language and reset state from any previous parse.
-        // Without the reset, stale parser state (especially from languages
-        // with external scanners like JavaScript) causes illegal-instruction
-        // crashes when the parser is reused across different grammars.
+        try self.resetParser();
+
+        // Set parser language on a fresh parser instance.
+        // Recreating the parser is more defensive than reset alone and avoids
+        // stale external-scanner state surviving across files or grammars.
         if (!c.ts_parser_set_language(self.parser, ts_lang)) {
             return error.LanguageVersionMismatch;
         }
-        c.ts_parser_reset(self.parser);
 
         // Parse the source
         const tree = c.ts_parser_parse_string(
