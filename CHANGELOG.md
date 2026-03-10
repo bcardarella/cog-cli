@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-03-09
+
+### Added
+
+- `cog_code_query` architecture modes for `imports`, `contains`, `calls`, `callers`, and `overview`
+- Repo-level architecture summaries in `cog_code_explore`, including entrypoint, subsystem, and import fan-out context
+- Embedded OpenCode override plugin to enforce Cog-first code exploration guidance during setup
+
+### Changed
+
+- `cog_code_explore` now returns optional relationship and architecture sections alongside symbol snippets and references
+- Cog-first prompts, sub-agent instructions, and docs now steer repository analysis toward batched index queries instead of repeated file-by-file exploration
+- `cog init` now prompts before overwriting generated files and can show diffs for pending replacements
+
+### Fixed
+
+- Restored stable `cog_` MCP tool naming in prompts, references, and benchmark configs after an accidental prefix regression
+
 ## [0.9.1] - 2026-03-09
 
 ### Changed
@@ -329,5 +347,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.2.0]: https://github.com/trycog/cog-cli/releases/tag/v0.2.0
 [0.1.0]: https://github.com/trycog/cog-cli/releases/tag/v0.1.0
 [0.0.1]: https://github.com/trycog/cog-cli/releases/tag/v0.0.1
+[0.10.0]: https://github.com/trycog/cog-cli/releases/tag/v0.10.0
 [0.9.1]: https://github.com/trycog/cog-cli/releases/tag/v0.9.1
 [0.9.0]: https://github.com/trycog/cog-cli/releases/tag/v0.9.0

@@ -247,9 +247,11 @@ This runs entirely locally. No account required.
 
 | Tool | Description |
 |------|-------------|
-| `cog_code_explore` | Find symbols by name, return readable definition bodies, file outlines, and references in one response. Primary tool for code exploration. |
-| `cog_code_query` | Low-level index query with three modes: `find` (locate definitions), `refs` (find all references), `symbols` (list symbols in a file), all returned as concise plain text. |
+| `cog_code_explore` | Find symbols by name, return readable definition bodies, file outlines, references, and optional architecture summaries in one response. Primary tool for code exploration. |
+| `cog_code_query` | Low-level index query with modes for `find`, `refs`, `symbols`, `imports`, `contains`, `calls`, `callers`, and `overview`, all returned as concise plain text. |
 | `cog_code_status` | Check index availability and coverage. |
+
+`cog init` now installs stronger Cog-first guidance for supported agents, including an OpenCode override plugin and tighter sub-agent instructions so repository understanding defaults to indexed code exploration instead of ad hoc file search.
 
 ### Pattern matching
 
