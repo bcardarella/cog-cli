@@ -1429,18 +1429,7 @@ fn callDebugTool(runtime: *Runtime, tool_name: []const u8, arguments: ?json.Valu
     return switch (result) {
         .ok => |payload| payload,
         .ok_static => |payload| try allocator.dupe(u8, payload),
-        .err => |e| {
-            var aw: Writer.Allocating = .init(allocator);
-            errdefer aw.deinit();
-            var s: Stringify = .{ .writer = &aw.writer };
-            try s.beginObject();
-            try s.objectField("code");
-            try s.write(e.code);
-            try s.objectField("message");
-            try s.write(e.message);
-            try s.endObject();
-            return aw.toOwnedSlice();
-        },
+        .err => |e| try std.fmt.allocPrint(allocator, "Error {d}: {s}", .{ e.code, e.message }),
     };
 }
 

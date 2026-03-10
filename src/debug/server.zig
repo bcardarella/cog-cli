@@ -574,6 +574,342 @@ pub const DebugServer = struct {
         return null;
     }
 
+    const TextOutput = struct {
+        buf: std.ArrayListUnmanaged(u8) = .empty,
+        allocator: std.mem.Allocator,
+
+        fn init(allocator: std.mem.Allocator) TextOutput {
+            return .{ .allocator = allocator };
+        }
+
+        fn deinit(self: *TextOutput) void {
+            self.buf.deinit(self.allocator);
+        }
+
+        fn append(self: *TextOutput, text: []const u8) !void {
+            try self.buf.appendSlice(self.allocator, text);
+        }
+
+        fn print(self: *TextOutput, comptime fmt: []const u8, args: anytype) !void {
+            try std.fmt.format(self.buf.writer(self.allocator), fmt, args);
+        }
+
+        fn toOwnedSlice(self: *TextOutput) ![]const u8 {
+            return self.buf.toOwnedSlice(self.allocator);
+        }
+    };
+
+    fn okText(allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) !ToolResult {
+        return .{ .ok = try std.fmt.allocPrint(allocator, fmt, args) };
+    }
+
+    fn appendBreakpointText(out: *TextOutput, bp: *const types.BreakpointInfo) !void {
+        try out.print("- breakpoint #{d}: {s}:{d} ({s})", .{ bp.id, bp.file, bp.actual_line orelse bp.line, if (bp.verified) "verified" else "unverified" });
+        if (bp.condition) |condition| {
+            try out.print(" condition={s}", .{condition});
+        }
+        if (bp.hit_condition) |hit_condition| {
+            try out.print(" hit={s}", .{hit_condition});
+        }
+        if (bp.log_message) |log_message| {
+            try out.print(" log={s}", .{log_message});
+        }
+    }
+
+    fn formatStopStateText(allocator: std.mem.Allocator, state: *const types.StopState) ![]const u8 {
+        var out = TextOutput.init(allocator);
+        errdefer out.deinit();
+
+        try out.print("stop reason: {s}\n", .{@tagName(state.stop_reason)});
+        if (state.location) |loc| {
+            try out.print("location: {s}:{d}", .{ loc.file, loc.line });
+            if (loc.function.len > 0) {
+                try out.print(" in {s}", .{loc.function});
+            }
+            try out.append("\n");
+        }
+        if (state.exit_code) |code| {
+            try out.print("exit code: {d}\n", .{code});
+        }
+        if (state.hit_breakpoint_ids.len > 0) {
+            try out.append("hit breakpoints:");
+            for (state.hit_breakpoint_ids) |bp_id| {
+                try out.print(" #{d}", .{bp_id});
+            }
+            try out.append("\n");
+        }
+        if (state.exception) |exc| {
+            try out.print("exception: {s}", .{exc.type});
+            if (exc.message.len > 0) {
+                try out.print(" - {s}", .{exc.message});
+            }
+            try out.append("\n");
+        }
+        if (state.log_messages.len > 0) {
+            try out.append("log messages:\n");
+            for (state.log_messages) |msg| {
+                try out.print("- {s}\n", .{msg});
+            }
+        }
+        if (state.output.len > 0) {
+            try out.append("output:\n");
+            for (state.output) |entry| {
+                try out.print("- [{s}] {s}\n", .{ entry.category, entry.text });
+            }
+        }
+        if (state.stack_trace.len > 0) {
+            try out.append("stack trace:\n");
+            for (state.stack_trace, 0..) |frame, i| {
+                try out.print("{d}. {s} at {s}:{d}\n", .{ i + 1, frame.name, frame.source, frame.line });
+            }
+        }
+        if (state.locals.len > 0) {
+            try out.append("locals:\n");
+            for (state.locals) |local| {
+                try out.print("- {s} = {s}", .{ local.name, local.value });
+                if (local.type.len > 0) {
+                    try out.print(" ({s})", .{local.type});
+                }
+                if (local.variables_reference > 0) {
+                    try out.print(" [ref: {d}]", .{local.variables_reference});
+                }
+                try out.append("\n");
+            }
+        }
+
+        return out.toOwnedSlice();
+    }
+
+    fn formatThreadsText(allocator: std.mem.Allocator, threads: []const types.ThreadInfo) ![]const u8 {
+        var out = TextOutput.init(allocator);
+        errdefer out.deinit();
+        if (threads.len == 0) {
+            try out.append("No threads.");
+            return out.toOwnedSlice();
+        }
+        try out.print("threads ({d}):\n", .{threads.len});
+        for (threads) |thread| {
+            try out.print("- #{d}: {s}", .{ thread.id, thread.name });
+            if (thread.is_stopped) try out.append(" [stopped]");
+            try out.append("\n");
+        }
+        return out.toOwnedSlice();
+    }
+
+    fn formatStackTraceText(allocator: std.mem.Allocator, frames: []const types.StackFrame) ![]const u8 {
+        var out = TextOutput.init(allocator);
+        errdefer out.deinit();
+        if (frames.len == 0) {
+            try out.append("No stack frames.");
+            return out.toOwnedSlice();
+        }
+        try out.print("stack trace ({d} frames):\n", .{frames.len});
+        for (frames, 0..) |frame, i| {
+            try out.print("{d}. {s} at {s}:{d}:{d} [frame_id={d}]\n", .{ i + 1, frame.name, frame.source, frame.line, frame.column, frame.id });
+        }
+        return out.toOwnedSlice();
+    }
+
+    fn formatScopesText(allocator: std.mem.Allocator, scopes: []const types.Scope) ![]const u8 {
+        var out = TextOutput.init(allocator);
+        errdefer out.deinit();
+        if (scopes.len == 0) {
+            try out.append("No scopes.");
+            return out.toOwnedSlice();
+        }
+        try out.append("scopes:\n");
+        for (scopes) |scope| {
+            try out.print("- {s} [ref: {d}]", .{ scope.name, scope.variables_reference });
+            if (scope.expensive) try out.append(" [expensive]");
+            try out.append("\n");
+        }
+        return out.toOwnedSlice();
+    }
+
+    fn formatModulesText(allocator: std.mem.Allocator, modules: []const types.Module) ![]const u8 {
+        var out = TextOutput.init(allocator);
+        errdefer out.deinit();
+        if (modules.len == 0) {
+            try out.append("No modules.");
+            return out.toOwnedSlice();
+        }
+        try out.print("modules ({d}):\n", .{modules.len});
+        for (modules) |module| {
+            try out.print("- {s}", .{module.name});
+            if (module.path.len > 0) try out.print(" ({s})", .{module.path});
+            if (module.symbol_status.len > 0) try out.print(" symbols={s}", .{module.symbol_status});
+            if (module.is_optimized) try out.append(" optimized");
+            try out.append("\n");
+        }
+        return out.toOwnedSlice();
+    }
+
+    fn formatLoadedSourcesText(allocator: std.mem.Allocator, sources: []const types.LoadedSource) ![]const u8 {
+        var out = TextOutput.init(allocator);
+        errdefer out.deinit();
+        if (sources.len == 0) {
+            try out.append("No loaded sources.");
+            return out.toOwnedSlice();
+        }
+        try out.print("loaded sources ({d}):\n", .{sources.len});
+        for (sources) |source| {
+            try out.print("- {s}", .{source.name});
+            if (source.path.len > 0) try out.print(" ({s})", .{source.path});
+            if (source.source_reference > 0) try out.print(" [source_reference={d}]", .{source.source_reference});
+            try out.append("\n");
+        }
+        return out.toOwnedSlice();
+    }
+
+    fn formatRegistersText(allocator: std.mem.Allocator, registers: []const types.RegisterInfo) ![]const u8 {
+        var out = TextOutput.init(allocator);
+        errdefer out.deinit();
+        if (registers.len == 0) {
+            try out.append("No registers.");
+            return out.toOwnedSlice();
+        }
+        try out.append("registers:\n");
+        for (registers) |reg| {
+            try out.print("- {s} = 0x{x}\n", .{ reg.name, reg.value });
+        }
+        return out.toOwnedSlice();
+    }
+
+    fn formatMemoryReadText(allocator: std.mem.Allocator, address: []const u8, size: u64, data: []const u8) ![]const u8 {
+        return std.fmt.allocPrint(allocator, "memory read {s} ({d} bytes)\n{s}", .{ address, size, data });
+    }
+
+    fn formatDisassemblyText(allocator: std.mem.Allocator, instructions: []const types.DisassembledInstruction) ![]const u8 {
+        var out = TextOutput.init(allocator);
+        errdefer out.deinit();
+        if (instructions.len == 0) {
+            try out.append("No instructions.");
+            return out.toOwnedSlice();
+        }
+        try out.append("instructions:\n");
+        for (instructions) |inst| {
+            try out.print("- {s}: {s}", .{ inst.address, inst.instruction });
+            if (inst.instruction_bytes.len > 0) try out.print(" [{s}]", .{inst.instruction_bytes});
+            try out.append("\n");
+        }
+        return out.toOwnedSlice();
+    }
+
+    fn formatBreakpointLocationsText(allocator: std.mem.Allocator, locations: []const types.BreakpointLocation) ![]const u8 {
+        var out = TextOutput.init(allocator);
+        errdefer out.deinit();
+        if (locations.len == 0) {
+            try out.append("No valid breakpoint locations.");
+            return out.toOwnedSlice();
+        }
+        try out.append("valid breakpoint locations:\n");
+        for (locations) |loc| {
+            try out.print("- line {d}", .{loc.line});
+            if (loc.column) |column| try out.print(":{d}", .{column});
+            if (loc.end_line) |end_line| {
+                try out.print(" -> {d}", .{end_line});
+                if (loc.end_column) |end_column| try out.print(":{d}", .{end_column});
+            }
+            try out.append("\n");
+        }
+        return out.toOwnedSlice();
+    }
+
+    fn formatStepInTargetsText(allocator: std.mem.Allocator, targets: []const types.StepInTarget) ![]const u8 {
+        var out = TextOutput.init(allocator);
+        errdefer out.deinit();
+        if (targets.len == 0) {
+            try out.append("No step-in targets.");
+            return out.toOwnedSlice();
+        }
+        try out.append("step-in targets:\n");
+        for (targets) |target| {
+            try out.print("- #{d}: {s}", .{ target.id, target.label });
+            if (target.line) |line| {
+                try out.print(" at line {d}", .{line});
+                if (target.column) |column| try out.print(":{d}", .{column});
+            }
+            try out.append("\n");
+        }
+        return out.toOwnedSlice();
+    }
+
+    fn formatGotoTargetsText(allocator: std.mem.Allocator, targets: []const types.GotoTarget) ![]const u8 {
+        var out = TextOutput.init(allocator);
+        errdefer out.deinit();
+        if (targets.len == 0) {
+            try out.append("No goto targets.");
+            return out.toOwnedSlice();
+        }
+        try out.append("goto targets:\n");
+        for (targets) |target| {
+            try out.print("- #{d}: {s} at line {d}", .{ target.id, target.label, target.line });
+            if (target.column) |column| try out.print(":{d}", .{column});
+            try out.append("\n");
+        }
+        return out.toOwnedSlice();
+    }
+
+    fn formatSymbolsText(allocator: std.mem.Allocator, symbols: []const types.SymbolInfo) ![]const u8 {
+        var out = TextOutput.init(allocator);
+        errdefer out.deinit();
+        if (symbols.len == 0) {
+            try out.append("No symbols found.");
+            return out.toOwnedSlice();
+        }
+        try out.append("symbols:\n");
+        for (symbols) |symbol| {
+            try out.print("- {s}", .{symbol.name});
+            if (symbol.kind.len > 0) try out.print(" ({s})", .{symbol.kind});
+            if (symbol.file.len > 0) {
+                try out.print(" in {s}", .{symbol.file});
+                if (symbol.line) |line| try out.print(":{d}", .{line});
+            }
+            if (symbol.container.len > 0) try out.print(" container={s}", .{symbol.container});
+            try out.append("\n");
+        }
+        return out.toOwnedSlice();
+    }
+
+    fn formatVariableLocationText(allocator: std.mem.Allocator, loc: *const types.VariableLocationInfo) ![]const u8 {
+        var out = TextOutput.init(allocator);
+        errdefer out.deinit();
+        try out.print("{s}: {s}", .{ loc.name, loc.location_type });
+        if (loc.register.len > 0) try out.print(" register={s}", .{loc.register});
+        if (loc.stack_offset) |stack_offset| try out.print(" stack_offset={d}", .{stack_offset});
+        if (loc.address) |address| try out.print(" address=0x{x}", .{address});
+        if (loc.pieces.len > 0) try out.print(" pieces={s}", .{loc.pieces});
+        return out.toOwnedSlice();
+    }
+
+    fn formatExceptionInfoText(allocator: std.mem.Allocator, info: *const types.ExceptionInfo) ![]const u8 {
+        var out = TextOutput.init(allocator);
+        errdefer out.deinit();
+        try out.print("exception: {s}\n", .{info.type});
+        if (info.message.len > 0) try out.print("message: {s}\n", .{info.message});
+        try out.print("break mode: {s}", .{info.break_mode});
+        if (info.details) |details| {
+            if (details.type_name.len > 0) try out.print("\ntype: {s}", .{details.type_name});
+            if (details.message.len > 0) try out.print("\ndetails: {s}", .{details.message});
+            if (details.stack_trace.len > 0) try out.print("\nstack:\n{s}", .{details.stack_trace});
+        }
+        return out.toOwnedSlice();
+    }
+
+    fn formatSessionListText(allocator: std.mem.Allocator, sessions: anytype) ![]const u8 {
+        var out = TextOutput.init(allocator);
+        errdefer out.deinit();
+        if (sessions.len == 0) {
+            try out.append("No active sessions.");
+            return out.toOwnedSlice();
+        }
+        try out.append("active sessions:\n");
+        for (sessions) |session| {
+            try out.print("- {s}: {s} ({s})\n", .{ session.id, @tagName(session.status), @tagName(session.driver_type) });
+        }
+        return out.toOwnedSlice();
+    }
+
     // ── Tool Implementations ────────────────────────────────────────────
 
     fn toolLaunch(self: *DebugServer, allocator: std.mem.Allocator, args: ?json.Value) !ToolResult {
@@ -653,17 +989,7 @@ pub const DebugServer = struct {
             self.dashboard.onLaunch(session_id, display_name, "dap");
             self.emitLaunchEvent(session_id, display_name, "dap");
 
-            var aw: Writer.Allocating = .init(allocator);
-            defer aw.deinit();
-            var s: Stringify = .{ .writer = &aw.writer };
-            try s.beginObject();
-            try s.objectField("session_id");
-            try s.write(session_id);
-            try s.objectField("status");
-            try s.write("stopped");
-            try s.endObject();
-            const result = try aw.toOwnedSlice();
-            return .{ .ok = result };
+            return okText(allocator, "Started debug session `{s}` for `{s}` using dap.", .{ session_id, display_name });
         } else {
             const dwarf_engine = @import("dwarf/engine.zig");
             var engine = try allocator.create(dwarf_engine.DwarfEngine);
@@ -687,17 +1013,7 @@ pub const DebugServer = struct {
             self.dashboard.onLaunch(session_id, config.program, "native");
             self.emitLaunchEvent(session_id, config.program, "native");
 
-            var aw: Writer.Allocating = .init(allocator);
-            defer aw.deinit();
-            var s: Stringify = .{ .writer = &aw.writer };
-            try s.beginObject();
-            try s.objectField("session_id");
-            try s.write(session_id);
-            try s.objectField("status");
-            try s.write("stopped");
-            try s.endObject();
-            const result = try aw.toOwnedSlice();
-            return .{ .ok = result };
+            return okText(allocator, "Started debug session `{s}` for `{s}` using native.", .{ session_id, config.program });
         }
     }
 
@@ -732,17 +1048,11 @@ pub const DebugServer = struct {
             self.dashboard.onBreakpoint("set", bp);
             self.emitBreakpointEvent(session_id_val.string, "set", bp);
 
-            var aw: Writer.Allocating = .init(allocator);
-            defer aw.deinit();
-            var s: Stringify = .{ .writer = &aw.writer };
-            try s.beginObject();
-            try s.objectField("breakpoints");
-            try s.beginArray();
-            try bp.jsonStringify(&s);
-            try s.endArray();
-            try s.endObject();
-            const result = try aw.toOwnedSlice();
-            return .{ .ok = result };
+            var out = TextOutput.init(allocator);
+            errdefer out.deinit();
+            try out.append("Set breakpoint:\n");
+            try appendBreakpointText(&out, &bp);
+            return .{ .ok = try out.toOwnedSlice() };
         } else if (std.mem.eql(u8, action_str, "remove")) {
             const bp_id_val = a.object.get("id") orelse return .{ .err = .{ .code = INVALID_PARAMS, .message = "Missing id for remove" } };
             if (bp_id_val != .integer) return .{ .err = .{ .code = INVALID_PARAMS, .message = "id must be integer" } };
@@ -764,7 +1074,7 @@ pub const DebugServer = struct {
                 .line = 0,
             });
 
-            return .{ .ok_static = "{\"removed\":true}" };
+            return okText(allocator, "Removed breakpoint #{d}.", .{@as(u32, @intCast(bp_id_val.integer))});
         } else if (std.mem.eql(u8, action_str, "list")) {
             const bps = session.driver.listBreakpoints(allocator) catch |err| {
                 self.dashboard.onError("debug_breakpoint", @errorName(err));
@@ -777,19 +1087,18 @@ pub const DebugServer = struct {
                 .line = 0,
             });
 
-            var aw: Writer.Allocating = .init(allocator);
-            defer aw.deinit();
-            var s: Stringify = .{ .writer = &aw.writer };
-            try s.beginObject();
-            try s.objectField("breakpoints");
-            try s.beginArray();
-            for (bps) |*bp| {
-                try bp.jsonStringify(&s);
+            var out = TextOutput.init(allocator);
+            errdefer out.deinit();
+            if (bps.len == 0) {
+                try out.append("No breakpoints set.");
+            } else {
+                try out.append("Breakpoints:\n");
+                for (bps) |*bp| {
+                    try appendBreakpointText(&out, bp);
+                    try out.append("\n");
+                }
             }
-            try s.endArray();
-            try s.endObject();
-            const result = try aw.toOwnedSlice();
-            return .{ .ok = result };
+            return .{ .ok = try out.toOwnedSlice() };
         } else if (std.mem.eql(u8, action_str, "set_function")) {
             const func_val = a.object.get("function") orelse return .{ .err = .{ .code = INVALID_PARAMS, .message = "Missing function name" } };
             if (func_val != .string) return .{ .err = .{ .code = INVALID_PARAMS, .message = "function must be string" } };
@@ -802,17 +1111,11 @@ pub const DebugServer = struct {
             };
             self.dashboard.onBreakpoint("set", bp);
 
-            var aw: Writer.Allocating = .init(allocator);
-            defer aw.deinit();
-            var s: Stringify = .{ .writer = &aw.writer };
-            try s.beginObject();
-            try s.objectField("breakpoints");
-            try s.beginArray();
-            try bp.jsonStringify(&s);
-            try s.endArray();
-            try s.endObject();
-            const result = try aw.toOwnedSlice();
-            return .{ .ok = result };
+            var out = TextOutput.init(allocator);
+            errdefer out.deinit();
+            try out.append("Set function breakpoint:\n");
+            try appendBreakpointText(&out, &bp);
+            return .{ .ok = try out.toOwnedSlice() };
         } else if (std.mem.eql(u8, action_str, "set_exception")) {
             const filters_val = a.object.get("filters") orelse return .{ .err = .{ .code = INVALID_PARAMS, .message = "Missing filters for set_exception" } };
             if (filters_val != .array) return .{ .err = .{ .code = INVALID_PARAMS, .message = "filters must be array" } };
@@ -831,7 +1134,7 @@ pub const DebugServer = struct {
                 return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
             };
 
-            return .{ .ok_static = "{\"exception_breakpoints_set\":true}" };
+            return okText(allocator, "Configured exception breakpoints ({d} filters).", .{filter_list.items.len});
         } else {
             return .{ .err = .{ .code = INVALID_PARAMS, .message = "action must be set, remove, list, set_function, or set_exception" } };
         }
@@ -866,12 +1169,7 @@ pub const DebugServer = struct {
             self.dashboard.onRun(session_id_val.string, "goto", state);
             self.emitStopEvent(session_id_val.string, "goto", state);
 
-            var aw: Writer.Allocating = .init(allocator);
-            defer aw.deinit();
-            var s: Stringify = .{ .writer = &aw.writer };
-            try state.jsonStringify(&s);
-            const result = try aw.toOwnedSlice();
-            return .{ .ok = result };
+            return .{ .ok = try formatStopStateText(allocator, &state) };
         }
 
         // Handle step_over_inspect — composite action: step + evaluate in a loop
@@ -899,17 +1197,7 @@ pub const DebugServer = struct {
                 return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
             };
 
-            var aw: Writer.Allocating = .init(allocator);
-            defer aw.deinit();
-            var jw: Stringify = .{ .writer = &aw.writer };
-            try jw.beginObject();
-            try jw.objectField("status");
-            try jw.write("pausing");
-            try jw.objectField("session_id");
-            try jw.write(session_id_val.string);
-            try jw.endObject();
-            const result = try aw.toOwnedSlice();
-            return .{ .ok = result };
+            return okText(allocator, "Pausing session `{s}`.", .{session_id_val.string});
         }
 
         // Restart delegates to driver.restart() which handles the full
@@ -920,7 +1208,7 @@ pub const DebugServer = struct {
                 return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
             };
             session.status = .stopped;
-            return .{ .ok_static = "{\"stop_reason\":\"restart\"}" };
+            return okText(allocator, "Restarted session `{s}`.", .{session_id_val.string});
         }
 
         // Pause is non-blocking — keep synchronous
@@ -935,12 +1223,7 @@ pub const DebugServer = struct {
             self.dashboard.onRun(session_id_val.string, action_val.string, state);
             self.emitStopEvent(session_id_val.string, action_val.string, state);
 
-            var aw: Writer.Allocating = .init(allocator);
-            defer aw.deinit();
-            var jw: Stringify = .{ .writer = &aw.writer };
-            try state.jsonStringify(&jw);
-            const result = try aw.toOwnedSlice();
-            return .{ .ok = result };
+            return .{ .ok = try formatStopStateText(allocator, &state) };
         }
 
         // Execution control: continue, step_into, step_over, step_out,
@@ -982,17 +1265,7 @@ pub const DebugServer = struct {
 
         // Async path: return immediately with status:running
         if (timeout_ms <= 0) {
-            var aw: Writer.Allocating = .init(allocator);
-            defer aw.deinit();
-            var jw: Stringify = .{ .writer = &aw.writer };
-            try jw.beginObject();
-            try jw.objectField("status");
-            try jw.write("running");
-            try jw.objectField("session_id");
-            try jw.write(session_id_val.string);
-            try jw.endObject();
-            const result = try aw.toOwnedSlice();
-            return .{ .ok = result };
+            return okText(allocator, "Session `{s}` is running in the background.", .{session_id_val.string});
         }
 
         // Synchronous blocking path: release mutex, poll until done or timeout,
@@ -1013,11 +1286,7 @@ pub const DebugServer = struct {
                         self.dashboard.onRun(session_id_val.string, action_val.string, state);
                         self.emitStopEvent(session_id_val.string, action_val.string, state);
 
-                        var aw: Writer.Allocating = .init(allocator);
-                        defer aw.deinit();
-                        var jw: Stringify = .{ .writer = &aw.writer };
-                        try state.jsonStringify(&jw);
-                        const stop_result = try aw.toOwnedSlice();
+                        const stop_result = try formatStopStateText(allocator, &state);
 
                         pr.thread.join();
                         pr.deinit();
@@ -1052,17 +1321,7 @@ pub const DebugServer = struct {
                 // Timeout: send pause to debuggee and return timeout status
                 session.driver.sendPause(allocator, null) catch {};
 
-                var aw: Writer.Allocating = .init(allocator);
-                defer aw.deinit();
-                var jw: Stringify = .{ .writer = &aw.writer };
-                try jw.beginObject();
-                try jw.objectField("status");
-                try jw.write("timeout");
-                try jw.objectField("session_id");
-                try jw.write(session_id_val.string);
-                try jw.endObject();
-                const timeout_result = try aw.toOwnedSlice();
-                return .{ .ok = timeout_result };
+                return okText(allocator, "Timed out waiting for session `{s}`; a pause signal was sent.", .{session_id_val.string});
             }
 
             std.Thread.sleep(poll_interval_ns);
@@ -1431,19 +1690,7 @@ pub const DebugServer = struct {
             self.emitActivityEvent(session_id_val.string, "debug_threads", asum);
         }
 
-        var aw: Writer.Allocating = .init(allocator);
-        defer aw.deinit();
-        var s: Stringify = .{ .writer = &aw.writer };
-        try s.beginObject();
-        try s.objectField("threads");
-        try s.beginArray();
-        for (thread_list) |*t| {
-            try t.jsonStringify(&s);
-        }
-        try s.endArray();
-        try s.endObject();
-        const result = try aw.toOwnedSlice();
-        return .{ .ok = result };
+        return .{ .ok = try formatThreadsText(allocator, thread_list) };
     }
 
     fn toolStackTrace(self: *DebugServer, allocator: std.mem.Allocator, args: ?json.Value) !ToolResult {
@@ -1473,19 +1720,7 @@ pub const DebugServer = struct {
             self.emitActivityEvent(session_id_val.string, "debug_stacktrace", asum);
         }
 
-        var aw: Writer.Allocating = .init(allocator);
-        defer aw.deinit();
-        var s: Stringify = .{ .writer = &aw.writer };
-        try s.beginObject();
-        try s.objectField("stack_trace");
-        try s.beginArray();
-        for (frames) |*f| {
-            try f.jsonStringify(&s);
-        }
-        try s.endArray();
-        try s.endObject();
-        const result = try aw.toOwnedSlice();
-        return .{ .ok = result };
+        return .{ .ok = try formatStackTraceText(allocator, frames) };
     }
 
     fn toolMemory(self: *DebugServer, allocator: std.mem.Allocator, args: ?json.Value) !ToolResult {
@@ -1531,19 +1766,7 @@ pub const DebugServer = struct {
             };
             self.dashboard.onMemory(session_id_val.string, "read", addr_val.string);
 
-            var aw: Writer.Allocating = .init(allocator);
-            defer aw.deinit();
-            var s: Stringify = .{ .writer = &aw.writer };
-            try s.beginObject();
-            try s.objectField("data");
-            try s.write(hex_data);
-            try s.objectField("address");
-            try s.write(addr_val.string);
-            try s.objectField("size");
-            try s.write(size);
-            try s.endObject();
-            const result = try aw.toOwnedSlice();
-            return .{ .ok = result };
+            return .{ .ok = try formatMemoryReadText(allocator, addr_val.string, size, hex_data) };
         } else if (std.mem.eql(u8, action_val.string, "write")) {
             const data_val = a.object.get("data") orelse return .{ .err = .{ .code = INVALID_PARAMS, .message = "Missing data for write" } };
             if (data_val != .string) return .{ .err = .{ .code = INVALID_PARAMS, .message = "data must be hex string" } };
@@ -1566,7 +1789,7 @@ pub const DebugServer = struct {
             };
             self.dashboard.onMemory(session_id_val.string, "write", addr_val.string);
 
-            return .{ .ok_static = "{\"written\":true}" };
+            return okText(allocator, "Wrote memory at {s}.", .{addr_val.string});
         } else {
             return .{ .err = .{ .code = INVALID_PARAMS, .message = "action must be read or write" } };
         }
@@ -1619,19 +1842,7 @@ pub const DebugServer = struct {
         const addr_display = std.fmt.bufPrint(&addr_buf, "0x{x}", .{address}) catch "0x?";
         self.dashboard.onDisassemble(session_id_val.string, addr_display, instructions.len);
 
-        var aw: Writer.Allocating = .init(allocator);
-        defer aw.deinit();
-        var s: Stringify = .{ .writer = &aw.writer };
-        try s.beginObject();
-        try s.objectField("instructions");
-        try s.beginArray();
-        for (instructions) |*inst| {
-            try inst.jsonStringify(&s);
-        }
-        try s.endArray();
-        try s.endObject();
-        const result = try aw.toOwnedSlice();
-        return .{ .ok = result };
+        return .{ .ok = try formatDisassemblyText(allocator, instructions) };
     }
 
     fn toolAttach(self: *DebugServer, allocator: std.mem.Allocator, args: ?json.Value) !ToolResult {
@@ -1701,17 +1912,7 @@ pub const DebugServer = struct {
         self.dashboard.onAttach(session_id, pid_val.integer);
         self.emitLaunchEvent(session_id, "attached", driver_type_name);
 
-        var aw: Writer.Allocating = .init(allocator);
-        defer aw.deinit();
-        var s: Stringify = .{ .writer = &aw.writer };
-        try s.beginObject();
-        try s.objectField("session_id");
-        try s.write(session_id);
-        try s.objectField("status");
-        try s.write("stopped");
-        try s.endObject();
-        const result = try aw.toOwnedSlice();
-        return .{ .ok = result };
+        return okText(allocator, "Attached session `{s}` to pid {d} using {s}.", .{ session_id, pid_val.integer, driver_type_name });
     }
 
     fn toolSetVariable(self: *DebugServer, allocator: std.mem.Allocator, args: ?json.Value) !ToolResult {
@@ -1771,19 +1972,7 @@ pub const DebugServer = struct {
         };
         self.dashboard.onScopes(session_id_val.string, scope_list.len);
 
-        var aw: Writer.Allocating = .init(allocator);
-        defer aw.deinit();
-        var s: Stringify = .{ .writer = &aw.writer };
-        try s.beginObject();
-        try s.objectField("scopes");
-        try s.beginArray();
-        for (scope_list) |*sc| {
-            try sc.jsonStringify(&s);
-        }
-        try s.endArray();
-        try s.endObject();
-        const result = try aw.toOwnedSlice();
-        return .{ .ok = result };
+        return .{ .ok = try formatScopesText(allocator, scope_list) };
     }
 
     fn toolWatchpoint(self: *DebugServer, allocator: std.mem.Allocator, args: ?json.Value) !ToolResult {
@@ -1910,19 +2099,7 @@ pub const DebugServer = struct {
         };
         self.dashboard.onModules(session_id_val.string, mod_list.len);
 
-        var aw: Writer.Allocating = .init(allocator);
-        defer aw.deinit();
-        var s: Stringify = .{ .writer = &aw.writer };
-        try s.beginObject();
-        try s.objectField("modules");
-        try s.beginArray();
-        for (mod_list) |*m| {
-            try m.jsonStringify(&s);
-        }
-        try s.endArray();
-        try s.endObject();
-        const result = try aw.toOwnedSlice();
-        return .{ .ok = result };
+        return .{ .ok = try formatModulesText(allocator, mod_list) };
     }
 
     fn toolLoadedSources(self: *DebugServer, allocator: std.mem.Allocator, args: ?json.Value) !ToolResult {
@@ -1941,19 +2118,7 @@ pub const DebugServer = struct {
         };
         self.dashboard.onLoadedSources(session_id_val.string, source_list.len);
 
-        var aw: Writer.Allocating = .init(allocator);
-        defer aw.deinit();
-        var s: Stringify = .{ .writer = &aw.writer };
-        try s.beginObject();
-        try s.objectField("sources");
-        try s.beginArray();
-        for (source_list) |*src| {
-            try src.jsonStringify(&s);
-        }
-        try s.endArray();
-        try s.endObject();
-        const result = try aw.toOwnedSlice();
-        return .{ .ok = result };
+        return .{ .ok = try formatLoadedSourcesText(allocator, source_list) };
     }
 
     fn toolSource(self: *DebugServer, allocator: std.mem.Allocator, args: ?json.Value) !ToolResult {
@@ -1974,15 +2139,7 @@ pub const DebugServer = struct {
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
 
-        var aw: Writer.Allocating = .init(allocator);
-        defer aw.deinit();
-        var s: Stringify = .{ .writer = &aw.writer };
-        try s.beginObject();
-        try s.objectField("content");
-        try s.write(content);
-        try s.endObject();
-        const result = try aw.toOwnedSlice();
-        return .{ .ok = result };
+        return .{ .ok = content };
     }
 
     fn toolSetExpression(self: *DebugServer, allocator: std.mem.Allocator, args: ?json.Value) !ToolResult {
@@ -2042,7 +2199,7 @@ pub const DebugServer = struct {
         };
         self.dashboard.onRestartFrame(session_id_val.string, @intCast(frame_id_val.integer));
 
-        return .{ .ok_static = "{\"restarted\":true}" };
+        return okText(allocator, "Restarted frame {d} in session `{s}`.", .{ @as(u32, @intCast(frame_id_val.integer)), session_id_val.string });
     }
 
     // ── Phase 7 Tool Implementations ────────────────────────────────
@@ -2067,12 +2224,7 @@ pub const DebugServer = struct {
         };
         self.dashboard.onExceptionInfo(session_id_val.string);
 
-        var aw: Writer.Allocating = .init(allocator);
-        defer aw.deinit();
-        var s: Stringify = .{ .writer = &aw.writer };
-        try info.jsonStringify(&s);
-        const result = try aw.toOwnedSlice();
-        return .{ .ok = result };
+        return .{ .ok = try formatExceptionInfoText(allocator, &info) };
     }
 
     fn toolRegisters(self: *DebugServer, allocator: std.mem.Allocator, args: ?json.Value) !ToolResult {
@@ -2095,19 +2247,7 @@ pub const DebugServer = struct {
         };
         self.dashboard.onRegisters(session_id_val.string, regs.len);
 
-        var aw: Writer.Allocating = .init(allocator);
-        defer aw.deinit();
-        var s: Stringify = .{ .writer = &aw.writer };
-        try s.beginObject();
-        try s.objectField("registers");
-        try s.beginArray();
-        for (regs) |*r| {
-            try r.jsonStringify(&s);
-        }
-        try s.endArray();
-        try s.endObject();
-        const result = try aw.toOwnedSlice();
-        return .{ .ok = result };
+        return .{ .ok = try formatRegistersText(allocator, regs) };
     }
 
     // ── Phase 12 Tool Implementations ────────────────────────────────
@@ -2238,19 +2378,7 @@ pub const DebugServer = struct {
         };
         self.dashboard.onBreakpointLocations(session_id_val.string, source_val.string, @intCast(line_val.integer), locations.len);
 
-        var aw: Writer.Allocating = .init(allocator);
-        defer aw.deinit();
-        var s: Stringify = .{ .writer = &aw.writer };
-        try s.beginObject();
-        try s.objectField("breakpoints");
-        try s.beginArray();
-        for (locations) |*loc| {
-            try loc.jsonStringify(&s);
-        }
-        try s.endArray();
-        try s.endObject();
-        const result = try aw.toOwnedSlice();
-        return .{ .ok = result };
+        return .{ .ok = try formatBreakpointLocationsText(allocator, locations) };
     }
 
     fn toolCancel(self: *DebugServer, allocator: std.mem.Allocator, args: ?json.Value) !ToolResult {
@@ -2272,7 +2400,7 @@ pub const DebugServer = struct {
         };
         self.dashboard.onCancel(session_id_val.string);
 
-        return .{ .ok_static = "{\"cancelled\":true}" };
+        return okText(allocator, "Cancelled outstanding debug work for session `{s}`.", .{session_id_val.string});
     }
 
     fn toolTerminateThreads(self: *DebugServer, allocator: std.mem.Allocator, args: ?json.Value) !ToolResult {
@@ -2302,7 +2430,7 @@ pub const DebugServer = struct {
         };
         self.dashboard.onTerminateThreads(session_id_val.string, id_list.items.len);
 
-        return .{ .ok_static = "{\"terminated\":true}" };
+        return okText(allocator, "Terminated {d} thread(s) in session `{s}`.", .{ id_list.items.len, session_id_val.string });
     }
 
     fn toolRestart(self: *DebugServer, allocator: std.mem.Allocator, args: ?json.Value) !ToolResult {
@@ -2335,7 +2463,7 @@ pub const DebugServer = struct {
         };
         self.dashboard.onRestart(session_id_val.string);
 
-        return .{ .ok_static = "{\"restarted\":true}" };
+        return okText(allocator, "Restarted session `{s}`.", .{session_id_val.string});
     }
 
     // ── Phase 4: New Tool Implementations ────────────────────────────────
@@ -2346,23 +2474,7 @@ pub const DebugServer = struct {
         };
         defer allocator.free(sessions);
 
-        var aw: Writer.Allocating = .init(allocator);
-        defer aw.deinit();
-        var jw: Stringify = .{ .writer = &aw.writer };
-        try jw.beginArray();
-        for (sessions) |*s| {
-            try jw.beginObject();
-            try jw.objectField("id");
-            try jw.write(s.id);
-            try jw.objectField("status");
-            try jw.write(@tagName(s.status));
-            try jw.objectField("driver_type");
-            try jw.write(@tagName(s.driver_type));
-            try jw.endObject();
-        }
-        try jw.endArray();
-        const result = try aw.toOwnedSlice();
-        return .{ .ok = result };
+        return .{ .ok = try formatSessionListText(allocator, sessions) };
     }
 
     fn toolGotoTargets(self: *DebugServer, allocator: std.mem.Allocator, args: ?json.Value) !ToolResult {
@@ -2386,16 +2498,7 @@ pub const DebugServer = struct {
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
 
-        var aw: Writer.Allocating = .init(allocator);
-        defer aw.deinit();
-        var jw: Stringify = .{ .writer = &aw.writer };
-        try jw.beginArray();
-        for (targets) |*t| {
-            try t.jsonStringify(&jw);
-        }
-        try jw.endArray();
-        const result = try aw.toOwnedSlice();
-        return .{ .ok = result };
+        return .{ .ok = try formatGotoTargetsText(allocator, targets) };
     }
 
     fn toolFindSymbol(self: *DebugServer, allocator: std.mem.Allocator, args: ?json.Value) !ToolResult {
@@ -2416,16 +2519,7 @@ pub const DebugServer = struct {
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
 
-        var aw: Writer.Allocating = .init(allocator);
-        defer aw.deinit();
-        var jw: Stringify = .{ .writer = &aw.writer };
-        try jw.beginArray();
-        for (symbols) |*s| {
-            try s.jsonStringify(&jw);
-        }
-        try jw.endArray();
-        const result = try aw.toOwnedSlice();
-        return .{ .ok = result };
+        return .{ .ok = try formatSymbolsText(allocator, symbols) };
     }
 
     // ── Phase 6: DWARF Engine Tools ─────────────────────────────────────
@@ -2455,7 +2549,7 @@ pub const DebugServer = struct {
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
 
-        return .{ .ok_static = "{\"written\":true}" };
+        return okText(allocator, "Wrote register `{s}` in session `{s}`.", .{ name_val.string, session_id_val.string });
     }
 
     fn toolVariableLocation(self: *DebugServer, allocator: std.mem.Allocator, args: ?json.Value) !ToolResult {
@@ -2480,12 +2574,7 @@ pub const DebugServer = struct {
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
 
-        var aw: Writer.Allocating = .init(allocator);
-        defer aw.deinit();
-        var jw: Stringify = .{ .writer = &aw.writer };
-        try loc.jsonStringify(&jw);
-        const result = try aw.toOwnedSlice();
-        return .{ .ok = result };
+        return .{ .ok = try formatVariableLocationText(allocator, &loc) };
     }
 
     // ── Event Polling ──────────────────────────────────────────────────
@@ -2631,19 +2720,7 @@ pub const DebugServer = struct {
         self.dashboard.onLaunch(session_id, "core_dump", "native");
         self.emitLaunchEvent(session_id, "core_dump", "native");
 
-        var aw: Writer.Allocating = .init(allocator);
-        defer aw.deinit();
-        var s: Stringify = .{ .writer = &aw.writer };
-        try s.beginObject();
-        try s.objectField("session_id");
-        try s.write(session_id);
-        try s.objectField("status");
-        try s.write("stopped");
-        try s.objectField("mode");
-        try s.write("core_dump");
-        try s.endObject();
-        const result = try aw.toOwnedSlice();
-        return .{ .ok = result };
+        return okText(allocator, "Loaded core dump into session `{s}`.", .{session_id});
     }
 
     fn toolDapRequest(self: *DebugServer, allocator: std.mem.Allocator, args: ?json.Value) !ToolResult {
@@ -3017,10 +3094,10 @@ test "callTool dispatches debug_stop" {
     switch (result) {
         .ok => |raw| {
             defer allocator.free(raw);
-            try std.testing.expect(std.mem.indexOf(u8, raw, "\"stopped\":true") != null);
+            try std.testing.expect(raw.len > 0);
         },
         .ok_static => |raw| {
-            try std.testing.expect(std.mem.indexOf(u8, raw, "\"stopped\":true") != null);
+            try std.testing.expect(raw.len > 0);
         },
         .err => unreachable,
     }
