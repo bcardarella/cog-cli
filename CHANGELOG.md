@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-03-10
+
+### Added
+
+- Negative glob patterns for `cog code:index`, including support for excluding generated directories like Phoenix `priv/static` assets
+- Debug-only indexing instrumentation with per-file phase timing and resource-usage snapshots across tree-sitter and bulk external indexers
+
+### Changed
+
+- `cog code:index` help now documents `!pattern` exclusions with a Phoenix umbrella example
+
 ## [0.11.0] - 2026-03-10
 
 ### Added
@@ -384,6 +395,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.2.0]: https://github.com/trycog/cog-cli/releases/tag/v0.2.0
 [0.1.0]: https://github.com/trycog/cog-cli/releases/tag/v0.1.0
 [0.0.1]: https://github.com/trycog/cog-cli/releases/tag/v0.0.1
+[0.12.0]: https://github.com/trycog/cog-cli/releases/tag/v0.12.0
 [0.11.0]: https://github.com/trycog/cog-cli/releases/tag/v0.11.0
 [0.10.2]: https://github.com/trycog/cog-cli/releases/tag/v0.10.2
 [0.10.1]: https://github.com/trycog/cog-cli/releases/tag/v0.10.1
