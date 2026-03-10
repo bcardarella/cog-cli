@@ -262,7 +262,9 @@ fn writeJsonOpenCode(allocator: std.mem.Allocator, path: []const u8) !void {
     try s.objectField("plugin");
     try s.beginArray();
 
-    var already_has_plugin = false;
+    var already_has_override = false;
+    var already_has_memory = false;
+    var already_has_debug = false;
     if (existing) |content| {
         if (json.parseFromSlice(json.Value, allocator, content, .{})) |parsed| {
             defer parsed.deinit();
@@ -271,7 +273,13 @@ fn writeJsonOpenCode(allocator: std.mem.Allocator, path: []const u8) !void {
                     if (plugins == .array) {
                         for (plugins.array.items) |item| {
                             if (item == .string and std.mem.eql(u8, item.string, "cog-override")) {
-                                already_has_plugin = true;
+                                already_has_override = true;
+                            }
+                            if (item == .string and std.mem.eql(u8, item.string, "cog-memory")) {
+                                already_has_memory = true;
+                            }
+                            if (item == .string and std.mem.eql(u8, item.string, "cog-debug")) {
+                                already_has_debug = true;
                             }
                             try s.write(item);
                         }
@@ -281,8 +289,14 @@ fn writeJsonOpenCode(allocator: std.mem.Allocator, path: []const u8) !void {
         } else |_| {}
     }
 
-    if (!already_has_plugin) {
+    if (!already_has_override) {
         try s.write("cog-override");
+    }
+    if (!already_has_memory) {
+        try s.write("cog-memory");
+    }
+    if (!already_has_debug) {
+        try s.write("cog-debug");
     }
 
     try s.endArray();
@@ -347,6 +361,8 @@ pub fn configureOverridePlugin(agent: agents_mod.Agent) !void {
     debug_log.log("hooks.configureOverridePlugin: agent={s}", .{agent.id});
     if (std.mem.eql(u8, agent.id, "opencode")) {
         try writeOpenCodeOverridePlugin(".opencode/plugin/cog-override.ts");
+        try writeOpenCodeMemoryPlugin(".opencode/plugin/cog-memory.ts");
+        try writeOpenCodeDebugPlugin(".opencode/plugin/cog-debug.ts");
     }
 }
 
@@ -588,6 +604,10 @@ fn writeOpenCodePermissions(allocator: std.mem.Allocator, mcp_path: []const u8) 
     var existing_cog_rule: ?json.Value = null;
     var existing_glob_rule: ?json.Value = null;
     var existing_grep_rule: ?json.Value = null;
+    var existing_agents: ?json.Value = null;
+    var existing_general: ?json.Value = null;
+    var existing_general_permissions: ?json.Value = null;
+    var existing_general_cog_rule: ?json.Value = null;
 
     if (parsed.value.object.get("permission")) |perms| {
         existing_permissions = perms;
@@ -604,9 +624,29 @@ fn writeOpenCodePermissions(allocator: std.mem.Allocator, mcp_path: []const u8) 
         }
     }
 
+    if (parsed.value.object.get("agent")) |agents| {
+        existing_agents = agents;
+        if (agents == .object) {
+            if (agents.object.get("general")) |general| {
+                existing_general = general;
+                if (general == .object) {
+                    if (general.object.get("permission")) |perms| {
+                        existing_general_permissions = perms;
+                        if (perms == .object) {
+                            if (perms.object.get("cog_*")) |rule| {
+                                existing_general_cog_rule = rule;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     var iter = parsed.value.object.iterator();
     while (iter.next()) |entry| {
         if (std.mem.eql(u8, entry.key_ptr.*, "permission")) continue;
+        if (std.mem.eql(u8, entry.key_ptr.*, "agent")) continue;
         try s.objectField(entry.key_ptr.*);
         try s.write(entry.value_ptr.*);
     }
@@ -656,6 +696,102 @@ fn writeOpenCodePermissions(allocator: std.mem.Allocator, mcp_path: []const u8) 
         try s.endObject();
     }
 
+    try s.objectField("agent");
+    if (existing_agents) |agents| {
+        if (agents == .object) {
+            try s.beginObject();
+            var agents_iter = agents.object.iterator();
+            while (agents_iter.next()) |entry| {
+                if (std.mem.eql(u8, entry.key_ptr.*, "general")) continue;
+                try s.objectField(entry.key_ptr.*);
+                try s.write(entry.value_ptr.*);
+            }
+
+            try s.objectField("general");
+            if (existing_general) |general| {
+                if (general == .object) {
+                    try s.beginObject();
+                    var general_iter = general.object.iterator();
+                    while (general_iter.next()) |entry| {
+                        if (std.mem.eql(u8, entry.key_ptr.*, "permission")) continue;
+                        try s.objectField(entry.key_ptr.*);
+                        try s.write(entry.value_ptr.*);
+                    }
+
+                    try s.objectField("permission");
+                    if (existing_general_permissions) |perms| {
+                        if (perms == .object) {
+                            try s.beginObject();
+                            var general_perms_iter = perms.object.iterator();
+                            while (general_perms_iter.next()) |entry| {
+                                try s.objectField(entry.key_ptr.*);
+                                try s.write(entry.value_ptr.*);
+                            }
+                            if (existing_general_cog_rule == null) {
+                                try s.objectField("cog_*");
+                                try s.write("allow");
+                            }
+                            try s.endObject();
+                        } else {
+                            try s.beginObject();
+                            try s.objectField("*");
+                            try s.write(perms);
+                            try s.objectField("cog_*");
+                            try s.write("allow");
+                            try s.endObject();
+                        }
+                    } else {
+                        try s.beginObject();
+                        try s.objectField("cog_*");
+                        try s.write("allow");
+                        try s.endObject();
+                    }
+                    try s.endObject();
+                } else {
+                    try s.beginObject();
+                    try s.objectField("permission");
+                    try s.beginObject();
+                    try s.objectField("cog_*");
+                    try s.write("allow");
+                    try s.endObject();
+                    try s.endObject();
+                }
+            } else {
+                try s.beginObject();
+                try s.objectField("permission");
+                try s.beginObject();
+                try s.objectField("cog_*");
+                try s.write("allow");
+                try s.endObject();
+                try s.endObject();
+            }
+
+            try s.endObject();
+        } else {
+            try s.beginObject();
+            try s.objectField("general");
+            try s.beginObject();
+            try s.objectField("permission");
+            try s.beginObject();
+            try s.objectField("cog_*");
+            try s.write("allow");
+            try s.endObject();
+            try s.endObject();
+            try s.endObject();
+        }
+    } else {
+        try s.beginObject();
+        try s.objectField("general");
+        try s.beginObject();
+        try s.objectField("permission");
+        try s.beginObject();
+        try s.objectField("cog_*");
+        try s.write("allow");
+        try s.endObject();
+        try s.endObject();
+        try s.endObject();
+    }
+
     try s.endObject();
 
     const new_content = try aw.toOwnedSlice();
@@ -670,6 +806,24 @@ fn writeOpenCodeOverridePlugin(path: []const u8) !void {
     }
 
     try writeCwdFile(path, opencode_override_content);
+}
+
+fn writeOpenCodeMemoryPlugin(path: []const u8) !void {
+    debug_log.log("hooks.writeOpenCodeMemoryPlugin: path={s}", .{path});
+    if (std.fs.path.dirname(path)) |parent| {
+        try ensureDir(parent);
+    }
+
+    try writeCwdFile(path, opencode_memory_content);
+}
+
+fn writeOpenCodeDebugPlugin(path: []const u8) !void {
+    debug_log.log("hooks.writeOpenCodeDebugPlugin: path={s}", .{path});
+    if (std.fs.path.dirname(path)) |parent| {
+        try ensureDir(parent);
+    }
+
+    try writeCwdFile(path, opencode_debug_content);
 }
 
 // ── Agent File Deployment ────────────────────────────────────────────
@@ -715,6 +869,8 @@ pub fn buildMarkdownAgentContent(allocator: std.mem.Allocator, header: []const u
 }
 
 pub const opencode_override_content = build_options.opencode_override_plugin;
+pub const opencode_memory_content = build_options.opencode_memory_plugin;
+pub const opencode_debug_content = build_options.opencode_debug_plugin;
 
 fn writeMarkdownAgent(allocator: std.mem.Allocator, path: []const u8, header: []const u8, body: []const u8) !void {
     if (std.fs.path.dirname(path)) |parent| {
@@ -911,9 +1067,11 @@ test "writeJsonOpenCode merges root and rewrites mcp.cog" {
 
             const plugins = parsed.value.object.get("plugin") orelse return error.TestUnexpectedResult;
             try std.testing.expect(plugins == .array);
-            try std.testing.expectEqual(@as(usize, 2), plugins.array.items.len);
+            try std.testing.expectEqual(@as(usize, 4), plugins.array.items.len);
             try std.testing.expectEqualStrings("existing-plugin", plugins.array.items[0].string);
             try std.testing.expectEqualStrings("cog-override", plugins.array.items[1].string);
+            try std.testing.expectEqualStrings("cog-memory", plugins.array.items[2].string);
+            try std.testing.expectEqualStrings("cog-debug", plugins.array.items[3].string);
 
             const command = cog.object.get("command") orelse return error.TestUnexpectedResult;
             try std.testing.expect(command == .array);
@@ -938,8 +1096,10 @@ test "writeJsonOpenCode is idempotent for plugin registration" {
 
             const plugins = parsed.value.object.get("plugin") orelse return error.TestUnexpectedResult;
             try std.testing.expect(plugins == .array);
-            try std.testing.expectEqual(@as(usize, 1), plugins.array.items.len);
+            try std.testing.expectEqual(@as(usize, 3), plugins.array.items.len);
             try std.testing.expectEqualStrings("cog-override", plugins.array.items[0].string);
+            try std.testing.expectEqualStrings("cog-memory", plugins.array.items[1].string);
+            try std.testing.expectEqualStrings("cog-debug", plugins.array.items[2].string);
         }
     }.run);
 }
@@ -967,6 +1127,14 @@ test "writeOpenCodePermissions adds cog allow rule" {
             try std.testing.expectEqualStrings("allow", cog_rule.string);
             try std.testing.expectEqualStrings("deny", perms.object.get("glob").?.string);
             try std.testing.expectEqualStrings("deny", perms.object.get("grep").?.string);
+
+            const agents = parsed.value.object.get("agent") orelse return error.TestUnexpectedResult;
+            try std.testing.expect(agents == .object);
+            const general = agents.object.get("general") orelse return error.TestUnexpectedResult;
+            try std.testing.expect(general == .object);
+            const general_perms = general.object.get("permission") orelse return error.TestUnexpectedResult;
+            try std.testing.expect(general_perms == .object);
+            try std.testing.expectEqualStrings("allow", general_perms.object.get("cog_*").?.string);
         }
     }.run);
 }
@@ -996,6 +1164,14 @@ test "writeOpenCodePermissions preserves existing rules" {
             try std.testing.expectEqualStrings("allow", perms.object.get("cog_*").?.string);
             try std.testing.expectEqualStrings("deny", perms.object.get("glob").?.string);
             try std.testing.expectEqualStrings("deny", perms.object.get("grep").?.string);
+
+            const agents = parsed.value.object.get("agent") orelse return error.TestUnexpectedResult;
+            try std.testing.expect(agents == .object);
+            const general = agents.object.get("general") orelse return error.TestUnexpectedResult;
+            try std.testing.expect(general == .object);
+            const general_perms = general.object.get("permission") orelse return error.TestUnexpectedResult;
+            try std.testing.expect(general_perms == .object);
+            try std.testing.expectEqualStrings("allow", general_perms.object.get("cog_*").?.string);
         }
     }.run);
 }
@@ -1022,6 +1198,41 @@ test "writeOpenCodePermissions upgrades string permission" {
             try std.testing.expectEqualStrings("allow", perms.object.get("cog_*").?.string);
             try std.testing.expectEqualStrings("deny", perms.object.get("glob").?.string);
             try std.testing.expectEqualStrings("deny", perms.object.get("grep").?.string);
+
+            const agents = parsed.value.object.get("agent") orelse return error.TestUnexpectedResult;
+            try std.testing.expect(agents == .object);
+            const general = agents.object.get("general") orelse return error.TestUnexpectedResult;
+            try std.testing.expect(general == .object);
+            const general_perms = general.object.get("permission") orelse return error.TestUnexpectedResult;
+            try std.testing.expect(general_perms == .object);
+            try std.testing.expectEqualStrings("allow", general_perms.object.get("cog_*").?.string);
+        }
+    }.run);
+}
+
+test "writeOpenCodePermissions preserves general subagent rules" {
+    try withTempCwd(struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const existing =
+                \\{"agent":{"general":{"description":"keep me","permission":{"read":"ask"}}}}
+            ;
+            try writeCwdFile("opencode.json", existing);
+
+            try writeOpenCodePermissions(allocator, "opencode.json");
+
+            const content = readCwdFile(allocator, "opencode.json") orelse return error.TestUnexpectedResult;
+            defer allocator.free(content);
+
+            const parsed = try json.parseFromSlice(json.Value, allocator, content, .{});
+            defer parsed.deinit();
+
+            const agents = parsed.value.object.get("agent") orelse return error.TestUnexpectedResult;
+            const general = agents.object.get("general") orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqualStrings("keep me", general.object.get("description").?.string);
+
+            const general_perms = general.object.get("permission") orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqualStrings("ask", general_perms.object.get("read").?.string);
+            try std.testing.expectEqualStrings("allow", general_perms.object.get("cog_*").?.string);
         }
     }.run);
 }
@@ -1041,6 +1252,23 @@ test "writeOpenCodeOverridePlugin creates strict override plugin" {
             try std.testing.expect(std.mem.indexOf(u8, content, "experimental.chat.system.transform") != null);
             try std.testing.expect(std.mem.indexOf(u8, content, "repeated file-scoped architecture queries") != null);
             try std.testing.expect(std.mem.indexOf(u8, content, "cog_code_explore or cog_code_query") != null);
+        }
+    }.run);
+}
+
+test "writeOpenCodeDebugPlugin creates debug workflow plugin" {
+    try withTempCwd(struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            _ = allocator;
+            try writeOpenCodeDebugPlugin(".opencode/plugin/cog-debug.ts");
+
+            const content = readCwdFile(std.testing.allocator, ".opencode/plugin/cog-debug.ts") orelse return error.TestUnexpectedResult;
+            defer std.testing.allocator.free(content);
+
+            try std.testing.expect(std.mem.indexOf(u8, content, "cog_debug_launch") != null);
+            try std.testing.expect(std.mem.indexOf(u8, content, "QUESTION:, HYPOTHESIS:, and TEST:") != null);
+            try std.testing.expect(std.mem.indexOf(u8, content, "inspectionRequired") != null);
+            try std.testing.expect(std.mem.indexOf(u8, content, "Specialist debug tools") != null);
         }
     }.run);
 }
@@ -1259,6 +1487,42 @@ test "writeMarkdownAgent creates correct file" {
             try std.testing.expect(std.mem.indexOf(u8, content, "code index exploration agent") != null);
             // Contains workflow content
             try std.testing.expect(std.mem.indexOf(u8, content, "Batch explore") != null);
+        }
+    }.run);
+}
+
+test "writeJsonOpenCode adds cog plugins" {
+    try withTempCwd(struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const existing =
+                \\{"plugin":["existing-plugin"],"mcp":{"other":{"type":"local","command":["other"]}}}
+            ;
+            try writeCwdFile("opencode.json", existing);
+
+            try writeJsonOpenCode(allocator, "opencode.json");
+
+            const content = readCwdFile(allocator, "opencode.json") orelse return error.TestUnexpectedResult;
+            defer allocator.free(content);
+
+            const parsed = try json.parseFromSlice(json.Value, allocator, content, .{});
+            defer parsed.deinit();
+
+            const plugins = parsed.value.object.get("plugin") orelse return error.TestUnexpectedResult;
+            try std.testing.expect(plugins == .array);
+
+            var has_override = false;
+            var has_memory = false;
+            var has_existing = false;
+            for (plugins.array.items) |item| {
+                if (item != .string) continue;
+                if (std.mem.eql(u8, item.string, "cog-override")) has_override = true;
+                if (std.mem.eql(u8, item.string, "cog-memory")) has_memory = true;
+                if (std.mem.eql(u8, item.string, "existing-plugin")) has_existing = true;
+            }
+
+            try std.testing.expect(has_override);
+            try std.testing.expect(has_memory);
+            try std.testing.expect(has_existing);
         }
     }.run);
 }

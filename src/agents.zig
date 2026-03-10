@@ -420,6 +420,18 @@ pub const agents = [_]Agent{
         \\---
         \\description: Debug subagent that investigates runtime behavior via cog debugger, code, and memory tools
         \\mode: subagent
+        \\permission:
+        \\  read: allow
+        \\  glob: deny
+        \\  grep: deny
+        \\  list: deny
+        \\  bash: deny
+        \\  webfetch: deny
+        \\  task: deny
+        \\  cog_*: allow
+        \\tools:
+        \\  write: false
+        \\  edit: false
         \\---
         \\
         ,
@@ -428,6 +440,18 @@ pub const agents = [_]Agent{
         \\---
         \\description: Memory sub-agent for recall, consolidation, and maintenance
         \\mode: subagent
+        \\permission:
+        \\  read: deny
+        \\  glob: deny
+        \\  grep: deny
+        \\  list: deny
+        \\  bash: deny
+        \\  webfetch: deny
+        \\  task: deny
+        \\  cog_*: allow
+        \\tools:
+        \\  write: false
+        \\  edit: false
         \\---
         \\
         ,
@@ -506,6 +530,21 @@ test "code-query headers prefer cog-first exploration" {
     const opencode_header = agents[9].agent_file_header orelse unreachable;
     try std.testing.expect(std.mem.indexOf(u8, opencode_header, "glob: deny") != null);
     try std.testing.expect(std.mem.indexOf(u8, opencode_header, "grep: deny") != null);
+}
+
+test "opencode mem header stays memory-only" {
+    const opencode_mem_header = agents[9].mem_file_header orelse unreachable;
+    try std.testing.expect(std.mem.indexOf(u8, opencode_mem_header, "read: deny") != null);
+    try std.testing.expect(std.mem.indexOf(u8, opencode_mem_header, "task: deny") != null);
+    try std.testing.expect(std.mem.indexOf(u8, opencode_mem_header, "cog_*: allow") != null);
+}
+
+test "opencode debug header stays debugger-focused" {
+    const opencode_debug_header = agents[9].debug_file_header orelse unreachable;
+    try std.testing.expect(std.mem.indexOf(u8, opencode_debug_header, "read: allow") != null);
+    try std.testing.expect(std.mem.indexOf(u8, opencode_debug_header, "glob: deny") != null);
+    try std.testing.expect(std.mem.indexOf(u8, opencode_debug_header, "bash: deny") != null);
+    try std.testing.expect(std.mem.indexOf(u8, opencode_debug_header, "cog_*: allow") != null);
 }
 
 test "mcp strategy coverage stays explicit" {
