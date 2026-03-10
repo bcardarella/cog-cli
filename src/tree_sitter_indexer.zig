@@ -181,12 +181,6 @@ pub const Indexer = struct {
         c.ts_parser_delete(self.parser);
     }
 
-    fn resetParser(self: *Indexer) !void {
-        debug_log.log("Indexer.resetParser: recreating tree-sitter parser", .{});
-        c.ts_parser_delete(self.parser);
-        self.parser = c.ts_parser_new() orelse return error.OutOfMemory;
-    }
-
     /// Index a single file and return a document with its backing string data.
     /// The caller owns all allocated memory in the returned result.
     /// `string_data` must be freed separately from the document — it holds
@@ -199,6 +193,25 @@ pub const Indexer = struct {
         config: extensions.TreeSitterConfig,
     ) !IndexFileResult {
         debug_log.log("indexFile: {s} grammar={s}", .{ relative_path, config.grammar_name });
+
+        // Skip bundled/minified files: if the average line length exceeds
+        // 500 chars the file is almost certainly a build artifact.  Indexing
+        // these produces thousands of symbols and triggers O(n²) work in the
+        // enclosing-symbol and call-resolution phases for no useful signal.
+        if (!isDocumentGrammar(config.grammar_name)) {
+            const avg_line_len = blk: {
+                var newlines: usize = 0;
+                for (source) |ch| {
+                    if (ch == '\n') newlines += 1;
+                }
+                break :blk if (newlines > 0) source.len / newlines else source.len;
+            };
+            if (avg_line_len > 500) {
+                debug_log.log("indexFile: skipping likely bundled/minified file {s} (avg line len {d})", .{ relative_path, avg_line_len });
+                return error.ParseFailed;
+            }
+        }
+
         if (isDocumentGrammar(config.grammar_name)) {
             debug_log.log("indexFile: structured text indexing active for {s} scip={s}", .{ relative_path, config.scip_name });
         }
@@ -211,11 +224,8 @@ pub const Indexer = struct {
 
         const ts_lang = getGrammar(parser_grammar) orelse return error.UnknownGrammar;
 
-        try self.resetParser();
-
-        // Set parser language on a fresh parser instance.
-        // Recreating the parser is more defensive than reset alone and avoids
-        // stale external-scanner state surviving across files or grammars.
+        // ts_parser_set_language resets internal state; no need to
+        // destroy and recreate the parser between files.
         if (!c.ts_parser_set_language(self.parser, ts_lang)) {
             return error.LanguageVersionMismatch;
         }
@@ -302,11 +312,20 @@ pub const Indexer = struct {
 
         var raw_defs: std.ArrayListUnmanaged(RawDef) = .empty;
         defer raw_defs.deinit(allocator);
+        // Dedup set for definitions — keyed by (row << 32 | name hash)
+        var def_seen = std.AutoHashMapUnmanaged(u64, void){};
+        defer def_seen.deinit(allocator);
         var raw_imports: std.ArrayListUnmanaged(RawImport) = .empty;
         defer {
             for (raw_imports.items) |item| allocator.free(item.label);
             raw_imports.deinit(allocator);
         }
+        // Dedup sets for imports and calls — avoids O(n²) linear scans
+        var import_seen = std.StringHashMapUnmanaged(void){};
+        defer import_seen.deinit(allocator);
+        var call_seen = std.AutoHashMapUnmanaged(u64, void){};
+        defer call_seen.deinit(allocator);
+
         var raw_calls: std.ArrayListUnmanaged(RawCall) = .empty;
         defer raw_calls.deinit(allocator);
         var raw_relationships: std.ArrayListUnmanaged(RawRelationship) = .empty;
@@ -337,14 +356,11 @@ pub const Indexer = struct {
                         const raw_text = trimImportText(source[import_start..import_end]);
                         if (raw_text.len > 0) {
                             const normalized = normalizeImportLabel(allocator, relative_path, raw_text) catch continue;
-                            var seen_import = false;
-                            for (raw_imports.items) |existing| {
-                                if (std.mem.eql(u8, existing.label, normalized)) {
-                                    seen_import = true;
-                                    break;
-                                }
-                            }
-                            if (!seen_import) {
+                            const gop = import_seen.getOrPut(allocator, normalized) catch {
+                                allocator.free(normalized);
+                                continue;
+                            };
+                            if (!gop.found_existing) {
                                 try raw_imports.append(allocator, .{
                                     .label = normalized,
                                     .start_point = c.ts_node_start_point(capture.node),
@@ -361,18 +377,11 @@ pub const Indexer = struct {
                     if (call_start < source.len and call_end <= source.len and call_start < call_end) {
                         const call_text = normalizeCallText(source[call_start..call_end]);
                         if (call_text.len > 0 and !isJsKeyword(call_text)) {
-                            var seen_call = false;
                             const start_pt = c.ts_node_start_point(capture.node);
-                            for (raw_calls.items) |existing| {
-                                if (existing.start_point.row == start_pt.row and
-                                    existing.start_point.column == start_pt.column and
-                                    std.mem.eql(u8, existing.name, call_text))
-                                {
-                                    seen_call = true;
-                                    break;
-                                }
-                            }
-                            if (!seen_call) {
+                            // Composite key: row << 32 | column
+                            const call_key = @as(u64, start_pt.row) << 32 | @as(u64, start_pt.column);
+                            const gop = call_seen.getOrPut(allocator, call_key) catch continue;
+                            if (!gop.found_existing) {
                                 try raw_calls.append(allocator, .{
                                     .name = call_text,
                                     .start_point = start_pt,
@@ -415,16 +424,9 @@ pub const Indexer = struct {
             // name on the same line (e.g. export_statement + function_declaration
             // both capturing the same identifier).
             const this_row = c.ts_node_start_point(name_n).row;
-            var is_dup = false;
-            for (raw_defs.items) |existing| {
-                if (existing.start_point.row == this_row and
-                    std.mem.eql(u8, existing.name_text, name_text))
-                {
-                    is_dup = true;
-                    break;
-                }
-            }
-            if (is_dup) continue;
+            const def_key = @as(u64, this_row) << 32 | @as(u64, std.hash.Wyhash.hash(0, name_text));
+            const def_gop = def_seen.getOrPut(allocator, def_key) catch continue;
+            if (def_gop.found_existing) continue;
 
             const def_n = def_node orelse name_n;
             try raw_defs.append(allocator, .{
@@ -505,27 +507,60 @@ pub const Indexer = struct {
             allocator.free(symbols);
         }
 
+        // O(n log n) containment assignment: sort defs by start position
+        // (larger spans first for same start) then sweep with a stack.
+        const sorted_indices = try allocator.alloc(usize, raw_defs.items.len);
+        defer allocator.free(sorted_indices);
+        for (sorted_indices, 0..) |*s, idx| s.* = idx;
+
+        const DefSortCtx = struct {
+            defs: []const RawDef,
+            fn lessThan(ctx: @This(), a: usize, b: usize) bool {
+                const da = ctx.defs[a];
+                const db = ctx.defs[b];
+                if (da.def_start_point.row != db.def_start_point.row) return da.def_start_point.row < db.def_start_point.row;
+                if (da.def_start_point.column != db.def_start_point.column) return da.def_start_point.column < db.def_start_point.column;
+                // Same start: larger span (ending later) comes first
+                if (da.def_end_point.row != db.def_end_point.row) return da.def_end_point.row > db.def_end_point.row;
+                return da.def_end_point.column > db.def_end_point.column;
+            }
+        };
+        std.mem.sortUnstable(usize, sorted_indices, DefSortCtx{ .defs = raw_defs.items }, DefSortCtx.lessThan);
+
+        // Stack-based sweep to find smallest enclosing parent for each def
+        var parent_stack = try allocator.alloc(usize, raw_defs.items.len);
+        defer allocator.free(parent_stack);
+        var stack_len: usize = 0;
+        var enclosing_indices = try allocator.alloc(?usize, raw_defs.items.len);
+        defer allocator.free(enclosing_indices);
+        @memset(enclosing_indices, null);
+
+        for (sorted_indices) |si| {
+            const def = raw_defs.items[si];
+            // Pop stack entries that don't contain this def
+            while (stack_len > 0) {
+                const top = raw_defs.items[parent_stack[stack_len - 1]];
+                if (pointContains(top.def_start_point.row, top.def_start_point.column, top.def_end_point.row, top.def_end_point.column, def.def_start_point.row, def.def_start_point.column) and
+                    pointContains(top.def_start_point.row, top.def_start_point.column, top.def_end_point.row, top.def_end_point.column, def.def_end_point.row, def.def_end_point.column))
+                {
+                    break; // stack top contains this def
+                }
+                stack_len -= 1;
+            }
+            if (stack_len > 0) {
+                enclosing_indices[si] = parent_stack[stack_len - 1];
+            }
+            parent_stack[stack_len] = si;
+            stack_len += 1;
+        }
+
         for (raw_defs.items, offset_pairs, 0..) |def, off, i| {
             const symbol_id = string_data[off.sym.off..][0..off.sym.len];
             const display_name = string_data[off.name.off..][0..off.name.len];
             var enclosing_symbol: []const u8 = "";
-            var enclosing_index: ?usize = null;
 
-            var best_parent_span: u64 = std.math.maxInt(u64);
-            for (raw_defs.items, offset_pairs, 0..) |candidate, candidate_off, parent_idx| {
-                if (parent_idx == i) continue;
-                if (!pointContains(candidate.def_start_point.row, candidate.def_start_point.column, candidate.def_end_point.row, candidate.def_end_point.column, def.def_start_point.row, def.def_start_point.column)) continue;
-                if (!pointContains(candidate.def_start_point.row, candidate.def_start_point.column, candidate.def_end_point.row, candidate.def_end_point.column, def.def_end_point.row, def.def_end_point.column)) continue;
-                const row_span = @as(u64, candidate.def_end_point.row) - @as(u64, candidate.def_start_point.row);
-                const span = row_span * 10000 + @as(u64, candidate.def_end_point.column);
-                if (span < best_parent_span) {
-                    best_parent_span = span;
-                    enclosing_index = parent_idx;
-                    enclosing_symbol = string_data[candidate_off.sym.off..][0..candidate_off.sym.len];
-                }
-            }
-
-            if (enclosing_index) |parent_idx| {
+            if (enclosing_indices[i]) |parent_idx| {
+                enclosing_symbol = string_data[offset_pairs[parent_idx].sym.off..][0..offset_pairs[parent_idx].sym.len];
                 try raw_relationships.append(allocator, .{
                     .from_idx = parent_idx,
                     .to_idx = i,
@@ -596,17 +631,30 @@ pub const Indexer = struct {
             }
         }
 
+        // Build a name→index map for O(1) call target resolution
+        var def_name_map = std.StringHashMapUnmanaged(usize){};
+        defer def_name_map.deinit(allocator);
+        for (raw_defs.items, 0..) |def_item, idx| {
+            // First occurrence wins (don't overwrite)
+            def_name_map.put(allocator, def_item.name_text, idx) catch {};
+        }
+
         for (raw_calls.items, call_offsets, 0..) |item, off, i| {
+            // Find enclosing def by walking the sorted containment stack.
+            // Walk sorted_indices (already sorted by start pos) and find
+            // the smallest def that contains this call's start point.
             var enclosing_range: ?scip.Range = null;
-            var best_parent_span: u64 = std.math.maxInt(u64);
             var caller_idx: ?usize = null;
-            for (raw_defs.items, 0..) |candidate, candidate_idx| {
+            var best_parent_span: u64 = std.math.maxInt(u64);
+            for (sorted_indices) |si| {
+                const candidate = raw_defs.items[si];
+                if (candidate.def_start_point.row > item.start_point.row) break; // past this call
                 if (!pointContains(candidate.def_start_point.row, candidate.def_start_point.column, candidate.def_end_point.row, candidate.def_end_point.column, item.start_point.row, item.start_point.column)) continue;
                 const row_span = @as(u64, candidate.def_end_point.row) - @as(u64, candidate.def_start_point.row);
                 const span = row_span * 10000 + @as(u64, candidate.def_end_point.column);
                 if (span < best_parent_span) {
                     best_parent_span = span;
-                    caller_idx = candidate_idx;
+                    caller_idx = si;
                     enclosing_range = .{
                         .start_line = @intCast(candidate.def_start_point.row),
                         .start_char = @intCast(candidate.def_start_point.column),
@@ -632,21 +680,10 @@ pub const Indexer = struct {
             if (caller_idx) |from_idx| {
                 var target_idx: ?usize = null;
                 if (std.mem.indexOfScalar(u8, item.name, '.')) |dot_idx| {
-                    const suffix = item.name[dot_idx + 1 ..];
-                    for (raw_defs.items, 0..) |candidate, idx| {
-                        if (std.mem.eql(u8, candidate.name_text, suffix)) {
-                            target_idx = idx;
-                            break;
-                        }
-                    }
+                    target_idx = def_name_map.get(item.name[dot_idx + 1 ..]);
                 }
                 if (target_idx == null) {
-                    for (raw_defs.items, 0..) |candidate, idx| {
-                        if (std.mem.eql(u8, candidate.name_text, item.name)) {
-                            target_idx = idx;
-                            break;
-                        }
-                    }
+                    target_idx = def_name_map.get(item.name);
                 }
                 if (target_idx) |to_idx| {
                     try raw_relationships.append(allocator, .{
