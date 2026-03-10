@@ -1119,6 +1119,7 @@ pub fn dispatch(allocator: std.mem.Allocator, subcmd: []const u8, args: []const 
 // ── code:index ──────────────────────────────────────────────────────────
 
 fn codeIndex(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
+    const index_start_ms = std.time.milliTimestamp();
     if (hasFlag(args, "--help")) {
         printCommandHelp(help.code_index);
         return;
@@ -1217,14 +1218,14 @@ fn codeIndex(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         for (files.items) |f| allocator.free(f);
         files.deinit(allocator);
     }
-    for (patterns.items) |pattern| {
-        collectGlobFiles(allocator, pattern, &files) catch continue;
-    }
+    try collectFilesForPatterns(allocator, patterns.items, &files);
 
     if (files.items.len == 0) {
         printErr("error: no files matched\n");
         return error.Explained;
     }
+    debug_log.log("codeIndex: start patterns={d} matched_files={d}", .{ patterns.items.len, files.items.len });
+    debug_log.logResourceUsage("codeIndex:start");
 
     // TTY progress display — show header immediately so the user sees output
     const show_progress = tui.isStderrTty();
@@ -1308,13 +1309,17 @@ fn codeIndex(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
 
         switch (idx) {
             .tree_sitter => |ts_config| {
+                const file_start_ms = std.time.milliTimestamp();
                 if (show_progress) {
                     tui.progressUpdate(indexed_count, total_files, total_symbols, file_path);
                 }
 
                 // Read source file
+                debug_log.log("codeIndex: tree_sitter:file_start path={s} grammar={s}", .{ file_path, ts_config.grammar_name });
                 const source = readFileContents(allocator, file_path) orelse continue;
                 defer allocator.free(source);
+                debug_log.log("codeIndex: tree_sitter:file_read path={s} bytes={d} elapsed_ms={d}", .{ file_path, source.len, std.time.milliTimestamp() - file_start_ms });
+                debug_log.logResourceUsage("codeIndex:tree_sitter:file_read");
 
                 // Index with tree-sitter
                 if (indexer.indexFile(allocator, source, file_path, ts_config)) |result| {
@@ -1322,6 +1327,10 @@ fn codeIndex(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
                     mergeDocumentList(allocator, &doc_list, result.doc);
                     indexed_count += 1;
                     total_symbols += result.doc.symbols.len;
+                    debug_log.log(
+                        "codeIndex: tree_sitter:file_done path={s} symbols={d} occurrences={d} elapsed_ms={d}",
+                        .{ file_path, result.doc.symbols.len, result.doc.occurrences.len, std.time.milliTimestamp() - file_start_ms },
+                    );
                 } else |_| {
                     // Indexing failed (e.g. Flow-typed JS parsed as plain JS).
                     // Still add a stub document so the file appears in the index
@@ -1333,7 +1342,9 @@ fn codeIndex(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
                         .symbols = &.{},
                     });
                     indexed_count += 1;
+                    debug_log.log("codeIndex: tree_sitter:file_failed path={s} elapsed_ms={d}", .{ file_path, std.time.milliTimestamp() - file_start_ms });
                 }
+                debug_log.logResourceUsage("codeIndex:tree_sitter:file_done");
 
                 if (show_progress) {
                     tui.progressUpdate(indexed_count, total_files, total_symbols, file_path);
@@ -1376,6 +1387,7 @@ fn codeIndex(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         }
 
         debug_log.log("codeIndex: invoking bulk external indexer {s} for {d} files", .{ scip_config.command, batch_files.len });
+        debug_log.logResourceUsage("codeIndex:external:start");
         const batch_start_count = indexed_count;
         var progress_ctx = ExternalIndexerProgress{
             .indexed_count = &indexed_count,
@@ -1396,6 +1408,11 @@ fn codeIndex(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         }
         allocator.free(result.index.external_symbols);
         if (indexed_count == batch_start_count) indexed_count += batch_files.len;
+        debug_log.log(
+            "codeIndex: external_done command={s} files={d} docs={d} external_symbols={d}",
+            .{ scip_config.command, batch_files.len, result.index.documents.len, result.index.external_symbols.len },
+        );
+        debug_log.logResourceUsage("codeIndex:external:done");
 
         if (show_progress) {
             tui.progressUpdate(indexed_count, total_files, total_symbols, progress_path);
@@ -1437,6 +1454,11 @@ fn codeIndex(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         const skipped = files.items.len - indexed_count;
         tui.progressFinish(indexed_count, total_symbols, skipped, index_path);
     }
+    debug_log.log(
+        "codeIndex: done indexed={d} total_symbols={d} elapsed_ms={d}",
+        .{ indexed_count, total_symbols, std.time.milliTimestamp() - index_start_ms },
+    );
+    debug_log.logResourceUsage("codeIndex:done");
 }
 
 /// Result from loading/decoding a SCIP index.
@@ -1737,6 +1759,57 @@ pub fn collectGlobFiles(allocator: std.mem.Allocator, pattern: []const u8, out: 
 
     // Walk the prefix directory and match against the pattern
     try collectGlobFilesRecursive(allocator, prefix, pattern, out);
+}
+
+fn isNegativeGlobPattern(pattern: []const u8) bool {
+    return pattern.len > 1 and pattern[0] == '!';
+}
+
+fn normalizeGlobPattern(pattern: []const u8) []const u8 {
+    return if (isNegativeGlobPattern(pattern)) pattern[1..] else pattern;
+}
+
+fn collectFilesForPatterns(
+    allocator: std.mem.Allocator,
+    patterns: []const []const u8,
+    out: *std.ArrayListUnmanaged([]const u8),
+) !void {
+    var includes: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer {
+        for (includes.items) |f| allocator.free(f);
+        includes.deinit(allocator);
+    }
+
+    var excludes: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer {
+        for (excludes.items) |f| allocator.free(f);
+        excludes.deinit(allocator);
+    }
+
+    for (patterns) |pattern| {
+        const normalized = normalizeGlobPattern(pattern);
+        if (normalized.len == 0) continue;
+        if (isNegativeGlobPattern(pattern)) {
+            collectGlobFiles(allocator, normalized, &excludes) catch continue;
+        } else {
+            collectGlobFiles(allocator, normalized, &includes) catch continue;
+        }
+    }
+
+    var excluded = std.StringHashMapUnmanaged(void){};
+    defer excluded.deinit(allocator);
+    for (excludes.items) |path| {
+        try excluded.put(allocator, path, {});
+    }
+
+    var seen = std.StringHashMapUnmanaged(void){};
+    defer seen.deinit(allocator);
+    for (includes.items) |path| {
+        if (excluded.contains(path)) continue;
+        const gop = try seen.getOrPut(allocator, path);
+        if (gop.found_existing) continue;
+        try out.append(allocator, try allocator.dupe(u8, path));
+    }
 }
 
 /// Recursively walk a directory, building relative paths and matching against a glob pattern.
@@ -4209,6 +4282,7 @@ pub fn codeRenameInner(allocator: std.mem.Allocator, old_path: []const u8, new_p
 }
 
 pub fn codeIndexInner(allocator: std.mem.Allocator, pattern_list: ?[]const []const u8) ![]const u8 {
+    const index_start_ms = std.time.milliTimestamp();
     var patterns_buf: std.ArrayListUnmanaged([]const u8) = .empty;
     defer patterns_buf.deinit(allocator);
 
@@ -4248,11 +4322,11 @@ pub fn codeIndexInner(allocator: std.mem.Allocator, pattern_list: ?[]const []con
         for (files.items) |f| allocator.free(f);
         files.deinit(allocator);
     }
-    for (patterns_buf.items) |pattern| {
-        collectGlobFiles(allocator, pattern, &files) catch continue;
-    }
+    try collectFilesForPatterns(allocator, patterns_buf.items, &files);
 
     if (files.items.len == 0) return error.NoFilesMatched;
+    debug_log.log("codeIndexInner: start patterns={d} matched_files={d}", .{ patterns_buf.items.len, files.items.len });
+    debug_log.logResourceUsage("codeIndexInner:start");
 
     var indexed_count: usize = 0;
     var total_symbols: usize = 0;
@@ -4319,13 +4393,17 @@ pub fn codeIndexInner(allocator: std.mem.Allocator, pattern_list: ?[]const []con
 
         switch (idx_config) {
             .tree_sitter => |ts_config| {
+                const file_start_ms = std.time.milliTimestamp();
+                debug_log.log("codeIndexInner: tree_sitter:file_start path={s} grammar={s}", .{ file_path, ts_config.grammar_name });
                 const source = readFileContents(allocator, file_path) orelse continue;
                 defer allocator.free(source);
+                debug_log.log("codeIndexInner: tree_sitter:file_read path={s} bytes={d} elapsed_ms={d}", .{ file_path, source.len, std.time.milliTimestamp() - file_start_ms });
                 if (indexer.indexFile(allocator, source, file_path, ts_config)) |result| {
                     backing_buffers.append(allocator, result.string_data) catch {};
                     mergeDocumentList(allocator, &doc_list, result.doc);
                     indexed_count += 1;
                     total_symbols += result.doc.symbols.len;
+                    debug_log.log("codeIndexInner: tree_sitter:file_done path={s} symbols={d} occurrences={d} elapsed_ms={d}", .{ file_path, result.doc.symbols.len, result.doc.occurrences.len, std.time.milliTimestamp() - file_start_ms });
                 } else |_| {
                     mergeDocumentList(allocator, &doc_list, .{
                         .language = ts_config.scip_name,
@@ -4334,7 +4412,9 @@ pub fn codeIndexInner(allocator: std.mem.Allocator, pattern_list: ?[]const []con
                         .symbols = &.{},
                     });
                     indexed_count += 1;
+                    debug_log.log("codeIndexInner: tree_sitter:file_failed path={s} elapsed_ms={d}", .{ file_path, std.time.milliTimestamp() - file_start_ms });
                 }
+                debug_log.logResourceUsage("codeIndexInner:tree_sitter:file_done");
             },
             .scip_binary => {
                 var found = false;
@@ -4366,6 +4446,7 @@ pub fn codeIndexInner(allocator: std.mem.Allocator, pattern_list: ?[]const []con
         const batch_files = ext_files[ext_idx].items;
         if (batch_files.len == 0) continue;
         debug_log.log("codeIndexInner: invoking bulk external indexer {s} for {d} files", .{ scip_config.command, batch_files.len });
+        debug_log.logResourceUsage("codeIndexInner:external:start");
         const result = invokeIndexerForFileList(allocator, batch_files, scip_config, null) catch continue;
         backing_buffers.append(allocator, result.backing_data.?) catch {};
         for (result.index.documents) |doc| {
@@ -4378,6 +4459,8 @@ pub fn codeIndexInner(allocator: std.mem.Allocator, pattern_list: ?[]const []con
         }
         allocator.free(result.index.external_symbols);
         indexed_count += batch_files.len;
+        debug_log.log("codeIndexInner: external_done command={s} files={d} docs={d} external_symbols={d}", .{ scip_config.command, batch_files.len, result.index.documents.len, result.index.external_symbols.len });
+        debug_log.logResourceUsage("codeIndexInner:external:done");
     }
 
     for (0..num_unique) |ext_idx| {
@@ -4408,6 +4491,8 @@ pub fn codeIndexInner(allocator: std.mem.Allocator, pattern_list: ?[]const []con
     try st.objectField("path");
     try st.write(index_path);
     try st.endObject();
+    debug_log.log("codeIndexInner: done indexed={d} total_symbols={d} elapsed_ms={d}", .{ indexed_count, total_symbols, std.time.milliTimestamp() - index_start_ms });
+    debug_log.logResourceUsage("codeIndexInner:done");
     return aw.toOwnedSlice();
 }
 
@@ -4596,6 +4681,43 @@ test "globPrefix extracts literal directory" {
     try std.testing.expectEqualStrings("src", globPrefix("src/*.py"));
     try std.testing.expectEqualStrings(".", globPrefix("*.py"));
     try std.testing.expectEqualStrings("src", globPrefix("src/foo.ts")); // no wildcard, but prefix is src
+}
+
+test "negative glob helpers" {
+    try std.testing.expect(isNegativeGlobPattern("!apps/**/priv/static/**"));
+    try std.testing.expect(!isNegativeGlobPattern("apps/**/*.js"));
+    try std.testing.expectEqualStrings("apps/**/priv/static/**", normalizeGlobPattern("!apps/**/priv/static/**"));
+    try std.testing.expectEqualStrings("apps/**/*.js", normalizeGlobPattern("apps/**/*.js"));
+}
+
+test "collectFilesForPatterns applies excludes after includes" {
+    const allocator = std.testing.allocator;
+    var root = std.testing.tmpDir(.{});
+    defer root.cleanup();
+
+    try root.dir.makePath("apps/foo/assets/js");
+    try root.dir.makePath("apps/foo/priv/static/assets");
+
+    try root.dir.writeFile(.{ .sub_path = "apps/foo/assets/js/app.js", .data = "console.log('src');\n" });
+    try root.dir.writeFile(.{ .sub_path = "apps/foo/priv/static/assets/app.js", .data = "console.log('compiled');\n" });
+
+    const cwd = std.fs.cwd();
+    const original = try cwd.realpathAlloc(allocator, ".");
+    defer allocator.free(original);
+    const tmp_root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{root.sub_path});
+    defer allocator.free(tmp_root);
+    try std.posix.chdir(tmp_root);
+    defer std.posix.chdir(original) catch {};
+
+    var files: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer {
+        for (files.items) |f| allocator.free(f);
+        files.deinit(allocator);
+    }
+
+    try collectFilesForPatterns(allocator, &.{ "apps/**/*.js", "!apps/**/priv/static/**" }, &files);
+    try std.testing.expectEqual(@as(usize, 1), files.items.len);
+    try std.testing.expectEqualStrings("apps/foo/assets/js/app.js", files.items[0]);
 }
 
 test "pathIsTest" {

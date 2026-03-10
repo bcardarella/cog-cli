@@ -6,6 +6,16 @@ const c = std.c;
 /// Global debug log file handle. When null, all log calls are no-ops.
 var log_file: ?std.fs.File = null;
 
+pub const ResourceUsage = struct {
+    user_ms: i64,
+    system_ms: i64,
+    max_rss_kb: i64,
+    minor_faults: i64,
+    major_faults: i64,
+    vol_cs: i64,
+    invol_cs: i64,
+};
+
 /// Initialize debug logging by opening .cog/cog.log in the given cog directory.
 /// Truncates the log on each invocation and writes a diagnostic header.
 pub fn init(cog_dir: []const u8, version: []const u8, args: []const [:0]const u8) void {
@@ -81,6 +91,31 @@ pub fn log(comptime fmt: []const u8, args: anytype) void {
 /// Returns true when debug logging is active.
 pub fn enabled() bool {
     return log_file != null;
+}
+
+pub fn resourceUsage() ?ResourceUsage {
+    if (@TypeOf(std.c.rusage) == void) return null;
+
+    var usage: std.c.rusage = undefined;
+    if (std.c.getrusage(std.c.rusage.SELF, &usage) != 0) return null;
+
+    return .{
+        .user_ms = @as(i64, @intCast(usage.utime.sec)) * 1000 + @divTrunc(@as(i64, @intCast(usage.utime.usec)), 1000),
+        .system_ms = @as(i64, @intCast(usage.stime.sec)) * 1000 + @divTrunc(@as(i64, @intCast(usage.stime.usec)), 1000),
+        .max_rss_kb = @as(i64, @intCast(usage.maxrss)),
+        .minor_faults = @as(i64, @intCast(usage.minflt)),
+        .major_faults = @as(i64, @intCast(usage.majflt)),
+        .vol_cs = @as(i64, @intCast(usage.nvcsw)),
+        .invol_cs = @as(i64, @intCast(usage.nivcsw)),
+    };
+}
+
+pub fn logResourceUsage(context: []const u8) void {
+    const usage = resourceUsage() orelse return;
+    log(
+        "{s} rss_kb={d} user_ms={d} sys_ms={d} minflt={d} majflt={d} nvcsw={d} nivcsw={d}",
+        .{ context, usage.max_rss_kb, usage.user_ms, usage.system_ms, usage.minor_faults, usage.major_faults, usage.vol_cs, usage.invol_cs },
+    );
 }
 
 /// Install signal handlers for crash signals (SIGILL, SIGSEGV, SIGBUS, SIGABRT).

@@ -192,7 +192,9 @@ pub const Indexer = struct {
         relative_path: []const u8,
         config: extensions.TreeSitterConfig,
     ) !IndexFileResult {
+        const file_start_ms = std.time.milliTimestamp();
         debug_log.log("indexFile: {s} grammar={s}", .{ relative_path, config.grammar_name });
+        debug_log.logResourceUsage("indexFile:start");
 
         // Skip bundled/minified files: if the average line length exceeds
         // 500 chars the file is almost certainly a build artifact.  Indexing
@@ -231,6 +233,9 @@ pub const Indexer = struct {
         }
 
         // Parse the source
+        const parse_start_ms = std.time.milliTimestamp();
+        debug_log.log("indexFile: parse:start file={s} parser_grammar={s} bytes={d}", .{ relative_path, parser_grammar, source.len });
+        debug_log.logResourceUsage("indexFile:parse:start");
         const tree = c.ts_parser_parse_string(
             self.parser,
             null,
@@ -238,6 +243,8 @@ pub const Indexer = struct {
             @intCast(source.len),
         ) orelse return error.ParseFailed;
         defer c.ts_tree_delete(tree);
+        debug_log.log("indexFile: parse:done file={s} elapsed_ms={d}", .{ relative_path, std.time.milliTimestamp() - parse_start_ms });
+        debug_log.logResourceUsage("indexFile:parse:done");
 
         const root_node = c.ts_tree_root_node(tree);
 
@@ -246,6 +253,8 @@ pub const Indexer = struct {
         const query_src = config.query_source;
         var error_offset: u32 = 0;
         var error_type: c.TSQueryError = c.TSQueryErrorNone;
+        const query_compile_start_ms = std.time.milliTimestamp();
+        debug_log.log("indexFile: query_compile:start file={s} parser_grammar={s} query_bytes={d}", .{ relative_path, parser_grammar, query_src.len });
         const query = c.ts_query_new(
             ts_lang,
             query_src.ptr,
@@ -275,10 +284,13 @@ pub const Indexer = struct {
             return error.QueryCompilationFailed;
         };
         defer c.ts_query_delete(query);
+        debug_log.log("indexFile: query_compile:done file={s} elapsed_ms={d}", .{ relative_path, std.time.milliTimestamp() - query_compile_start_ms });
 
         // Execute query
         const cursor = c.ts_query_cursor_new().?;
         defer c.ts_query_cursor_delete(cursor);
+        const query_exec_start_ms = std.time.milliTimestamp();
+        debug_log.log("indexFile: query_exec:start file={s}", .{relative_path});
         c.ts_query_cursor_exec(cursor, query, root_node);
 
         // Phase 1: Collect raw definitions
@@ -333,7 +345,9 @@ pub const Indexer = struct {
 
         var match: c.TSQueryMatch = undefined;
 
+        var match_count: usize = 0;
         while (c.ts_query_cursor_next_match(cursor, &match)) {
+            match_count += 1;
             var name_node: ?c.TSNode = null;
             var def_node: ?c.TSNode = null;
             var def_kind: ?i32 = null;
@@ -438,6 +452,11 @@ pub const Indexer = struct {
                 .kind = kind,
             });
         }
+        debug_log.log(
+            "indexFile: query_exec:done file={s} elapsed_ms={d} matches={d} defs={d} imports={d} calls={d}",
+            .{ relative_path, std.time.milliTimestamp() - query_exec_start_ms, match_count, raw_defs.items.len, raw_imports.items.len, raw_calls.items.len },
+        );
+        debug_log.logResourceUsage("indexFile:query_exec:done");
 
         // Phase 2: Build a single backing buffer for all strings
         // Each def needs: "local N" (symbol ID) + name_text (display name)
@@ -725,7 +744,11 @@ pub const Indexer = struct {
             }
         }
 
-        debug_log.log("indexFile: defs={d} imports={d} calls={d}", .{ raw_defs.items.len, raw_imports.items.len, raw_calls.items.len });
+        debug_log.log(
+            "indexFile: done file={s} elapsed_ms={d} defs={d} imports={d} calls={d} symbols={d} occurrences={d}",
+            .{ relative_path, std.time.milliTimestamp() - file_start_ms, raw_defs.items.len, raw_imports.items.len, raw_calls.items.len, symbols.len, occurrences.len },
+        );
+        debug_log.logResourceUsage("indexFile:done");
 
         return .{
             .doc = .{
