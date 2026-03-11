@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-03-11
+
+### Added
+
+- A Code Intelligence language matrix in the README covering all built-in languages plus the repo-supported Zig, Ruby, and Elixir extensions
+
+### Changed
+
+- `cog init` now generates stronger, host-aware Cog specialist support across supported agents, including config-scoped guidance, workflow runbooks, read-only specialists, and tighter tool scoping where each host allows it
+- Roo Code modes now include native mode-group restrictions for code query, debug, and memory specialists
+- Amp specialist support now installs as proper skill directories and the supported-agent matrix reflects the stronger per-host integration model
+- Indexing progress output now reports more detailed progress and memory information during code intelligence runs
+
+### Fixed
+
+- Gemini and GitHub Copilot specialist definitions now expose the intended Cog code-intel, debug, and memory tool sets instead of relying on weaker generic wiring
+
 ## [0.13.0] - 2026-03-10
 
 ### Changed
@@ -391,6 +408,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GitHub Actions workflow for automated releases and Homebrew tap updates
 - Homebrew installation via `trycog/tap/cog`
 
+[1.1.0]: https://github.com/trycog/cog-cli/releases/tag/v1.1.0
 [0.8.2]: https://github.com/trycog/cog-cli/releases/tag/v0.8.2
 [0.8.1]: https://github.com/trycog/cog-cli/releases/tag/v0.8.1
 [0.8.0]: https://github.com/trycog/cog-cli/releases/tag/v0.8.0
