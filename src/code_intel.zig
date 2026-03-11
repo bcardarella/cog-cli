@@ -61,12 +61,32 @@ const ExternalIndexerProgress = struct {
             tui.progressUpdate(self.indexed_count.*, self.total_files, self.total_symbols.*, file_path);
         }
     }
+
+    fn phaseLabel(phase: []const u8) []const u8 {
+        if (std.mem.eql(u8, phase, "group_start")) return "zig batch start";
+        if (std.mem.eql(u8, phase, "load_requested")) return "zig loading files";
+        if (std.mem.eql(u8, phase, "post_resolves")) return "zig resolving symbols";
+        if (std.mem.eql(u8, phase, "store_to_scip")) return "zig building scip";
+        if (std.mem.eql(u8, phase, "external_symbols")) return "zig collecting externals";
+        if (std.mem.eql(u8, phase, "group_done")) return "zig batch complete";
+        return phase;
+    }
+
+    fn phaseUpdate(self: *ExternalIndexerProgress, phase: []const u8, maybe_path: ?[]const u8) void {
+        _ = maybe_path;
+        if (!self.show_progress) return;
+        tui.progressUpdate(self.indexed_count.*, self.total_files, self.total_symbols.*, phaseLabel(phase));
+    }
 };
 
 const ProgressEvent = union(enum) {
     ignore: void,
     file_done: []const u8,
     file_error: []const u8,
+    phase: struct {
+        phase: []const u8,
+        path: ?[]const u8,
+    },
 };
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -1272,6 +1292,11 @@ fn codeIndex(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     var unique_exts: [16]extensions.Extension = undefined;
     var ext_files: [16]std.ArrayListUnmanaged([]const u8) = [_]std.ArrayListUnmanaged([]const u8){.empty} ** 16;
     var num_unique: usize = 0;
+    defer {
+        for (0..num_unique) |ext_idx| {
+            ext_files[ext_idx].deinit(allocator);
+        }
+    }
 
     // Cache extension resolution by file extension to avoid re-reading
     // manifests from disk for every file (1000+ files = 1000+ JSON parses).
@@ -1395,7 +1420,10 @@ fn codeIndex(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
             .total_symbols = &total_symbols,
             .show_progress = show_progress,
         };
-        const result = invokeIndexerForFileList(allocator, batch_files, scip_config, &progress_ctx) catch continue;
+        const result = invokeIndexerForFileList(allocator, batch_files, scip_config, &progress_ctx) catch |err| {
+            debug_log.log("codeIndex: external_failed command={s} files={d} err={s}", .{ scip_config.command, batch_files.len, @errorName(err) });
+            return err;
+        };
 
         backing_buffers.append(allocator, result.backing_data.?) catch {};
         for (result.index.documents) |doc| {
@@ -1417,12 +1445,6 @@ fn codeIndex(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         if (show_progress) {
             tui.progressUpdate(indexed_count, total_files, total_symbols, progress_path);
         }
-    }
-
-    // Free external indexer file lists (extensions freed from unique_exts
-    // are also in the cache, which owns the allocations now)
-    for (0..num_unique) |ext_idx| {
-        ext_files[ext_idx].deinit(allocator);
     }
 
     // Transfer documents back to master_index for encoding/freeing
@@ -1918,7 +1940,7 @@ fn invokeIndexerWithSubstitutions(
     }
 
     const term = try child.wait();
-    if (term.Exited != 0) return error.IndexerFailed;
+    try ensureIndexerTermSucceeded(term);
 
     debug_log.log("invokeIndexerWithSubstitutions: reading {s}", .{tmp_path});
     const tmp_file = try std.fs.openFileAbsolute(tmp_path, .{});
@@ -1937,6 +1959,17 @@ fn invokeIndexerWithSubstitutions(
     }
 
     return .{ .index = index, .backing_data = tmp_data };
+}
+
+fn ensureIndexerTermSucceeded(term: std.process.Child.Term) !void {
+    switch (term) {
+        .Exited => |code| if (code != 0) return error.IndexerFailed,
+        .Signal => |sig| {
+            debug_log.log("invokeIndexerWithSubstitutions: indexer terminated by signal {d}", .{sig});
+            return error.IndexerFailed;
+        },
+        else => return error.IndexerFailed,
+    }
 }
 
 fn consumeIndexerProgress(
@@ -1975,7 +2008,7 @@ fn handleIndexerProgressLine(
     if (trimmed.len == 0) return;
 
     switch (try parseIndexerProgressEvent(allocator, trimmed)) {
-        .ignore => {},
+        .ignore => debug_log.log("extension stderr: {s}", .{trimmed}),
         .file_done => |file_path| {
             defer allocator.free(file_path);
             if (progress) |ctx| ctx.fileDone(file_path);
@@ -1983,6 +2016,13 @@ fn handleIndexerProgressLine(
         .file_error => |file_path| {
             defer allocator.free(file_path);
             if (progress) |ctx| ctx.fileDone(file_path);
+        },
+        .phase => |phase| {
+            defer allocator.free(phase.phase);
+            if (phase.path) |path| {
+                defer allocator.free(path);
+            }
+            if (progress) |ctx| ctx.phaseUpdate(phase.phase, phase.path);
         },
     }
 }
@@ -2009,6 +2049,19 @@ fn parseIndexerProgressEvent(allocator: std.mem.Allocator, line: []const u8) !Pr
             return .{ .file_done = path_copy };
         }
         return .{ .file_error = path_copy };
+    }
+
+    if (std.mem.eql(u8, event_val.string, "phase")) {
+        const phase_val = obj.get("phase") orelse return .ignore;
+        if (phase_val != .string) return .ignore;
+        const phase_copy = try allocator.dupe(u8, phase_val.string);
+        errdefer allocator.free(phase_copy);
+        var path_copy: ?[]const u8 = null;
+        if (obj.get("path")) |path_val| {
+            if (path_val != .string) return .ignore;
+            path_copy = try allocator.dupe(u8, path_val.string);
+        }
+        return .{ .phase = .{ .phase = phase_copy, .path = path_copy } };
     }
 
     return .ignore;
@@ -5489,6 +5542,21 @@ test "parseIndexerProgressEvent ignores non-json" {
     try std.testing.expect(event == .ignore);
 }
 
+test "parseIndexerProgressEvent parses phase event" {
+    const allocator = std.testing.allocator;
+    const line = "{\"type\":\"progress\",\"event\":\"phase\",\"phase\":\"analyze\",\"done\":1,\"total\":4,\"path\":\"src/main.zig\"}";
+    const event = try parseIndexerProgressEvent(allocator, line);
+    switch (event) {
+        .phase => |phase| {
+            defer allocator.free(phase.phase);
+            defer allocator.free(phase.path.?);
+            try std.testing.expectEqualStrings("analyze", phase.phase);
+            try std.testing.expectEqualStrings("src/main.zig", phase.path.?);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "mergeExternalSymbolList replaces duplicates by symbol" {
     const allocator = std.testing.allocator;
 
@@ -5931,4 +5999,10 @@ test "auto-retry: glob retry finds partial match" {
 
     // Verify the found symbol is initBrain
     try std.testing.expect(std.mem.eql(u8, glob_match.items[0].def.display_name, "initBrain"));
+}
+
+test "ensureIndexerTermSucceeded accepts zero exit and rejects signal" {
+    try ensureIndexerTermSucceeded(.{ .Exited = 0 });
+    try std.testing.expectError(error.IndexerFailed, ensureIndexerTermSucceeded(.{ .Exited = 1 }));
+    try std.testing.expectError(error.IndexerFailed, ensureIndexerTermSucceeded(.{ .Signal = 9 }));
 }

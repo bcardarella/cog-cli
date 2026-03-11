@@ -231,14 +231,31 @@ fn formatNumber(buf: []u8, n: usize) []const u8 {
 
 /// Truncate a file path to fit within max_len chars.
 /// If too long, returns "..." + last (max_len - 3) chars.
+fn sanitizePathBytes(buf: []u8, path: []const u8) []const u8 {
+    const len = @min(buf.len, path.len);
+    for (path[0..len], 0..) |byte, i| {
+        buf[i] = switch (byte) {
+            32...126 => byte,
+            else => '?',
+        };
+    }
+    return buf[0..len];
+}
+
 fn truncatePath(buf: []u8, path: []const u8, max_len: usize) []const u8 {
-    if (path.len <= max_len) return path;
+    if (path.len <= max_len) return sanitizePathBytes(buf, path);
     const suffix_len = max_len - 3;
     buf[0] = '.';
     buf[1] = '.';
     buf[2] = '.';
-    @memcpy(buf[3..][0..suffix_len], path[path.len - suffix_len ..]);
+    _ = sanitizePathBytes(buf[3..][0..suffix_len], path[path.len - suffix_len ..]);
     return buf[0..max_len];
+}
+
+test "truncatePath sanitizes non-printable bytes" {
+    var buf: [32]u8 = undefined;
+    const rendered = truncatePath(&buf, "src/\xffdebug/\x00file.zig", 32);
+    try std.testing.expectEqualStrings("src/?debug/?file.zig", rendered);
 }
 
 // Box-drawing characters for progress bar

@@ -39,13 +39,13 @@ function getState(sessionID) {
   if (!state) {
     state = {
       didRecall: false,
+      usedMemory: false,
       recallCount: 0,
       needsConsolidation: false,
       consolidationCount: 0,
       learnedCount: 0,
       awaitingUserAnswer: false,
       pendingUserFact: false,
-      helpfulReportRequired: false,
       preRecallExplorationCount: 0,
     }
     sessionState.set(sessionID, state)
@@ -79,12 +79,13 @@ function looksLikeConsolidationTask(args) {
 
 function markRecall(state) {
   state.didRecall = true
+  state.usedMemory = true
   state.recallCount += 1
 }
 
 function markDirty(state) {
   state.needsConsolidation = true
-  state.helpfulReportRequired = true
+  state.usedMemory = true
 }
 
 export default async () => ({
@@ -111,7 +112,7 @@ export default async () => ({
 
     const state = getState(input.sessionID)
     output.system.push(
-      "Cog memory workflow: recall before broad unfamiliar exploration or deep reasoning, store newly learned facts as short-term memories, validate short-term memories before finishing, and briefly report whether memory helped.",
+      "Cog memory workflow: recall before broad unfamiliar exploration or deep reasoning, store newly learned facts as short-term memories, validate short-term memories before finishing, and mention memory in the response only when cog_mem tools were actually used.",
     )
 
     if (!state.didRecall) {
@@ -136,9 +137,9 @@ export default async () => ({
       )
     }
 
-    if (state.helpfulReportRequired) {
+    if (state.usedMemory) {
       output.system.push(
-        "At the end of the task, briefly state whether Cog memory was helpful.",
+        "At the end of the task, briefly state whether Cog memory was helpful. If no cog_mem tools were used, omit any memory note.",
       )
     }
   },
@@ -147,7 +148,6 @@ export default async () => ({
     if (state.awaitingUserAnswer) {
       state.awaitingUserAnswer = false
       state.pendingUserFact = true
-      state.helpfulReportRequired = true
     }
   },
   "tool.execute.before": async (input, output) => {
@@ -196,7 +196,7 @@ export default async () => ({
     if (memoryConsolidationTools.has(input.tool)) {
       state.needsConsolidation = false
       state.consolidationCount += 1
-      state.helpfulReportRequired = true
+      state.usedMemory = true
       return
     }
 
@@ -207,7 +207,6 @@ export default async () => ({
 
     if (!state.didRecall && orientationTools.has(input.tool)) {
       state.preRecallExplorationCount += 1
-      state.helpfulReportRequired = true
       return
     }
 
@@ -221,7 +220,7 @@ export default async () => ({
       if (looksLikeRecallTask(args)) {
         state.pendingUserFact = false
       }
-      state.helpfulReportRequired = true
+      state.usedMemory = true
     }
   },
 })
