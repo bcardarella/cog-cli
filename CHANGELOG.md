@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- The extension installer is now namespaced under `cog ext:install` instead of the old top-level `cog install` command
+- `cog ext:install` now installs from GitHub release tarballs, using the latest stable release by default or an exact `--version` match when requested
+- `cog ext:update` now upgrades either all installed extensions or a named installed extension to the latest stable GitHub release available for each extension source
+
 ## [0.15.0] - 2026-03-11
 
 ### Added

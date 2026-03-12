@@ -17,6 +17,11 @@ const bold = "\x1B[1m";
 const dim = "\x1B[2m";
 const reset = "\x1B[0m";
 
+const ExtInstallOptions = struct {
+    git_url: []const u8,
+    version: ?[]const u8 = null,
+};
+
 pub fn main() void {
     mainInner() catch {
         std.process.exit(1);
@@ -100,16 +105,56 @@ fn mainInner() !void {
         return;
     }
 
-    // Handle install command (doesn't need config)
+    // Handle group help: cog ext
+    if (std.mem.eql(u8, subcmd, "ext")) {
+        printExtHelp();
+        return;
+    }
+
+    // Handle ext:* commands (don't need config)
+    if (std.mem.startsWith(u8, subcmd, "ext:")) {
+        debug_log.log("dispatch extension command: {s}", .{subcmd});
+        if (std.mem.eql(u8, subcmd, "ext:install")) {
+            if (cmd_args.len == 0 or std.mem.eql(u8, cmd_args[0], "--help") or std.mem.eql(u8, cmd_args[0], "-h")) {
+                tui.header();
+                printErr(help.ext_install);
+                if (cmd_args.len == 0) return error.Explained;
+                return;
+            }
+            const install_options = try parseExtInstallOptions(cmd_args);
+            try extensions_mod.installExtension(allocator, install_options.git_url, install_options.version);
+            return;
+        }
+        if (std.mem.eql(u8, subcmd, "ext:update")) {
+            if (cmd_args.len > 0 and (std.mem.eql(u8, cmd_args[0], "--help") or std.mem.eql(u8, cmd_args[0], "-h"))) {
+                tui.header();
+                printErr(help.ext_update);
+                return;
+            }
+            if (cmd_args.len > 1) {
+                printErr("error: cog ext:update accepts at most one extension name\n");
+                return error.Explained;
+            }
+            const ext_name = if (cmd_args.len == 1) cmd_args[0] else null;
+            try extensions_mod.updateExtensions(allocator, ext_name);
+            return;
+        }
+        printErr("error: unknown command '");
+        printErr(subcmd);
+        printErr("'\nRun " ++ dim ++ "cog ext" ++ reset ++ " to see available extension commands.\n");
+        return error.Explained;
+    }
+
+    // Handle install command (legacy alias)
     if (std.mem.eql(u8, subcmd, "install")) {
         if (cmd_args.len == 0 or std.mem.eql(u8, cmd_args[0], "--help") or std.mem.eql(u8, cmd_args[0], "-h")) {
             tui.header();
-            printErr(help.install);
+            printErr(help.ext_install);
             if (cmd_args.len == 0) return error.Explained;
             return;
         }
-        try extensions_mod.installExtension(allocator, cmd_args[0]);
-        return;
+        printErr("error: 'cog install' has moved to 'cog ext:install'\n");
+        return error.Explained;
     }
 
     // Handle mcp command (doesn't need config)
@@ -166,7 +211,7 @@ fn mainInner() !void {
 }
 
 fn printHelp(allocator: std.mem.Allocator) void {
-    const static_help = bold ++ "  Usage: " ++ reset ++ "cog <command> [options]\n" ++ "\n" ++ cyan ++ bold ++ "  Setup" ++ reset ++ "\n" ++ "    " ++ bold ++ "init" ++ reset ++ "                  " ++ dim ++ "Interactive setup for the current directory" ++ reset ++ "\n" ++ "\n" ++ cyan ++ bold ++ "  Commands" ++ reset ++ "\n" ++ "    " ++ bold ++ "code" ++ reset ++ "                  " ++ dim ++ "Code indexing (CLI compatibility)" ++ reset ++ "\n" ++ "    " ++ bold ++ "mcp" ++ reset ++ "                   " ++ dim ++ "MCP server over stdio (primary interface)" ++ reset ++ "\n" ++ "    " ++ bold ++ "debug" ++ reset ++ "                 " ++ dim ++ "Debug daemon utilities" ++ reset ++ "\n" ++ "    " ++ bold ++ "mem" ++ reset ++ "                   " ++ dim ++ "Memory utilities" ++ reset ++ "\n" ++ "    " ++ bold ++ "install" ++ reset ++ "               " ++ dim ++ "Install a language extension from a git URL" ++ reset ++ "\n" ++ "\n" ++ cyan ++ bold ++ "  Built-in" ++ reset ++ "\n" ++ comptime code_intel.builtinExtensionList() ++ "\n";
+    const static_help = bold ++ "  Usage: " ++ reset ++ "cog <command> [options]\n" ++ "\n" ++ cyan ++ bold ++ "  Setup" ++ reset ++ "\n" ++ "    " ++ bold ++ "init" ++ reset ++ "                  " ++ dim ++ "Interactive setup for the current directory" ++ reset ++ "\n" ++ "\n" ++ cyan ++ bold ++ "  Commands" ++ reset ++ "\n" ++ "    " ++ bold ++ "code" ++ reset ++ "                  " ++ dim ++ "Code indexing (CLI compatibility)" ++ reset ++ "\n" ++ "    " ++ bold ++ "mcp" ++ reset ++ "                   " ++ dim ++ "MCP server over stdio (primary interface)" ++ reset ++ "\n" ++ "    " ++ bold ++ "debug" ++ reset ++ "                 " ++ dim ++ "Debug daemon utilities" ++ reset ++ "\n" ++ "    " ++ bold ++ "mem" ++ reset ++ "                   " ++ dim ++ "Memory utilities" ++ reset ++ "\n" ++ "    " ++ bold ++ "ext" ++ reset ++ "                   " ++ dim ++ "Extension utilities" ++ reset ++ "\n" ++ "\n" ++ cyan ++ bold ++ "  Built-in" ++ reset ++ "\n" ++ comptime code_intel.builtinExtensionList() ++ "\n";
 
     const footer = dim ++ "  Run 'cog <command> --help' for details on a specific command." ++ reset ++ "\n\n";
 
@@ -195,6 +240,57 @@ fn printHelp(allocator: std.mem.Allocator) void {
 fn printCodeHelp() void {
     tui.header();
     printErr(bold ++ "  cog code" ++ reset ++ " — Code indexing\n" ++ "\n" ++ cyan ++ bold ++ "  Commands" ++ reset ++ "\n" ++ "    " ++ bold ++ "code:index" ++ reset ++ "            " ++ dim ++ "Build SCIP code index (per-file incremental)" ++ reset ++ "\n" ++ "\n");
+}
+
+fn parseExtInstallOptions(args: []const [:0]const u8) !ExtInstallOptions {
+    var git_url: ?[]const u8 = null;
+    var requested_version: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.startsWith(u8, arg, "--version=")) {
+            const value = arg["--version=".len..];
+            if (value.len == 0) {
+                printErr("error: --version requires a value\n");
+                return error.Explained;
+            }
+            requested_version = value;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--version")) {
+            if (i + 1 >= args.len) {
+                printErr("error: --version requires a value\n");
+                return error.Explained;
+            }
+            i += 1;
+            requested_version = args[i];
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "-")) {
+            printErr("error: unknown option '");
+            printErr(arg);
+            printErr("'\n");
+            return error.Explained;
+        }
+        if (git_url != null) {
+            printErr("error: expected exactly one extension repository URL\n");
+            return error.Explained;
+        }
+        git_url = arg;
+    }
+
+    if (git_url == null) {
+        printErr("error: missing extension repository URL\n");
+        return error.Explained;
+    }
+
+    return .{ .git_url = git_url.?, .version = requested_version };
+}
+
+fn printExtHelp() void {
+    tui.header();
+    printErr(bold ++ "  cog ext" ++ reset ++ " -- Extension utilities\n" ++ "\n" ++ cyan ++ bold ++ "  Commands" ++ reset ++ "\n" ++ "    " ++ bold ++ "ext:install" ++ reset ++ "           " ++ dim ++ "Install a language extension from GitHub releases" ++ reset ++ "\n" ++ "    " ++ bold ++ "ext:update" ++ reset ++ "            " ++ dim ++ "Update installed extensions to latest releases" ++ reset ++ "\n" ++ "\n");
 }
 
 fn printDebugHelp(allocator: std.mem.Allocator) void {
@@ -240,4 +336,24 @@ fn printErr(msg: []const u8) void {
     var w = std.fs.File.stderr().writer(&buf);
     w.interface.writeAll(msg) catch {};
     w.interface.flush() catch {};
+}
+
+test "parseExtInstallOptions parses url and version flag" {
+    const parsed = try parseExtInstallOptions(&.{
+        "https://github.com/trycog/cog-zig",
+        "--version=0.75.0",
+    });
+    try std.testing.expectEqualStrings("https://github.com/trycog/cog-zig", parsed.git_url);
+    try std.testing.expect(parsed.version != null);
+    try std.testing.expectEqualStrings("0.75.0", parsed.version.?);
+}
+
+test "parseExtInstallOptions supports split version flag" {
+    const parsed = try parseExtInstallOptions(&.{
+        "https://github.com/trycog/cog-zig",
+        "--version",
+        "0.75.0",
+    });
+    try std.testing.expect(parsed.version != null);
+    try std.testing.expectEqualStrings("0.75.0", parsed.version.?);
 }

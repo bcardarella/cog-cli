@@ -21,7 +21,7 @@ case "$tool_name" in
     ;;
   Bash)
     if printf '%s' "$payload" | grep -Eq '"command"[[:space:]]*:[[:space:]]*"[^"]*(rg|grep|find)[^"]*"'; then
-      deny "Use Cog code intelligence tools before raw shell search commands when the Cog MCP server is configured."
+      deny "Use Cog code intelligence tools before shell search commands like grep, rg, find, or git grep when the Cog MCP server is configured."
     fi
     ;;
 esac

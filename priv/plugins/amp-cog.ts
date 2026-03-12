@@ -34,6 +34,8 @@ function eventText(event: unknown): string {
   }
 }
 
+const shellSearchPattern = /(^|\W)(git\s+grep|rg|grep|find)(\W|$)/i
+
 export default function registerCogPlugin(amp: PluginAPI) {
   amp.on('tool.call', (event) => {
     if (!hasCogWorkspaceConfig()) return
@@ -45,8 +47,8 @@ export default function registerCogPlugin(amp: PluginAPI) {
 
     if (toolName === 'run_shell_command' || toolName === 'Bash') {
       const text = eventText(event)
-      if (/(^|\W)(rg|grep|find)(\W|$)/.test(text)) {
-        throw new Error('Cog policy: use Cog code intelligence tools before raw shell search commands when the Cog MCP server is configured.')
+      if (shellSearchPattern.test(text)) {
+        throw new Error('Cog policy: use Cog code intelligence tools before shell search commands like grep, rg, find, or git grep when the Cog MCP server is configured.')
       }
     }
   })

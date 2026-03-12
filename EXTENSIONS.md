@@ -201,10 +201,13 @@ Common patterns:
 Users install extensions with:
 
 ```sh
-cog install https://github.com/you/cog-zig.git
+cog ext:install https://github.com/you/cog-zig.git
+cog ext:install https://github.com/you/cog-zig --version=0.75.0
+cog ext:update
+cog ext:update cog-zig
 ```
 
-This clones the repo to `~/.config/cog/extensions/cog-zig/`, runs the build command, and verifies the binary exists. Once installed, the extension is automatically used for matching file types.
+Cog installs from GitHub release tarballs, not the repository default branch. By default it resolves the latest stable release tag, downloads that source tarball to `~/.config/cog/extensions/cog-zig/`, runs the build command, and verifies the binary exists. `--version` selects an exact released version after optional `v` prefix normalization (`0.75.0` matches `v0.75.0`). `cog ext:update` upgrades either all installed extensions or one named extension to the latest stable release available from their recorded source repositories. Once installed, the extension is automatically used for matching file types.
 
 Installed extensions take priority over built-in ones. If your extension handles `.py` files, it overrides the built-in `scip-python`.
 

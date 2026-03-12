@@ -1219,6 +1219,7 @@ fn buildCodexSpecialistInstructions(allocator: std.mem.Allocator, kind: CodexSpe
         \\Host guidance:
         \\- Treat this specialist as read-only.
         \\- Use Cog code intelligence before any raw file search.
+        \\- Do not use shell search commands like grep, rg, find, or git grep from this specialist.
         \\- Do not edit files or run commands from this specialist.
         \\
         ,
@@ -1248,6 +1249,7 @@ fn buildWorkflowSpecialistInstructions(allocator: std.mem.Allocator, agent_name:
             \\- This host uses workflow files rather than hard-scoped subagents.
             \\- Treat this workflow as a read-oriented research specialist inside {s}.
             \\- Start with Cog code intelligence and only fall back to raw file search if the Cog index is unavailable.
+            \\- Do not use shell search commands like grep, rg, find, or git grep when Cog code intelligence can answer the question.
             \\- Return concrete paths, symbols, and next actions for the main agent.
             \\
             \\{s}
@@ -1278,6 +1280,7 @@ fn buildPromptOnlySpecialistInstructions(allocator: std.mem.Allocator, agent_nam
             \\Host guidance:
             \\- {s} cannot hard-deny tools per specialist, so treat this as a read-oriented code research role.
             \\- Use Cog code intelligence before any raw file search.
+            \\- Do not use shell search commands like grep, rg, find, or git grep from this specialist.
             \\- Do not edit files or run shell commands from this specialist.
             \\
             \\{s}
@@ -1308,6 +1311,7 @@ fn buildConfigScopedSpecialistInstructions(allocator: std.mem.Allocator, agent_n
             \\- {s} provides config-level tool scoping for this specialist.
             \\- Stay inside the allowed read and Cog code-intel tools.
             \\- Use Cog code intelligence before any raw file search.
+            \\- Do not use shell search commands like grep, rg, find, or git grep for code exploration.
             \\
             \\{s}
         , .{ agent_name, body }),

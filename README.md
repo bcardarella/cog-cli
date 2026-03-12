@@ -352,10 +352,13 @@ On macOS, `cog init` handles the code-signing for you.
 You can add code intelligence and debugging support for any language through extensions.
 
 ```sh
-cog install https://github.com/trycog/cog-zig.git
+cog ext:install https://github.com/trycog/cog-zig.git
+cog ext:install https://github.com/trycog/cog-zig --version=0.75.0
+cog ext:update
+cog ext:update cog-zig
 ```
 
-Extensions install to `~/.config/cog/extensions/` and override built-in indexers for shared file types.
+Extensions install from GitHub release tarballs into `~/.config/cog/extensions/` and override built-in indexers for shared file types. By default, Cog installs the latest stable release tag; `--version` selects an exact released version; `cog ext:update` upgrades either all installed extensions or one named extension to the latest stable release available.
 
 ### Available extensions
 

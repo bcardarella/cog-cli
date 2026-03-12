@@ -7,14 +7,14 @@ Code intelligence, persistent memory, and interactive debugging.
 ## Code Intelligence
 
 For any request to explore, analyze, understand, map, or explain code, use `cog_code_explore` or `cog_code_query`.
-Do NOT use Grep or Glob for code exploration when the Cog index is available.
+Do NOT use Grep, Glob, or shell search commands like `grep`, `rg`, `find`, or `git grep` for code exploration when the Cog index is available.
 
 - `cog_code_explore` — find symbols by name, return full definition bodies, file TOC, and optional architecture summaries
 - `cog_code_query` — `find` (locate definitions), `refs` (find references), `symbols` (list file symbols), `imports` (module/file dependencies), `contains` (parent-child containment), `calls`/`callers` (approximate call graph), `overview` (symbol/file/repo architecture summary)
 - Include synonyms with `|`: `banner|header|splash`
 - Wildcard symbol patterns: `*init*`, `get*`, `Handle?`
 
-Only fall back to Grep or Glob when the Cog index is unavailable, incomplete for the target code, or the task is about raw string literals, log messages, or other non-symbol text patterns.
+Only fall back to Grep, Glob, or shell search commands when the Cog index is unavailable, incomplete for the target code, or the task is about raw string literals, log messages, or other non-symbol text patterns.
 
 ### Efficiency Rules
 

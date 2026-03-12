@@ -1,4 +1,5 @@
 const std = @import("std");
+const curl = @import("curl.zig");
 const paths = @import("paths.zig");
 const debug_log = @import("debug_log.zig");
 
@@ -1024,6 +1025,468 @@ fn freeDebuggerAllocs(allocator: std.mem.Allocator, debugger: ?AllocatedDebugger
     if (dbg.boundary_markers.len > 0) allocator.free(dbg.boundary_markers);
 }
 
+const GitHubRepo = struct {
+    owner: []const u8,
+    repo: []const u8,
+};
+
+const StableVersion = struct {
+    major: u64,
+    minor: u64,
+    patch: u64,
+};
+
+const ReleaseInfo = struct {
+    tag_name: []const u8,
+    tarball_url: []const u8,
+    draft: bool,
+    prerelease: bool,
+};
+
+const install_metadata_filename = "cog-extension-install.json";
+
+const InstallMetadata = struct {
+    source_url: []u8,
+    version: []u8,
+    tag: []u8,
+};
+
+const ResolvedRelease = struct {
+    tag_name: []u8,
+    version: []u8,
+    tarball_url: []u8,
+};
+
+const InstallResult = struct {
+    name: []u8,
+    path: []u8,
+    version: []u8,
+    tag: []u8,
+};
+
+fn normalizeVersionString(tag_name: []const u8) []const u8 {
+    if (tag_name.len > 1 and (tag_name[0] == 'v' or tag_name[0] == 'V')) {
+        return tag_name[1..];
+    }
+    return tag_name;
+}
+
+fn parseStableVersion(text: []const u8) ?StableVersion {
+    var parts = std.mem.splitScalar(u8, text, '.');
+    const major_text = parts.next() orelse return null;
+    const minor_text = parts.next() orelse return null;
+    const patch_text = parts.next() orelse return null;
+    if (parts.next() != null) return null;
+    return .{
+        .major = std.fmt.parseUnsigned(u64, major_text, 10) catch return null,
+        .minor = std.fmt.parseUnsigned(u64, minor_text, 10) catch return null,
+        .patch = std.fmt.parseUnsigned(u64, patch_text, 10) catch return null,
+    };
+}
+
+fn compareStableVersion(a: StableVersion, b: StableVersion) std.math.Order {
+    if (a.major < b.major) return .lt;
+    if (a.major > b.major) return .gt;
+    if (a.minor < b.minor) return .lt;
+    if (a.minor > b.minor) return .gt;
+    if (a.patch < b.patch) return .lt;
+    if (a.patch > b.patch) return .gt;
+    return .eq;
+}
+
+fn parseGitHubRepo(url: []const u8) ?GitHubRepo {
+    const prefix_https = "https://github.com/";
+    const prefix_http = "http://github.com/";
+    const prefix_ssh = "ssh://git@github.com/";
+    const prefix_scp = "git@github.com:";
+
+    const rest = if (std.mem.startsWith(u8, url, prefix_https))
+        url[prefix_https.len..]
+    else if (std.mem.startsWith(u8, url, prefix_http))
+        url[prefix_http.len..]
+    else if (std.mem.startsWith(u8, url, prefix_ssh))
+        url[prefix_ssh.len..]
+    else if (std.mem.startsWith(u8, url, prefix_scp))
+        url[prefix_scp.len..]
+    else
+        return null;
+
+    const trimmed_slash = std.mem.trimRight(u8, rest, "/");
+    const trimmed = if (std.mem.endsWith(u8, trimmed_slash, ".git"))
+        trimmed_slash[0 .. trimmed_slash.len - 4]
+    else
+        trimmed_slash;
+
+    const first_slash = std.mem.indexOfScalar(u8, trimmed, '/') orelse return null;
+    const owner = trimmed[0..first_slash];
+    const repo_and_more = trimmed[first_slash + 1 ..];
+    if (owner.len == 0 or repo_and_more.len == 0) return null;
+
+    if (std.mem.indexOfScalar(u8, repo_and_more, '/')) |extra_slash| {
+        if (extra_slash == 0 or extra_slash + 1 < repo_and_more.len) return null;
+    }
+    const repo = if (std.mem.indexOfScalar(u8, repo_and_more, '/')) |extra_slash|
+        repo_and_more[0..extra_slash]
+    else
+        repo_and_more;
+    if (repo.len == 0) return null;
+
+    return .{ .owner = owner, .repo = repo };
+}
+
+fn chooseRelease(releases: []const ReleaseInfo, requested_version: ?[]const u8) ?ReleaseInfo {
+    if (requested_version) |version_text| {
+        const normalized_request = normalizeVersionString(version_text);
+        for (releases) |release| {
+            if (release.draft) continue;
+            if (std.mem.eql(u8, normalizeVersionString(release.tag_name), normalized_request)) {
+                return release;
+            }
+        }
+        return null;
+    }
+
+    var best: ?ReleaseInfo = null;
+    var best_version: ?StableVersion = null;
+    for (releases) |release| {
+        if (release.draft or release.prerelease) continue;
+        const stable = parseStableVersion(normalizeVersionString(release.tag_name)) orelse continue;
+        if (best_version == null or compareStableVersion(stable, best_version.?) == .gt) {
+            best = release;
+            best_version = stable;
+        }
+    }
+    return best;
+}
+
+fn resolveGithubRelease(allocator: std.mem.Allocator, git_url: []const u8, requested_version: ?[]const u8) !ResolvedRelease {
+    const repo = parseGitHubRepo(git_url) orelse {
+        printErr("error: extension release installs currently require a GitHub repository URL\n");
+        return error.Explained;
+    };
+
+    const releases_url = try std.fmt.allocPrint(allocator, "https://api.github.com/repos/{s}/{s}/releases?per_page=100", .{ repo.owner, repo.repo });
+    defer allocator.free(releases_url);
+
+    debug_log.log("resolveGithubRelease: fetch releases {s}", .{releases_url});
+    const response = curl.get(allocator, releases_url, &.{
+        "Accept: application/vnd.github+json",
+        "User-Agent: cog-cli",
+        "X-GitHub-Api-Version: 2022-11-28",
+    }) catch {
+        printErr("error: failed to fetch extension releases from GitHub\n");
+        return error.Explained;
+    };
+    defer allocator.free(response.body);
+    if (response.status_code != 200) {
+        printErr("error: GitHub releases request failed\n");
+        return error.Explained;
+    }
+
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, response.body, .{}) catch {
+        printErr("error: invalid GitHub releases response\n");
+        return error.Explained;
+    };
+    defer parsed.deinit();
+
+    if (parsed.value != .array) {
+        printErr("error: invalid GitHub releases response\n");
+        return error.Explained;
+    }
+
+    var releases: std.ArrayListUnmanaged(ReleaseInfo) = .empty;
+    defer releases.deinit(allocator);
+
+    for (parsed.value.array.items) |item| {
+        if (item != .object) continue;
+        const tag_value = item.object.get("tag_name") orelse continue;
+        const tarball_value = item.object.get("tarball_url") orelse continue;
+        const draft_value = item.object.get("draft") orelse continue;
+        const prerelease_value = item.object.get("prerelease") orelse continue;
+        if (tag_value != .string or tarball_value != .string or draft_value != .bool or prerelease_value != .bool) continue;
+        try releases.append(allocator, .{
+            .tag_name = tag_value.string,
+            .tarball_url = tarball_value.string,
+            .draft = draft_value.bool,
+            .prerelease = prerelease_value.bool,
+        });
+    }
+
+    if (releases.items.len == 0) {
+        printErr("error: no GitHub releases found for extension repository\n");
+        return error.Explained;
+    }
+
+    const selected = chooseRelease(releases.items, requested_version) orelse {
+        if (requested_version != null) {
+            printErr("error: requested extension version was not found in GitHub releases\n");
+        } else {
+            printErr("error: no stable semantic-version GitHub release found for extension repository\n");
+        }
+        return error.Explained;
+    };
+    debug_log.log("resolveGithubRelease: selected tag {s}", .{selected.tag_name});
+
+    return .{
+        .tag_name = try allocator.dupe(u8, selected.tag_name),
+        .version = try allocator.dupe(u8, normalizeVersionString(selected.tag_name)),
+        .tarball_url = try allocator.dupe(u8, selected.tarball_url),
+    };
+}
+
+fn freeResolvedRelease(allocator: std.mem.Allocator, release: *const ResolvedRelease) void {
+    allocator.free(release.tag_name);
+    allocator.free(release.version);
+    allocator.free(release.tarball_url);
+}
+
+fn freeInstallMetadata(allocator: std.mem.Allocator, metadata: *const InstallMetadata) void {
+    allocator.free(metadata.source_url);
+    allocator.free(metadata.version);
+    allocator.free(metadata.tag);
+}
+
+fn freeInstallResult(allocator: std.mem.Allocator, result: *const InstallResult) void {
+    allocator.free(result.name);
+    allocator.free(result.path);
+    allocator.free(result.version);
+    allocator.free(result.tag);
+}
+
+fn metadataPath(allocator: std.mem.Allocator, ext_dir: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ ext_dir, install_metadata_filename });
+}
+
+fn writeInstallMetadata(allocator: std.mem.Allocator, ext_dir: []const u8, source_url: []const u8, release: ResolvedRelease) !void {
+    const path = try metadataPath(allocator, ext_dir);
+    defer allocator.free(path);
+    debug_log.log("writeInstallMetadata: {s}", .{path});
+
+    var aw: std.io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer };
+    try s.beginObject();
+    try s.objectField("source_url");
+    try s.write(source_url);
+    try s.objectField("version");
+    try s.write(release.version);
+    try s.objectField("tag");
+    try s.write(release.tag_name);
+    try s.endObject();
+    const body = try aw.toOwnedSlice();
+    defer allocator.free(body);
+
+    const file = try std.fs.createFileAbsolute(path, .{});
+    defer file.close();
+    try file.writeAll(body);
+}
+
+fn readInstallMetadata(allocator: std.mem.Allocator, ext_dir: []const u8) !InstallMetadata {
+    const path = try metadataPath(allocator, ext_dir);
+    defer allocator.free(path);
+    debug_log.log("readInstallMetadata: {s}", .{path});
+
+    const file = try std.fs.openFileAbsolute(path, .{});
+    defer file.close();
+    const body = try file.readToEndAlloc(allocator, 64 * 1024);
+    defer allocator.free(body);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidInstallMetadata;
+
+    const source_url_value = parsed.value.object.get("source_url") orelse return error.InvalidInstallMetadata;
+    const version_value = parsed.value.object.get("version") orelse return error.InvalidInstallMetadata;
+    const tag_value = parsed.value.object.get("tag") orelse return error.InvalidInstallMetadata;
+    if (source_url_value != .string or version_value != .string or tag_value != .string) return error.InvalidInstallMetadata;
+
+    return .{
+        .source_url = try allocator.dupe(u8, source_url_value.string),
+        .version = try allocator.dupe(u8, version_value.string),
+        .tag = try allocator.dupe(u8, tag_value.string),
+    };
+}
+
+fn deleteTreeIfExistsAbsolute(path: []const u8) !void {
+    const parent_path = std.fs.path.dirname(path) orelse return error.FileNotFound;
+    const child_name = std.fs.path.basename(path);
+    var parent_dir = std.fs.openDirAbsolute(parent_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer parent_dir.close();
+    parent_dir.deleteTree(child_name) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
+}
+
+fn extractTarball(allocator: std.mem.Allocator, tarball_path: []const u8, output_dir: []const u8) !void {
+    debug_log.log("extractTarball: {s} -> {s}", .{ tarball_path, output_dir });
+    var tar = std.process.Child.init(&.{ "tar", "xzf", tarball_path, "--strip-components=1", "-C", output_dir }, allocator);
+    tar.stdin_behavior = .Ignore;
+    tar.stdout_behavior = .Inherit;
+    tar.stderr_behavior = .Inherit;
+    try tar.spawn();
+    const term = try tar.wait();
+    if (term.Exited != 0) return error.ExtractFailed;
+}
+
+fn downloadReleaseTarball(allocator: std.mem.Allocator, tarball_url: []const u8, output_path: []const u8) !void {
+    debug_log.log("downloadReleaseTarball: {s}", .{tarball_url});
+    const response = curl.get(allocator, tarball_url, &.{
+        "Accept: application/vnd.github+json",
+        "User-Agent: cog-cli",
+        "X-GitHub-Api-Version: 2022-11-28",
+    }) catch return error.DownloadFailed;
+    defer allocator.free(response.body);
+    if (response.status_code != 200) return error.DownloadFailed;
+
+    const file = try std.fs.createFileAbsolute(output_path, .{});
+    defer file.close();
+    try file.writeAll(response.body);
+}
+
+fn installExtensionToDir(allocator: std.mem.Allocator, git_url: []const u8, requested_version: ?[]const u8, install_dir_name: ?[]const u8) !InstallResult {
+    const resolved_name = install_dir_name orelse blk: {
+        var name = std.fs.path.basename(git_url);
+        if (std.mem.endsWith(u8, name, ".git")) {
+            name = name[0 .. name.len - 4];
+        }
+        break :blk name;
+    };
+
+    if (resolved_name.len == 0) {
+        printErr("error: could not extract extension name from URL\n");
+        return error.Explained;
+    }
+
+    const config_dir = paths.getGlobalConfigDir(allocator) catch {
+        printErr("error: could not determine config directory\n");
+        return error.Explained;
+    };
+    defer allocator.free(config_dir);
+
+    const ext_base = try std.fmt.allocPrint(allocator, "{s}/extensions", .{config_dir});
+    defer allocator.free(ext_base);
+
+    const ext_dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ ext_base, resolved_name });
+    defer allocator.free(ext_dir);
+
+    const tmp_dir = try std.fmt.allocPrint(allocator, "{s}/{s}.tmp", .{ ext_base, resolved_name });
+    defer allocator.free(tmp_dir);
+
+    const tarball_path = try std.fmt.allocPrint(allocator, "{s}/{s}.tar.gz", .{ ext_base, resolved_name });
+    defer allocator.free(tarball_path);
+
+    std.fs.makeDirAbsolute(config_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => {
+            printErr("error: failed to create config directory\n");
+            return error.Explained;
+        },
+    };
+    std.fs.makeDirAbsolute(ext_base) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => {
+            printErr("error: failed to create extensions directory\n");
+            return error.Explained;
+        },
+    };
+
+    const release = try resolveGithubRelease(allocator, git_url, requested_version);
+    defer freeResolvedRelease(allocator, &release);
+
+    deleteTreeIfExistsAbsolute(tmp_dir) catch {
+        printErr("error: failed to clean temporary extension directory\n");
+        return error.Explained;
+    };
+    std.fs.deleteFileAbsolute(tarball_path) catch {};
+
+    std.fs.makeDirAbsolute(tmp_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => {
+            printErr("error: failed to create temporary extension directory\n");
+            return error.Explained;
+        },
+    };
+    errdefer deleteTreeIfExistsAbsolute(tmp_dir) catch {};
+    errdefer std.fs.deleteFileAbsolute(tarball_path) catch {};
+
+    downloadReleaseTarball(allocator, release.tarball_url, tarball_path) catch {
+        printErr("error: failed to download extension release tarball\n");
+        return error.Explained;
+    };
+    extractTarball(allocator, tarball_path, tmp_dir) catch {
+        printErr("error: failed to extract extension release tarball\n");
+        return error.Explained;
+    };
+    std.fs.deleteFileAbsolute(tarball_path) catch {};
+
+    const manifest_path = try std.fmt.allocPrint(allocator, "{s}/cog-extension.json", .{tmp_dir});
+    defer allocator.free(manifest_path);
+
+    const manifest = readManifest(allocator, manifest_path) catch {
+        printErr("error: no valid cog-extension.json found in extension release\n");
+        return error.Explained;
+    };
+    defer freeManifest(allocator, &manifest);
+
+    const build_args: []const []const u8 = &.{ "/bin/sh", "-c", manifest.build_cmd };
+    var build_proc = std.process.Child.init(build_args, allocator);
+    build_proc.stderr_behavior = .Inherit;
+    build_proc.stdout_behavior = .Inherit;
+    build_proc.cwd = tmp_dir;
+    debug_log.log("installExtensionToDir: build in {s}", .{tmp_dir});
+    try build_proc.spawn();
+    const build_term = try build_proc.wait();
+    if (build_term.Exited != 0) {
+        printErr("error: build command failed\n");
+        return error.Explained;
+    }
+
+    const bin_path = try std.fmt.allocPrint(allocator, "{s}/bin/{s}", .{ tmp_dir, manifest.name });
+    defer allocator.free(bin_path);
+    const bin_exists = blk: {
+        const f = std.fs.openFileAbsolute(bin_path, .{}) catch break :blk false;
+        f.close();
+        break :blk true;
+    };
+    if (!bin_exists) {
+        printErr("error: build did not produce binary at bin/");
+        printErr(manifest.name);
+        printErr("\n");
+        return error.Explained;
+    }
+
+    writeInstallMetadata(allocator, tmp_dir, git_url, release) catch {
+        printErr("error: failed to write extension install metadata\n");
+        return error.Explained;
+    };
+
+    deleteTreeIfExistsAbsolute(ext_dir) catch {
+        printErr("error: failed to replace existing extension install\n");
+        return error.Explained;
+    };
+
+    var ext_parent_dir = std.fs.openDirAbsolute(ext_base, .{}) catch {
+        printErr("error: failed to open extensions directory\n");
+        return error.Explained;
+    };
+    defer ext_parent_dir.close();
+    ext_parent_dir.rename(std.fs.path.basename(tmp_dir), std.fs.path.basename(ext_dir)) catch {
+        printErr("error: failed to finalize extension install\n");
+        return error.Explained;
+    };
+
+    return .{
+        .name = try allocator.dupe(u8, manifest.name),
+        .path = try allocator.dupe(u8, ext_dir),
+        .version = try allocator.dupe(u8, release.version),
+        .tag = try allocator.dupe(u8, release.tag_name),
+    };
+}
+
 // ── Utility ─────────────────────────────────────────────────────────────
 
 fn printErr(msg: []const u8) void {
@@ -1043,25 +1506,36 @@ fn printStdout(text: []const u8) void {
 
 // ── Extension Install ───────────────────────────────────────────────────
 
-/// Install an extension from a git URL.
-/// 1. Extract repo name from URL
-/// 2. Clone to ~/.config/cog/extensions/<name>/
-/// 3. Read cog-extension.json
-/// 4. Run build command
-/// 5. Verify binary exists
-/// 6. Output JSON result
-pub fn installExtension(allocator: std.mem.Allocator, git_url: []const u8) !void {
-    debug_log.log("installExtension: {s}", .{git_url});
-    // Extract name from URL (last path segment, strip .git)
-    var name = std.fs.path.basename(git_url);
-    if (std.mem.endsWith(u8, name, ".git")) {
-        name = name[0 .. name.len - 4];
-    }
-    if (name.len == 0) {
-        printErr("error: could not extract extension name from URL\n");
-        return error.Explained;
-    }
+/// Install an extension from a GitHub release tarball.
+pub fn installExtension(allocator: std.mem.Allocator, git_url: []const u8, requested_version: ?[]const u8) !void {
+    debug_log.log("installExtension: {s} version={?s}", .{ git_url, requested_version });
+    const install_result = try installExtensionToDir(allocator, git_url, requested_version, null);
+    defer freeInstallResult(allocator, &install_result);
 
+    // Output JSON
+    const json_mod = std.json;
+    var aw: std.io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    var s: json_mod.Stringify = .{ .writer = &aw.writer };
+    try s.beginObject();
+    try s.objectField("name");
+    try s.write(install_result.name);
+    try s.objectField("installed");
+    try s.write(true);
+    try s.objectField("path");
+    try s.write(install_result.path);
+    try s.objectField("version");
+    try s.write(install_result.version);
+    try s.objectField("tag");
+    try s.write(install_result.tag);
+    try s.endObject();
+    const result = try aw.toOwnedSlice();
+    defer allocator.free(result);
+    printStdout(result);
+}
+
+pub fn updateExtensions(allocator: std.mem.Allocator, requested_name: ?[]const u8) !void {
+    debug_log.log("updateExtensions: start name={?s}", .{requested_name});
     const config_dir = paths.getGlobalConfigDir(allocator) catch {
         printErr("error: could not determine config directory\n");
         return error.Explained;
@@ -1071,110 +1545,84 @@ pub fn installExtension(allocator: std.mem.Allocator, git_url: []const u8) !void
     const ext_base = try std.fmt.allocPrint(allocator, "{s}/extensions", .{config_dir});
     defer allocator.free(ext_base);
 
-    const ext_dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ ext_base, name });
-    defer allocator.free(ext_dir);
-
-    // Create parent directories
-    std.fs.makeDirAbsolute(config_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => {
-            printErr("error: failed to create config directory\n");
-            return error.Explained;
-        },
-    };
-    std.fs.makeDirAbsolute(ext_base) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => {
-            printErr("error: failed to create extensions directory\n");
-            return error.Explained;
-        },
-    };
-
-    // Clone or update the repo
-    const already_exists = blk: {
-        std.fs.accessAbsolute(ext_dir, .{}) catch break :blk false;
-        break :blk true;
-    };
-
-    if (already_exists) {
-        // Pull latest changes
-        const pull_args: []const []const u8 = &.{ "git", "pull" };
-        var pull = std.process.Child.init(pull_args, allocator);
-        pull.cwd = ext_dir;
-        pull.stderr_behavior = .Inherit;
-        pull.stdout_behavior = .Inherit;
-        try pull.spawn();
-        const pull_term = try pull.wait();
-        if (pull_term.Exited != 0) {
-            printErr("error: git pull failed\n");
-            return error.Explained;
-        }
-    } else {
-        const clone_args: []const []const u8 = &.{ "git", "clone", git_url, ext_dir };
-        var clone = std.process.Child.init(clone_args, allocator);
-        clone.stderr_behavior = .Inherit;
-        clone.stdout_behavior = .Inherit;
-        try clone.spawn();
-        const clone_term = try clone.wait();
-        if (clone_term.Exited != 0) {
-            printErr("error: git clone failed\n");
-            return error.Explained;
-        }
-    }
-
-    // Read manifest
-    const manifest_path = try std.fmt.allocPrint(allocator, "{s}/cog-extension.json", .{ext_dir});
-    defer allocator.free(manifest_path);
-
-    const manifest = readManifest(allocator, manifest_path) catch {
-        printErr("error: no valid cog-extension.json found in repository\n");
+    var dir = std.fs.openDirAbsolute(ext_base, .{ .iterate = true }) catch {
+        printErr("error: no installed extensions found\n");
         return error.Explained;
     };
-    defer freeManifest(allocator, &manifest);
+    defer dir.close();
 
-    // Run build command
-    const build_args: []const []const u8 = &.{ "/bin/sh", "-c", manifest.build_cmd };
-    var build_proc = std.process.Child.init(build_args, allocator);
-    build_proc.stderr_behavior = .Inherit;
-    build_proc.stdout_behavior = .Inherit;
-    build_proc.cwd = ext_dir;
-    try build_proc.spawn();
-    const build_term = try build_proc.wait();
-    if (build_term.Exited != 0) {
-        printErr("error: build command failed\n");
-        return error.Explained;
+    var iter = dir.iterate();
+    var aw: std.io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer };
+    try s.beginObject();
+    try s.objectField("updated");
+    try s.beginArray();
+
+    var updated_count: usize = 0;
+    var matched_count: usize = 0;
+    while (try iter.next()) |entry| {
+        if (entry.kind != .directory) continue;
+        if (requested_name) |name| {
+            if (!std.mem.eql(u8, entry.name, name)) continue;
+            matched_count += 1;
+        }
+        debug_log.log("updateExtensions: inspect {s}", .{entry.name});
+        const ext_dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ ext_base, entry.name });
+        defer allocator.free(ext_dir);
+
+        const metadata = readInstallMetadata(allocator, ext_dir) catch |err| switch (err) {
+            error.FileNotFound, error.InvalidInstallMetadata => {
+                debug_log.log("updateExtensions: skip {s}, missing metadata", .{entry.name});
+                continue;
+            },
+            else => return err,
+        };
+        defer freeInstallMetadata(allocator, &metadata);
+
+        const latest_release = try resolveGithubRelease(allocator, metadata.source_url, null);
+        defer freeResolvedRelease(allocator, &latest_release);
+        if (std.mem.eql(u8, latest_release.tag_name, metadata.tag)) {
+            debug_log.log("updateExtensions: {s} already current at {s}", .{ entry.name, metadata.tag });
+            continue;
+        }
+
+        debug_log.log("updateExtensions: {s} {s} -> {s}", .{ entry.name, metadata.tag, latest_release.tag_name });
+
+        const install_result = try installExtensionToDir(allocator, metadata.source_url, null, entry.name);
+        defer freeInstallResult(allocator, &install_result);
+
+        try s.beginObject();
+        try s.objectField("name");
+        try s.write(install_result.name);
+        try s.objectField("path");
+        try s.write(install_result.path);
+        try s.objectField("from_version");
+        try s.write(metadata.version);
+        try s.objectField("to_version");
+        try s.write(install_result.version);
+        try s.objectField("tag");
+        try s.write(install_result.tag);
+        try s.endObject();
+        updated_count += 1;
     }
 
-    // Verify binary exists
-    const bin_path = try std.fmt.allocPrint(allocator, "{s}/bin/{s}", .{ ext_dir, manifest.name });
-    defer allocator.free(bin_path);
-
-    const bin_exists = blk: {
-        const f = std.fs.openFileAbsolute(bin_path, .{}) catch break :blk false;
-        f.close();
-        break :blk true;
-    };
-
-    if (!bin_exists) {
-        printErr("error: build did not produce binary at bin/");
-        printErr(manifest.name);
+    if (requested_name != null and matched_count == 0) {
+        printErr("error: installed extension not found: ");
+        printErr(requested_name.?);
         printErr("\n");
         return error.Explained;
     }
 
-    // Output JSON
-    const json_mod = std.json;
-    var aw: std.io.Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    var s: json_mod.Stringify = .{ .writer = &aw.writer };
-    try s.beginObject();
-    try s.objectField("name");
-    try s.write(manifest.name);
-    try s.objectField("installed");
-    try s.write(true);
-    try s.objectField("path");
-    try s.write(ext_dir);
+    try s.endArray();
+    try s.objectField("updated_count");
+    try s.write(updated_count);
+    if (requested_name) |name| {
+        try s.objectField("name");
+        try s.write(name);
+    }
     try s.endObject();
+
     const result = try aw.toOwnedSlice();
     defer allocator.free(result);
     printStdout(result);
@@ -1188,6 +1636,40 @@ test "resolveByExtension finds built-in for .go" {
     try std.testing.expect(ext != null);
     try std.testing.expectEqualStrings("go", ext.?.name);
     try std.testing.expect(!ext.?.installed);
+}
+
+test "parseGitHubRepo supports https and scp urls" {
+    const https_repo = parseGitHubRepo("https://github.com/trycog/cog-zig.git");
+    try std.testing.expect(https_repo != null);
+    try std.testing.expectEqualStrings("trycog", https_repo.?.owner);
+    try std.testing.expectEqualStrings("cog-zig", https_repo.?.repo);
+
+    const scp_repo = parseGitHubRepo("git@github.com:trycog/cog-zig.git");
+    try std.testing.expect(scp_repo != null);
+    try std.testing.expectEqualStrings("trycog", scp_repo.?.owner);
+    try std.testing.expectEqualStrings("cog-zig", scp_repo.?.repo);
+}
+
+test "chooseRelease selects highest stable version by default" {
+    const releases = [_]ReleaseInfo{
+        .{ .tag_name = "v0.74.0", .tarball_url = "https://example.com/74", .draft = false, .prerelease = false },
+        .{ .tag_name = "v0.75.0-rc.1", .tarball_url = "https://example.com/75rc", .draft = false, .prerelease = true },
+        .{ .tag_name = "v0.75.0", .tarball_url = "https://example.com/75", .draft = false, .prerelease = false },
+    };
+    const selected = chooseRelease(&releases, null);
+    try std.testing.expect(selected != null);
+    try std.testing.expectEqualStrings("v0.75.0", selected.?.tag_name);
+}
+
+test "chooseRelease matches exact requested version after v normalization" {
+    const releases = [_]ReleaseInfo{
+        .{ .tag_name = "v0.75.0", .tarball_url = "https://example.com/75", .draft = false, .prerelease = false },
+        .{ .tag_name = "v0.76.0", .tarball_url = "https://example.com/76", .draft = false, .prerelease = false },
+    };
+    const selected = chooseRelease(&releases, "0.75.0");
+    try std.testing.expect(selected != null);
+    try std.testing.expectEqualStrings("v0.75.0", selected.?.tag_name);
+    try std.testing.expect(chooseRelease(&releases, "0.75") == null);
 }
 
 test "resolveByExtension finds built-in for .ts" {
