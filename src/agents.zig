@@ -1,5 +1,6 @@
 const std = @import("std");
 const tui = @import("tui.zig");
+const agent_usage = @import("agent_usage.zig");
 
 // ── Agent Configuration Types ───────────────────────────────────────────
 
@@ -777,12 +778,48 @@ pub const agents = [_]Agent{
     },
 };
 
-pub fn toMenuItems() [agents.len]tui.MenuItem {
-    var items: [agents.len]tui.MenuItem = undefined;
-    for (agents, 0..) |agent, i| {
-        items[i] = .{ .label = agent.display_name };
+pub const MenuEntry = struct {
+    agent_index: usize,
+    item: tui.MenuItem,
+};
+
+fn agentLessThan(counts: *const agent_usage.Counts, lhs_index: usize, rhs_index: usize) bool {
+    const lhs = agents[lhs_index];
+    const rhs = agents[rhs_index];
+    const lhs_count = agent_usage.countFor(counts, lhs.id);
+    const rhs_count = agent_usage.countFor(counts, rhs.id);
+    if (lhs_count != rhs_count) return lhs_count > rhs_count;
+    return std.mem.order(u8, lhs.display_name, rhs.display_name) == .lt;
+}
+
+fn buildMenuEntriesFromCounts(counts: *const agent_usage.Counts) [agents.len]MenuEntry {
+    var sorted_indices: [agents.len]usize = undefined;
+    for (0..agents.len) |i| sorted_indices[i] = i;
+
+    var i: usize = 1;
+    while (i < sorted_indices.len) : (i += 1) {
+        const current = sorted_indices[i];
+        var j = i;
+        while (j > 0 and agentLessThan(counts, current, sorted_indices[j - 1])) : (j -= 1) {
+            sorted_indices[j] = sorted_indices[j - 1];
+        }
+        sorted_indices[j] = current;
     }
-    return items;
+
+    var entries: [agents.len]MenuEntry = undefined;
+    for (sorted_indices, 0..) |agent_index, idx| {
+        entries[idx] = .{
+            .agent_index = agent_index,
+            .item = .{ .label = agents[agent_index].display_name },
+        };
+    }
+    return entries;
+}
+
+pub fn buildMenuEntries(allocator: std.mem.Allocator) ![agents.len]MenuEntry {
+    var counts = try agent_usage.loadCounts(allocator);
+    defer agent_usage.deinitCounts(allocator, &counts);
+    return buildMenuEntriesFromCounts(&counts);
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────
@@ -791,10 +828,22 @@ test "agent count" {
     try std.testing.expectEqual(@as(usize, 10), agents.len);
 }
 
-test "toMenuItems" {
-    const items = toMenuItems();
-    try std.testing.expectEqualStrings("Claude Code", items[0].label);
-    try std.testing.expectEqualStrings("OpenCode", items[9].label);
+test "buildMenuEntries sorts alphabetically by default" {
+    var counts = agent_usage.Counts.init(std.testing.allocator);
+    defer counts.deinit();
+    const entries = buildMenuEntriesFromCounts(&counts);
+    try std.testing.expectEqualStrings("Amp", entries[0].item.label);
+    try std.testing.expectEqualStrings("Windsurf", entries[9].item.label);
+}
+
+test "buildMenuEntries prioritizes higher selection counts" {
+    var counts = agent_usage.Counts.init(std.testing.allocator);
+    defer agent_usage.deinitCounts(std.testing.allocator, &counts);
+    try counts.put(try std.testing.allocator.dupe(u8, "opencode"), 4);
+    try counts.put(try std.testing.allocator.dupe(u8, "amp"), 2);
+    const entries = buildMenuEntriesFromCounts(&counts);
+    try std.testing.expectEqualStrings("OpenCode", entries[0].item.label);
+    try std.testing.expectEqualStrings("Amp", entries[1].item.label);
 }
 
 test "PromptTarget.filename" {

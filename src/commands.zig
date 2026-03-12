@@ -8,6 +8,7 @@ const config_mod = @import("config.zig");
 const client = @import("client.zig");
 const tui = @import("tui.zig");
 const agents_mod = @import("agents.zig");
+const agent_usage = @import("agent_usage.zig");
 const settings_mod = @import("settings.zig");
 const hooks_mod = @import("hooks.zig");
 const debug_log = @import("debug_log.zig");
@@ -299,7 +300,9 @@ pub fn init(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     tui.separator();
 
     // Agent multi-select
-    var agent_menu_items = agents_mod.toMenuItems();
+    const agent_menu_entries = try agents_mod.buildMenuEntries(allocator);
+    var agent_menu_items: [agents_mod.agents.len]tui.MenuItem = undefined;
+    for (agent_menu_entries, 0..) |entry, i| agent_menu_items[i] = entry.item;
     const agent_result = try tui.multiSelect(allocator, .{
         .prompt = "Select your AI coding agents:",
         .items = &agent_menu_items,
@@ -313,9 +316,18 @@ pub fn init(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     };
     defer allocator.free(selected_indices);
 
+    var selected_agent_indices: [agents_mod.agents.len]usize = undefined;
+    var selected_agent_ids: [agents_mod.agents.len][]const u8 = undefined;
+    for (selected_indices, 0..) |idx, i| {
+        const agent_index = agent_menu_entries[idx].agent_index;
+        selected_agent_indices[i] = agent_index;
+        selected_agent_ids[i] = agents_mod.agents[agent_index].id;
+    }
+    try agent_usage.incrementCounts(allocator, selected_agent_ids[0..selected_indices.len]);
+
     // Check if any selected agent supports tool permissions
     const any_supports_perms = blk: {
-        for (selected_indices) |idx| {
+        for (selected_agent_indices[0..selected_indices.len]) |idx| {
             if (agents_mod.agents[idx].supportsToolPermissions()) break :blk true;
         }
         break :blk false;
@@ -345,7 +357,7 @@ pub fn init(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     var written_agents: [32][]const u8 = undefined;
     var written_agents_count: usize = 0;
 
-    for (selected_indices) |idx| {
+    for (selected_agent_indices[0..selected_indices.len]) |idx| {
         const agent = agents_mod.agents[idx];
 
         tui.separator();

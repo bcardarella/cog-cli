@@ -13,6 +13,7 @@ const debug_log = @import("debug_log.zig");
 const memory_mod = @import("memory.zig");
 const memory_schema = @import("memory_schema.zig");
 const sqlite = @import("sqlite.zig");
+const agent_usage = @import("agent_usage.zig");
 
 // ANSI styles
 const cyan = "\x1B[36m";
@@ -376,6 +377,44 @@ const cli_agents = [_]CliAgent{
     },
 };
 
+const CliMenuEntry = struct {
+    cli_index: usize,
+    item: tui.MenuItem,
+};
+
+fn cliAgentLessThan(counts: *const agent_usage.Counts, lhs_index: usize, rhs_index: usize) bool {
+    const lhs = cli_agents[lhs_index];
+    const rhs = cli_agents[rhs_index];
+    const lhs_count = agent_usage.countFor(counts, lhs.id);
+    const rhs_count = agent_usage.countFor(counts, rhs.id);
+    if (lhs_count != rhs_count) return lhs_count > rhs_count;
+    return std.mem.order(u8, lhs.display_name, rhs.display_name) == .lt;
+}
+
+fn buildCliMenuEntries(allocator: std.mem.Allocator) ![cli_agents.len]CliMenuEntry {
+    var counts = try agent_usage.loadCounts(allocator);
+    defer agent_usage.deinitCounts(allocator, &counts);
+
+    var sorted_indices: [cli_agents.len]usize = undefined;
+    for (0..cli_agents.len) |i| sorted_indices[i] = i;
+
+    var i: usize = 1;
+    while (i < sorted_indices.len) : (i += 1) {
+        const current = sorted_indices[i];
+        var j = i;
+        while (j > 0 and cliAgentLessThan(&counts, current, sorted_indices[j - 1])) : (j -= 1) {
+            sorted_indices[j] = sorted_indices[j - 1];
+        }
+        sorted_indices[j] = current;
+    }
+
+    var entries: [cli_agents.len]CliMenuEntry = undefined;
+    for (sorted_indices, 0..) |cli_index, idx| {
+        entries[idx] = .{ .cli_index = cli_index, .item = .{ .label = cli_agents[cli_index].display_name } };
+    }
+    return entries;
+}
+
 /// Dispatch mem:* subcommands.
 pub fn dispatch(allocator: std.mem.Allocator, subcmd: []const u8, args: []const [:0]const u8) !void {
     debug_log.log("bootstrap.dispatch: {s}", .{subcmd});
@@ -552,9 +591,10 @@ fn memBootstrap(allocator: std.mem.Allocator, args: []const [:0]const u8) !void 
     }
 
     // Agent selection menu
+    const cli_menu_entries = try buildCliMenuEntries(allocator);
     var menu_items: [cli_agents.len + 1]tui.MenuItem = undefined;
-    for (cli_agents, 0..) |agent, i| {
-        menu_items[i] = .{ .label = agent.display_name };
+    for (cli_menu_entries, 0..) |entry, i| {
+        menu_items[i] = entry.item;
     }
     menu_items[cli_agents.len] = .{ .label = "Custom command", .is_input_option = true };
 
@@ -565,13 +605,17 @@ fn memBootstrap(allocator: std.mem.Allocator, args: []const [:0]const u8) !void 
     });
 
     const selected_agent: ?*const CliAgent = switch (agent_result) {
-        .selected => |idx| if (idx < cli_agents.len) &cli_agents[idx] else null,
+        .selected => |idx| if (idx < cli_agents.len) &cli_agents[cli_menu_entries[idx].cli_index] else null,
         .input => null,
         .back, .cancelled => {
             printErr("  Aborted.\n");
             return;
         },
     };
+
+    if (selected_agent) |agent| {
+        try agent_usage.incrementCounts(allocator, &.{agent.id});
+    }
 
     // For custom command, extract the user-typed command string
     const custom_cmd: ?[]const u8 = switch (agent_result) {

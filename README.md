@@ -90,22 +90,22 @@ That's it. The interactive setup walks you through everything:
 2. **Agent selection**: pick which AI coding agents you use
 3. **Tool permissions**: optionally auto-allow all Cog tools so your agent doesn't prompt you on every call
 
-For each agent you select, `cog init` writes the system prompt, configures the MCP server connection, deploys specialized sub-agents, and, where the host agent supports it, auto-allows Cog tool permissions.
+For each agent you select, `cog init` writes the system prompt, configures the MCP server connection, deploys specialized sub-agents, and, where the host agent supports it, auto-allows Cog tool permissions. Agent menus start alphabetically and then adapt over time based on your global selection history in `~/.config/cog/agent-selection-counts.json`.
 
 ### Supported agents
 
 | Agent | MCP Config | Sub-Agents | Tool Permissions | Cog-First Override |
 |-------|------------|:----------:|------------------|--------------------|
-| Claude Code | `.mcp.json` | Yes | Auto-allow | Hard sub-agent allowlist + hooks |
-| Gemini CLI | `.gemini/settings.json` | Yes | Auto-allow | Medium hooks + sub-agent tool scoping |
 | Amp | `.amp/settings.json` | Yes | Auto-allow | Medium permission bootstrap + skills + plugin |
+| Claude Code | `.mcp.json` | Yes | Auto-allow | Hard sub-agent allowlist + hooks |
 | Cursor | `.cursor/mcp.json` | Yes | | Soft prompt guidance + read-only specialists |
-| OpenCode | `opencode.json` | Yes | Auto-allow | Medium runtime plugins + sub-agent permissions |
+| Gemini CLI | `.gemini/settings.json` | Yes | Auto-allow | Medium hooks + sub-agent tool scoping |
 | GitHub Copilot | `.vscode/mcp.json` | Yes | | Soft specialist tool scoping |
+| Goose | Global config | Yes | | Soft workflow runbooks |
 | OpenAI Codex CLI | `.codex/config.toml` | Yes | | Soft shared-config specialist guidance |
+| OpenCode | `opencode.json` | Yes | Auto-allow | Medium runtime plugins + sub-agent permissions |
 | Roo Code | `.roo/mcp.json` | Yes | | Medium native mode groups |
 | Windsurf | Global config | Yes | | Soft workflow runbooks |
-| Goose | Global config | Yes | | Soft workflow runbooks |
 
 `cog init` now installs Cog-first code exploration guidance everywhere. Stronger enforcement depends on what each host agent can actually express: Claude Code now combines hard-scoped subagents with project hooks, Gemini adds repo-local hook enforcement on top of sub-agent tool scoping, Amp ships an experimental workspace plugin alongside permissions and skills, Roo can scope native mode groups, and Codex/Cursor use stronger specialist guidance where hard repo-local denies are not available.
 
@@ -185,7 +185,7 @@ cog mem:bootstrap --timeout 15           # 15 minutes per file (default: 10)
 cog mem:bootstrap --debug                # Show agent stderr output
 ```
 
-On first run, `cog mem:bootstrap` presents an interactive agent selector — pick whichever AI coding agent CLI you have installed (Claude Code, Gemini CLI, Codex, Amp, Goose, OpenCode, or a custom command). Progress is checkpointed to `.cog/bootstrap-checkpoint.json` so interrupted runs resume where they left off.
+On first run, `cog mem:bootstrap` presents an interactive agent selector — pick whichever AI coding agent CLI you have installed (Amp, Claude Code, Gemini CLI, Goose, OpenAI Codex CLI, OpenCode, or a custom command). The list starts alphabetically and then adapts based on your global selection history in `~/.config/cog/agent-selection-counts.json`. Progress is checkpointed to `.cog/bootstrap-checkpoint.json` so interrupted runs resume where they left off.
 
 **Model override.** Set `memory.model` in `.cog/settings.json` to override the model the agent uses during bootstrap:
 
