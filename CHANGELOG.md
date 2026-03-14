@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-03-14
+
+### Changed
+
+- Claude Code specialist setup now explicitly grants the code-query subagent access to Cog code exploration MCP tools
+- The supported-agent docs now note that Claude Code setup also approves the project-scoped Cog MCP server when tool permissions are enabled
+
+### Fixed
+
+- Claude Code project MCP config now writes the standard `type: "stdio"` server shape in `.mcp.json`
+- Claude Code auto-permissions now also enable the `cog` project MCP server in `.claude/settings.json`, preventing installs that look configured but remain inactive until manual approval
+
 ## [0.17.0] - 2026-03-13
 
 ### Added
@@ -455,6 +467,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GitHub Actions workflow for automated releases and Homebrew tap updates
 - Homebrew installation via `trycog/tap/cog`
 
+[0.17.1]: https://github.com/trycog/cog-cli/releases/tag/v0.17.1
 [0.17.0]: https://github.com/trycog/cog-cli/releases/tag/v0.17.0
 [0.16.0]: https://github.com/trycog/cog-cli/releases/tag/v0.16.0
 [0.15.0]: https://github.com/trycog/cog-cli/releases/tag/v0.15.0

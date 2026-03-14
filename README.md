@@ -101,7 +101,7 @@ For each agent you select, `cog init` writes the system prompt, configures the M
 | Agent | MCP Config | Sub-Agents | Tool Permissions | Cog-First Override | Context Packaging | Memory Write Enrichment |
 |-------|------------|:----------:|------------------|--------------------|------------------|-------------------------|
 | Amp | `.amp/settings.json` | Yes | Auto-allow | Medium permission bootstrap + skills + plugin | Yes | Hook/config reminders |
-| Claude Code | `.mcp.json` | Yes | Auto-allow | Hard sub-agent allowlist + hooks | Yes | Hook/config reminders |
+| Claude Code | `.mcp.json` | Yes | Auto-allow | Hard sub-agent allowlist + hooks + project MCP approval | Yes | Hook/config reminders |
 | Cursor | `.cursor/mcp.json` | | | Soft AGENTS.md + rules | Yes | Prompt guidance |
 | Gemini CLI | `.gemini/settings.json` | Yes | Auto-allow | Medium hooks + sub-agent tool scoping | Yes | Hook/config reminders |
 | GitHub Copilot | `.vscode/mcp.json` | Yes | | Soft specialist tool scoping | Yes | Prompt guidance |
