@@ -455,6 +455,8 @@ pub const agents = [_]Agent{
         \\description: Explore code structure using the Cog SCIP index
         \\tools:
         \\  - Read
+        \\  - mcp__cog__code_explore
+        \\  - mcp__cog__code_query
         \\mcpServers:
         \\  - cog
         \\model: haiku
@@ -982,6 +984,8 @@ test "code-query headers prefer cog-first exploration" {
     const claude_header = agents[0].agent_file_header orelse unreachable;
     try std.testing.expect(std.mem.indexOf(u8, claude_header, "Glob") == null);
     try std.testing.expect(std.mem.indexOf(u8, claude_header, "Grep") == null);
+    try std.testing.expect(std.mem.indexOf(u8, claude_header, "mcp__cog__code_explore") != null);
+    try std.testing.expect(std.mem.indexOf(u8, claude_header, "mcp__cog__code_query") != null);
 
     const gemini_header = agents[1].agent_file_header orelse unreachable;
     try std.testing.expect(std.mem.indexOf(u8, gemini_header, "cog__code_explore") != null);

@@ -131,11 +131,15 @@ fn writeJsonMcp(allocator: std.mem.Allocator, path: []const u8, key: []const u8)
         } else |_| {}
     }
 
+    const include_stdio_type = std.mem.eql(u8, path, ".mcp.json") or
+        std.mem.eql(u8, path, ".cursor/mcp.json") or
+        std.mem.eql(u8, path, ".roo/mcp.json");
+
     // Add cog server entry
     try s.objectField("cog");
     try s.beginObject();
-    // For .vscode/mcp.json (Copilot), include "type": "stdio"
-    if (std.mem.eql(u8, key, "servers")) {
+    // For hosts using standard MCP server config, include "type": "stdio"
+    if (std.mem.eql(u8, key, "servers") or include_stdio_type) {
         try s.objectField("type");
         try s.write("stdio");
     }
@@ -438,6 +442,7 @@ fn writeClaudePermissions(allocator: std.mem.Allocator) !void {
 
     var existing_allow: ?json.Value = null;
     var existing_perms: ?json.Value = null;
+    var existing_enabled_mcpjson_servers: ?json.Value = null;
     var parsed_holder: ?json.Parsed(json.Value) = null;
     defer if (parsed_holder) |p| p.deinit();
 
@@ -449,6 +454,7 @@ fn writeClaudePermissions(allocator: std.mem.Allocator) !void {
                 var iter = parsed.value.object.iterator();
                 while (iter.next()) |entry| {
                     if (std.mem.eql(u8, entry.key_ptr.*, "permissions")) continue;
+                    if (std.mem.eql(u8, entry.key_ptr.*, "enabledMcpjsonServers")) continue;
                     try s.objectField(entry.key_ptr.*);
                     try s.write(entry.value_ptr.*);
                 }
@@ -460,6 +466,9 @@ fn writeClaudePermissions(allocator: std.mem.Allocator) !void {
                             existing_allow = allow;
                         }
                     }
+                }
+                if (parsed.value.object.get("enabledMcpjsonServers")) |enabled| {
+                    existing_enabled_mcpjson_servers = enabled;
                 }
             }
         } else |_| {}
@@ -506,6 +515,27 @@ fn writeClaudePermissions(allocator: std.mem.Allocator) !void {
 
     try s.endArray();
     try s.endObject(); // permissions
+
+    try s.objectField("enabledMcpjsonServers");
+    try s.beginArray();
+
+    var already_enabled_cog_server = false;
+    if (existing_enabled_mcpjson_servers) |enabled| {
+        if (enabled == .array) {
+            for (enabled.array.items) |item| {
+                if (item == .string and std.mem.eql(u8, item.string, "cog")) {
+                    already_enabled_cog_server = true;
+                }
+                try s.write(item);
+            }
+        }
+    }
+
+    if (!already_enabled_cog_server) {
+        try s.write("cog");
+    }
+
+    try s.endArray();
     try s.endObject(); // root
 
     const new_content = try aw.toOwnedSlice();
@@ -1574,6 +1604,9 @@ test "writeJsonMcp preserves existing non-cog entries" {
 
             const cog = servers.object.get("cog") orelse return error.TestUnexpectedResult;
             try std.testing.expect(cog == .object);
+            const typ = cog.object.get("type") orelse return error.TestUnexpectedResult;
+            try std.testing.expect(typ == .string);
+            try std.testing.expectEqualStrings("stdio", typ.string);
             const command = cog.object.get("command") orelse return error.TestUnexpectedResult;
             try std.testing.expect(command == .string);
             try std.testing.expectEqualStrings("cog", command.string);
@@ -1994,6 +2027,37 @@ test "writeClaudePermissions is idempotent" {
 
             const allow = parsed.value.object.get("permissions").?.object.get("allow").?;
             try std.testing.expectEqual(@as(usize, 1), allow.array.items.len);
+
+            const enabled = parsed.value.object.get("enabledMcpjsonServers") orelse return error.TestUnexpectedResult;
+            try std.testing.expect(enabled == .array);
+            try std.testing.expectEqual(@as(usize, 1), enabled.array.items.len);
+            try std.testing.expectEqualStrings("cog", enabled.array.items[0].string);
+        }
+    }.run);
+}
+
+test "writeClaudePermissions preserves existing enabledMcpjsonServers" {
+    try withTempCwd(struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            std.fs.cwd().makeDir(".claude") catch {};
+            const existing =
+                \\{"enabledMcpjsonServers":["github"]}
+            ;
+            try writeCwdFile(".claude/settings.json", existing);
+
+            try writeClaudePermissions(allocator);
+
+            const content = readCwdFile(allocator, ".claude/settings.json") orelse return error.TestUnexpectedResult;
+            defer allocator.free(content);
+
+            const parsed = try json.parseFromSlice(json.Value, allocator, content, .{});
+            defer parsed.deinit();
+
+            const enabled = parsed.value.object.get("enabledMcpjsonServers") orelse return error.TestUnexpectedResult;
+            try std.testing.expect(enabled == .array);
+            try std.testing.expectEqual(@as(usize, 2), enabled.array.items.len);
+            try std.testing.expectEqualStrings("github", enabled.array.items[0].string);
+            try std.testing.expectEqualStrings("cog", enabled.array.items[1].string);
         }
     }.run);
 }
