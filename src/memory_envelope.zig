@@ -51,9 +51,6 @@ pub fn supportsEnhancedWrite(capabilities: *const RemoteMemoryCapabilities) bool
 pub fn registerCapabilityTool(capabilities: *RemoteMemoryCapabilities, allocator: std.mem.Allocator, remote_name: []const u8) !void {
     if (std.mem.eql(u8, remote_name, "cog_assert_record")) {
         capabilities.supports_assertions = true;
-        capabilities.supports_provenance_envelopes = true;
-        capabilities.supports_assertion_write_proxy = true;
-        try setPreferredWriteTool(capabilities, allocator, remote_name);
         return;
     }
     if (std.mem.eql(u8, remote_name, "cog_memory_record")) {
