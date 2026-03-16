@@ -53,9 +53,11 @@ case "$tool_name" in
         ;;
     esac
     ;;
-  mcp__cog__code_explore)
-    if ! transcript_has 'mcp__cog__mem_recall' "$transcript_path"; then
-      advise "Cog memory workflow: if this is a prior-knowledge question rather than direct code tracing, use the cog-mem specialist first so it can check memory before broader exploration."
+  mcp__cog__code_explore|mcp__cog__code_query)
+    if ! transcript_has 'mcp__cog__mem_recall' "$transcript_path" && \
+       ! transcript_has '"subagent_type":"cog-mem"' "$transcript_path" && \
+       ! transcript_has '"subagent_type": "cog-mem"' "$transcript_path"; then
+      deny "Cog memory workflow: delegate to the cog-mem sub-agent first to check memory before using code exploration tools. Memory may already have the answer."
     fi
     ;;
   Grep|Glob)

@@ -626,7 +626,7 @@ fn writeClaudeRuntimeHooks(allocator: std.mem.Allocator) !void {
 
 fn writeClaudePreToolUseHookArray(s: *Stringify, existing_value: ?json.Value) !void {
     const command = "sh \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/cog-pretooluse.sh";
-    const matcher_value = "Grep|Glob|Bash|Agent|mcp__cog__code_explore";
+    const matcher_value = "Grep|Glob|Bash|Agent|mcp__cog__code_explore|mcp__cog__code_query";
     var already_has_group = false;
 
     try s.beginArray();
@@ -2018,7 +2018,7 @@ test "writeRuntimePolicyAsset creates Claude hook asset" {
             try std.testing.expect(std.mem.indexOf(u8, content, "mcp__cog__code_explore") != null);
             try std.testing.expect(std.mem.indexOf(u8, content, "Use Cog code intelligence tools before raw file search") != null);
             try std.testing.expect(std.mem.indexOf(u8, content, "Cog memory quality") != null);
-            try std.testing.expect(std.mem.indexOf(u8, content, "prior-knowledge question rather than direct code tracing") != null);
+            try std.testing.expect(std.mem.indexOf(u8, content, "delegate to the cog-mem sub-agent first to check memory") != null);
         }
     }.run);
 }
@@ -2226,7 +2226,7 @@ test "writeClaudeRuntimeHooks adds pretooluse hook" {
             try std.testing.expect(stop == .array);
             try std.testing.expectEqual(@as(usize, 1), pretool.array.items.len);
             try std.testing.expectEqual(@as(usize, 1), stop.array.items.len);
-            try std.testing.expectEqualStrings("Grep|Glob|Bash|Agent|mcp__cog__code_explore", pretool.array.items[0].object.get("matcher").?.string);
+            try std.testing.expectEqualStrings("Grep|Glob|Bash|Agent|mcp__cog__code_explore|mcp__cog__code_query", pretool.array.items[0].object.get("matcher").?.string);
             try std.testing.expectEqualStrings("sh \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/cog-stop-memory.sh", stop.array.items[0].object.get("hooks").?.array.items[0].object.get("command").?.string);
         }
     }.run);
