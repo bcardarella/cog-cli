@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-03-16
+
+### Added
+
+- `cog doctor` diagnostic command — validates installation health including config, memory backend, code index, extensions, agent integration, and debug daemon status with pass/warn/fail reporting
+- Mutex lifecycle tracing for MCP hang diagnosis — instruments all mutex lock/unlock sites with debug log events (no-ops unless `--debug` is active)
+
+### Fixed
+
+- Watcher mutex starvation: `processWatcherEvents` now releases the runtime mutex during file reindexing instead of holding it for the entire drain-reindex cycle, unblocking tool calls during large re-index batches
+- Debug log write races: `debug_log.log()` now serializes writes with a mutex so concurrent threads cannot interleave log lines
+- Added curl connect timeout (30s) and total timeout (120s) to prevent hung remote servers from blocking `curl_easy_perform` forever and starving all subsequent tool calls
+
 ## [0.18.1] - 2026-03-16
 
 ### Fixed
@@ -510,6 +523,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GitHub Actions workflow for automated releases and Homebrew tap updates
 - Homebrew installation via `trycog/tap/cog`
 
+[0.19.0]: https://github.com/trycog/cog-cli/releases/tag/v0.19.0
 [0.18.1]: https://github.com/trycog/cog-cli/releases/tag/v0.18.1
 [0.18.0]: https://github.com/trycog/cog-cli/releases/tag/v0.18.0
 [0.17.2]: https://github.com/trycog/cog-cli/releases/tag/v0.17.2

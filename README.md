@@ -8,7 +8,7 @@
 
 **Memory, code intelligence, and debugging for AI agents.**
 
-[Benchmarks](#benchmarks) · [Install](#install) · [Setup](#setup) · [How It Works](#how-it-works) · [Memory](#memory) · [Code Intelligence](#code-intelligence) · [Debug](#debug) · [Extensions](#extensions)
+[Benchmarks](#benchmarks) · [Install](#install) · [Setup](#setup) · [How It Works](#how-it-works) · [Memory](#memory) · [Code Intelligence](#code-intelligence) · [Debug](#debug) · [Extensions](#extensions) · [Diagnostics](#diagnostics)
 
 </div>
 
@@ -397,6 +397,16 @@ Extensions install from GitHub release tarballs into `~/.config/cog/extensions/`
 | [cog-zig](https://github.com/trycog/cog-zig) | Zig | Yes | DWARF (native) |
 
 See **[Writing a Language Extension](EXTENSIONS.md)** to build your own.
+
+---
+
+## Diagnostics
+
+```sh
+cog doctor
+```
+
+Validates your Cog installation: config resolution, memory backend connectivity, code index health, installed extensions, agent integration files, and debug daemon status. Reports pass/warn/fail per check with a summary line. Exits 1 on any failure — useful in CI or after setup changes.
 
 ---
 
