@@ -1085,8 +1085,13 @@ fn writeToolCatalog(runtime: *Runtime, allocator: std.mem.Allocator, s: *Stringi
 
 fn runtimeCallTool(runtime: *Runtime, tool_name: []const u8, arguments: ?json.Value) ![]const u8 {
     // All non-debug tool paths access shared Runtime state.
+    debug_log_mod.log("runtimeCallTool: acquiring mutex for {s}", .{tool_name});
     runtime.mutex.lock();
-    defer runtime.mutex.unlock();
+    debug_log_mod.log("runtimeCallTool: mutex acquired for {s}", .{tool_name});
+    defer {
+        runtime.mutex.unlock();
+        debug_log_mod.log("runtimeCallTool: mutex released for {s}", .{tool_name});
+    }
 
     const session_ctx = try runtime.ensureSessionContext();
 

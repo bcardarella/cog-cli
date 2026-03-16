@@ -111,6 +111,10 @@ fn fetch(
     // Follow redirects
     _ = c.curl_easy_setopt(handle, c.CURLOPT_FOLLOWLOCATION, @as(c_long, 1));
 
+    // Timeouts — prevent indefinite hangs on unresponsive servers
+    _ = c.curl_easy_setopt(handle, c.CURLOPT_CONNECTTIMEOUT, @as(c_long, 30));
+    _ = c.curl_easy_setopt(handle, c.CURLOPT_TIMEOUT, @as(c_long, 120));
+
     // Response body via write callback
     var response_data = WriteCallbackData{
         .list = .empty,
@@ -184,6 +188,10 @@ fn fetchCapturingHeaders(
 
     _ = c.curl_easy_setopt(handle, c.CURLOPT_ACCEPT_ENCODING, @as([*:0]const u8, ""));
     _ = c.curl_easy_setopt(handle, c.CURLOPT_FOLLOWLOCATION, @as(c_long, 1));
+
+    // Timeouts — prevent indefinite hangs on unresponsive servers
+    _ = c.curl_easy_setopt(handle, c.CURLOPT_CONNECTTIMEOUT, @as(c_long, 30));
+    _ = c.curl_easy_setopt(handle, c.CURLOPT_TIMEOUT, @as(c_long, 120));
 
     // Response body
     var response_data = WriteCallbackData{
