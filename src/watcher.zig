@@ -52,7 +52,11 @@ pub const Watcher = struct {
             return null;
         };
 
-        // Set write end to non-blocking
+        // Set both ends to non-blocking.
+        // Write end: so the watcher thread never blocks on a full pipe.
+        // Read end: so drainOne() returns null instead of blocking when
+        // the pipe is empty (otherwise it holds the runtime mutex forever).
+        setNonBlock(pipe_fds[0]);
         setNonBlock(pipe_fds[1]);
 
         debug_log.log("Watcher.init: root={s}, {d} patterns", .{ owned_root, patterns.len });
