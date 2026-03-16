@@ -1597,38 +1597,70 @@ fn callCodeExplore(runtime: *Runtime, arguments: ?json.Value) ![]const u8 {
 // ── File Watcher Event Processing ───────────────────────────────────────
 
 fn processWatcherEvents(runtime: *Runtime) void {
-    debug_log_mod.log("processWatcherEvents: acquiring runtime mutex", .{});
-    runtime.mutex.lock();
+    const allocator = runtime.allocator;
+
+    // Step 1: Drain all pending paths under the mutex.
+    // The watcher pipe buffer is only safe to read while we hold the lock
+    // (prevents a concurrent tool call from triggering a second drain).
+    var paths_buf: std.ArrayListUnmanaged([]const u8) = .empty;
     defer {
-        runtime.mutex.unlock();
-        debug_log_mod.log("processWatcherEvents: runtime mutex released", .{});
+        for (paths_buf.items) |p| allocator.free(p);
+        paths_buf.deinit(allocator);
     }
-    debug_log_mod.log("processWatcherEvents: runtime mutex acquired", .{});
 
-    var w = &runtime.watcher.?;
+    {
+        debug_log_mod.log("processWatcherEvents: acquiring runtime mutex (drain)", .{});
+        runtime.mutex.lock();
+        defer {
+            runtime.mutex.unlock();
+            debug_log_mod.log("processWatcherEvents: runtime mutex released (drain)", .{});
+        }
+        debug_log_mod.log("processWatcherEvents: runtime mutex acquired (drain)", .{});
+
+        var w = &runtime.watcher.?;
+        while (w.drainOne()) |rel_path| {
+            const duped = allocator.dupe(u8, rel_path) catch continue;
+            paths_buf.append(allocator, duped) catch {
+                allocator.free(duped);
+                continue;
+            };
+        }
+    }
+
+    if (paths_buf.items.len == 0) return;
+    debug_log_mod.log("processWatcherEvents: reindexing {d} files (no mutex held)", .{paths_buf.items.len});
+
+    // Step 2: Reindex each file without holding the runtime mutex.
+    // reindexFile/removeFileFromIndex use flock() for disk serialization,
+    // so concurrent tool calls can proceed while we do the heavy I/O.
     var changed = false;
-    while (w.drainOne()) |rel_path| {
-        // Dupe the path since drainOne's slice is only valid until next call
-        const path_copy = runtime.allocator.dupe(u8, rel_path) catch continue;
-        defer runtime.allocator.free(path_copy);
-
+    for (paths_buf.items) |path_copy| {
         const exists = blk: {
             std.fs.cwd().access(path_copy, .{}) catch break :blk false;
             break :blk true;
         };
         if (exists) {
-            if (code_intel.reindexFile(runtime.allocator, path_copy)) {
+            if (code_intel.reindexFile(allocator, path_copy)) {
                 debugLog("Watcher: reindexed {s}", .{path_copy});
                 changed = true;
             }
         } else {
-            if (code_intel.removeFileFromIndex(runtime.allocator, path_copy)) {
+            if (code_intel.removeFileFromIndex(allocator, path_copy)) {
                 debugLog("Watcher: removed {s}", .{path_copy});
                 changed = true;
             }
         }
     }
+
+    // Step 3: Re-acquire mutex only to swap the in-memory code cache.
     if (changed) {
+        debug_log_mod.log("processWatcherEvents: acquiring runtime mutex (cache swap)", .{});
+        runtime.mutex.lock();
+        defer {
+            runtime.mutex.unlock();
+            debug_log_mod.log("processWatcherEvents: runtime mutex released (cache swap)", .{});
+        }
+        debug_log_mod.log("processWatcherEvents: runtime mutex acquired (cache swap)", .{});
         runtime.syncCodeCacheAfterWrite() catch {};
     }
 }

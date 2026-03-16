@@ -6,6 +6,9 @@ const c = std.c;
 /// Global debug log file handle. When null, all log calls are no-ops.
 var log_file: ?std.fs.File = null;
 
+/// Serializes concurrent writes so log lines don't interleave.
+var log_mutex: std.Thread.Mutex = .{};
+
 pub const ResourceUsage = struct {
     user_ms: i64,
     system_ms: i64,
@@ -76,8 +79,11 @@ pub fn deinit() void {
 }
 
 /// Write a timestamped log entry. No-op when debug logging is not enabled.
+/// Thread-safe: a mutex serializes writes so concurrent threads don't interleave.
 pub fn log(comptime fmt: []const u8, args: anytype) void {
     const f = log_file orelse return;
+    log_mutex.lock();
+    defer log_mutex.unlock();
     var buf: [128]u8 = undefined;
     const ts = std.time.timestamp();
     const prefix = std.fmt.bufPrint(&buf, "[{d}] ", .{ts}) catch return;
