@@ -1341,13 +1341,7 @@ fn discoverRemoteTools(runtime: *Runtime) !void {
 }
 
 fn callRemoteHostedTool(runtime: *Runtime, session_ctx: *session_context_mod.SessionContext, tool_name: []const u8, arguments: ?json.Value) ![]const u8 {
-    if (memory_envelope_mod.isWriteTool(tool_name) and memory_envelope_mod.supportsEnhancedWrite(&runtime.remote_memory_capabilities)) {
-        return callEnhancedRemoteHostedWrite(runtime, session_ctx, tool_name, arguments) catch |err| {
-            debug_log_mod.log("callRemoteHostedTool: enhanced write failed for {s}: {s}", .{ tool_name, @errorName(err) });
-            debug_log_mod.log("callRemoteHostedTool: falling back to legacy remote write path for {s}", .{tool_name});
-            return callRemoteMcpTool(runtime, tool_name, arguments);
-        };
-    }
+    _ = session_ctx;
     return callRemoteMcpTool(runtime, tool_name, arguments);
 }
 
