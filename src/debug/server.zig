@@ -9,6 +9,7 @@ const driver_mod = @import("driver.zig");
 const dashboard_mod = @import("dashboard.zig");
 const dashboard_tui = @import("dashboard_tui.zig");
 const extensions = @import("../extensions.zig");
+const debug_log = @import("../debug_log.zig");
 
 // Debug logging to file
 var server_log_file: ?std.fs.File = null;
@@ -481,8 +482,13 @@ pub const DebugServer = struct {
     /// Dispatch a tool call and return the raw result.
     /// Used by the daemon socket transport.
     pub fn callTool(self: *DebugServer, allocator: std.mem.Allocator, tool_name: []const u8, tool_args: ?json.Value) !ToolResult {
+        debug_log.log("DebugServer.callTool: acquiring mutex for {s}", .{tool_name});
         self.mutex.lock();
-        defer self.mutex.unlock();
+        defer {
+            self.mutex.unlock();
+            debug_log.log("DebugServer.callTool: mutex released for {s}", .{tool_name});
+        }
+        debug_log.log("DebugServer.callTool: mutex acquired for {s}", .{tool_name});
         serverLog("[DebugServer.callTool] Dispatching tool: {s}", .{tool_name});
         if (std.mem.eql(u8, tool_name, "debug_launch")) {
             serverLog("[DebugServer.callTool] -> toolLaunch", .{});
@@ -1270,8 +1276,13 @@ pub const DebugServer = struct {
 
         // Synchronous blocking path: release mutex, poll until done or timeout,
         // then re-acquire mutex before returning.
+        debug_log.log("toolRun: releasing mutex for blocking poll", .{});
         self.mutex.unlock();
-        defer self.mutex.lock();
+        defer {
+            debug_log.log("toolRun: re-acquiring mutex after poll", .{});
+            self.mutex.lock();
+            debug_log.log("toolRun: mutex re-acquired after poll", .{});
+        }
 
         const deadline_ms: i128 = @as(i128, std.time.milliTimestamp()) + timeout_ms;
         const poll_interval_ns: u64 = 10 * std.time.ns_per_ms; // 10ms
@@ -1410,8 +1421,13 @@ pub const DebugServer = struct {
         session.status = .running;
 
         // Release mutex for blocking DAP calls
+        debug_log.log("toolStepOverInspect: releasing mutex for blocking DAP calls", .{});
         self.mutex.unlock();
-        defer self.mutex.lock();
+        defer {
+            debug_log.log("toolStepOverInspect: re-acquiring mutex after DAP calls", .{});
+            self.mutex.lock();
+            debug_log.log("toolStepOverInspect: mutex re-acquired after DAP calls", .{});
+        }
 
         var steps_taken: u32 = 0;
         var final_stop_reason: []const u8 = "max_steps";

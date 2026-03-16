@@ -564,8 +564,13 @@ const StdoutWriter = struct {
     mutex: *std.Thread.Mutex,
 
     fn writeResponse(self: StdoutWriter, data: []const u8) !void {
+        debug_log_mod.log("stdout_writer: acquiring mutex", .{});
         self.mutex.lock();
-        defer self.mutex.unlock();
+        defer {
+            self.mutex.unlock();
+            debug_log_mod.log("stdout_writer: mutex released", .{});
+        }
+        debug_log_mod.log("stdout_writer: mutex acquired", .{});
         debugLogBytes("<<< SEND: ", data);
         var buf: [8192]u8 = undefined;
         var w = self.file.writerStreaming(&buf);
@@ -729,8 +734,13 @@ fn handleToolsList(runtime: *Runtime, reply: *ReplyOnce) !void {
     const allocator = runtime.allocator;
 
     // Protect remote_tools discovery/access
+    debug_log_mod.log("handleToolsList: acquiring runtime mutex", .{});
     runtime.mutex.lock();
-    defer runtime.mutex.unlock();
+    defer {
+        runtime.mutex.unlock();
+        debug_log_mod.log("handleToolsList: runtime mutex released", .{});
+    }
+    debug_log_mod.log("handleToolsList: runtime mutex acquired", .{});
 
     var aw: Writer.Allocating = .init(allocator);
     defer aw.deinit();
@@ -779,9 +789,12 @@ fn handleToolsCall(runtime: *Runtime, reply: *ReplyOnce, params: ?json.Value) !v
 
     const arguments = if (p.object.get("arguments")) |a| (if (a == .object) a else null) else null;
 
+    debug_log_mod.log("handleToolsCall: acquiring runtime mutex for session context ({s})", .{tool_name});
     runtime.mutex.lock();
+    debug_log_mod.log("handleToolsCall: runtime mutex acquired for session context ({s})", .{tool_name});
     _ = runtime.ensureSessionContext() catch {};
     runtime.mutex.unlock();
+    debug_log_mod.log("handleToolsCall: runtime mutex released for session context ({s})", .{tool_name});
 
     // Dispatch tool
     const tool_result = runtimeCallTool(runtime, tool_name, arguments) catch |err| {
@@ -939,8 +952,13 @@ fn handleResourcesRead(runtime: *Runtime, reply: *ReplyOnce, params: ?json.Value
     const allocator = runtime.allocator;
 
     // Protect code_cache and remote_tools access
+    debug_log_mod.log("handleResourcesRead: acquiring runtime mutex", .{});
     runtime.mutex.lock();
-    defer runtime.mutex.unlock();
+    defer {
+        runtime.mutex.unlock();
+        debug_log_mod.log("handleResourcesRead: runtime mutex released", .{});
+    }
+    debug_log_mod.log("handleResourcesRead: runtime mutex acquired", .{});
 
     const p = params orelse {
         try reply.sendError(-32602, "Missing params");
@@ -1579,8 +1597,13 @@ fn callCodeExplore(runtime: *Runtime, arguments: ?json.Value) ![]const u8 {
 // ── File Watcher Event Processing ───────────────────────────────────────
 
 fn processWatcherEvents(runtime: *Runtime) void {
+    debug_log_mod.log("processWatcherEvents: acquiring runtime mutex", .{});
     runtime.mutex.lock();
-    defer runtime.mutex.unlock();
+    defer {
+        runtime.mutex.unlock();
+        debug_log_mod.log("processWatcherEvents: runtime mutex released", .{});
+    }
+    debug_log_mod.log("processWatcherEvents: runtime mutex acquired", .{});
 
     var w = &runtime.watcher.?;
     var changed = false;
