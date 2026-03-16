@@ -3127,6 +3127,58 @@ pub fn codeQueryWithLoadedIndex(allocator: std.mem.Allocator, ci: *CodeIndex, pa
     };
 }
 
+const MAX_BATCH_QUERIES = 32;
+
+pub fn codeQueryBatchWithLoadedIndex(allocator: std.mem.Allocator, ci: *CodeIndex, queries: []const QueryParams) ![]const u8 {
+    debug_log.log("codeQueryBatchWithLoadedIndex: queries={d}", .{queries.len});
+    if (queries.len == 0) return error.Explained;
+    if (queries.len == 1) return codeQueryWithLoadedIndex(allocator, ci, queries[0]);
+
+    const n = @min(queries.len, MAX_BATCH_QUERIES);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    const writer = buf.writer(allocator);
+
+    for (0..n) |i| {
+        const params = queries[i];
+        if (i > 0) try writer.writeAll("\n\n");
+
+        // Write a header for each query in the batch
+        try writer.writeAll("── ");
+        try writer.writeAll(@tagName(params.mode));
+        if (params.name) |name| {
+            try writer.writeAll(" name=");
+            try writer.writeAll(name);
+        }
+        if (params.file) |file| {
+            try writer.writeAll(" file=");
+            try writer.writeAll(file);
+        }
+        try writer.writeAll(" ──\n");
+
+        const result = codeQueryWithLoadedIndex(allocator, ci, params) catch |err| {
+            try writer.writeAll("(error: ");
+            try writer.writeAll(@errorName(err));
+            try writer.writeAll(")\n");
+            continue;
+        };
+        defer allocator.free(result);
+        try writer.writeAll(result);
+
+        if (buf.items.len >= MAX_TOTAL_BYTES) {
+            try writer.writeAll("\n\n(output truncated — batch budget exceeded)");
+            break;
+        }
+    }
+
+    if (queries.len > MAX_BATCH_QUERIES) {
+        try writer.writeAll("\n\n(batch truncated — max 32 queries per call)");
+    }
+
+    return buf.toOwnedSlice(allocator);
+}
+
 // ── Explore API (composite find + read) ─────────────────────────────────
 
 pub const ExploreQuery = struct {

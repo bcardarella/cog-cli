@@ -83,27 +83,31 @@ Code intelligence, persistent memory, and interactive debugging.
 For any request to explore, analyze, understand, map, or explain code, use `cog_code_explore` or `cog_code_query`.
 Do NOT use Grep, Glob, or shell search commands like `grep`, `rg`, `find`, or `git grep` for code exploration when the Cog index is available.
 
-- `cog_code_explore` — find symbols by name, return full definition bodies, file TOC, and optional architecture summaries
-- `cog_code_query` — `find` (locate definitions), `refs` (find references), `symbols` (list file symbols), `imports` (module/file dependencies), `contains` (parent-child containment), `calls`/`callers` (approximate call graph), `overview` (symbol/file/repo architecture summary)
+- `cog_code_explore` — find symbols by name, return full definition bodies, file TOC, and optional architecture summaries. ALWAYS put all symbols into a single `queries` array — never split across multiple calls.
+- `cog_code_query` — `find` (locate definitions), `refs` (find references), `symbols` (list file symbols), `imports` (module/file dependencies), `contains` (parent-child containment), `calls`/`callers` (approximate call graph), `overview` (symbol/file/repo architecture summary). ALWAYS use the `queries` array to combine multiple queries into one call — never make sequential code_query calls that could be batched.
 - Include synonyms with `|`: `banner|header|splash`
 - Wildcard symbol patterns: `*init*`, `get*`, `Handle?`
 
 Only fall back to Grep, Glob, or shell search commands when the Cog index is unavailable, incomplete for the target code, or the task is about raw string literals, log messages, or other non-symbol text patterns.
 
-### Efficiency Rules
+### Batching Rules
 
-- For repository-understanding, architecture-summary, or "tell me about this project" tasks: make exactly one initial `cog_code_explore` call with a batched list of likely entrypoint symbols and set `include_architecture=true` with `overview_scope="repo"`.
-- Before making any follow-up code-intelligence call, first check whether the answer is already present in the prior `cog_code_explore` output (`file_symbols`, definition body, or referenced symbols).
-- If you need to look up multiple symbols, combine them into one `cog_code_explore({ queries: [...] })` call instead of making multiple single-symbol calls.
-- Do not explore by issuing repeated `cog_code_query(mode="symbols", file=...)` calls across multiple files.
-- Treat repeated `cog_code_query(mode="symbols")` calls across files as an invalid exploration pattern. Use it only for one already-identified file when a concrete ambiguity remains.
-- For repository-understanding tasks, do not issue repeated `cog_code_query(mode="overview"|"imports"|"contains"|"calls"|"callers", scope="file")` calls across multiple files. After the initial batched repo explore, allow at most one targeted file-scoped architecture follow-up when a single concrete ambiguity remains.
-- Use `cog_code_query(mode="symbols")` only after a specific file has already been identified as relevant.
-- Use `cog_code_query(mode="refs")` only as a targeted follow-up when a concrete ambiguity remains after the initial batched exploration.
-- If more than one additional symbol or file needs inspection, stop and merge that work into one batched `cog_code_explore({ queries: [...] })` call instead of chaining follow-up queries.
-- Prefer `cog_code_query(mode="imports"|"contains"|"calls"|"callers"|"overview")` over raw file reads when the question is architectural.
-- Do not use `cog_code_query(mode="find")` as a step-by-step exploration strategy when the needed symbols can be batched into `cog_code_explore`.
-- Default budget for code-analysis tasks: 2-3 code-intelligence tool calls before responding.
+Both `cog_code_explore` and `cog_code_query` accept a `queries` array.
+Making sequential calls to the same tool when a single batched call would
+work is an error. Combine them.
+
+- `cog_code_explore`: put ALL symbols into one `queries` array.
+  Do not call `cog_code_explore` twice when both calls could be one.
+- `cog_code_query`: put ALL queries into one `queries` array. Each entry
+  specifies its own `mode`, `name`, `file`, `kind`, `direction`, `scope`.
+  Example: symbols for 3 files = one call with 3 entries, not 3 calls.
+- For repository-understanding tasks: one initial `cog_code_explore`
+  with `include_architecture=true` and `overview_scope="repo"`, then at
+  most one targeted follow-up.
+- Before making follow-up calls, check whether the answer is already
+  present in prior output.
+- Prefer `cog_code_query` over raw file reads for architectural questions.
+- Budget: 2-3 code-intelligence calls before responding.
 - Do not call `cog_mem_recall` for pure codebase summarization or architecture description unless memory is specifically needed to answer the question.
 
 ## Debugging
@@ -141,7 +145,7 @@ Use memory as a deterministic workflow, not an optional hint:
 1. Before broad exploration or deep reasoning in unfamiliar code, query memory first.
 2. When you learn something new during the task, store it as short-term memory.
 3. When the user gives you new factual context or answers a question, store that as short-term memory when relevant.
-4. Before you finish, validate short-term memories and reinforce or flush them.
+4. Before you finish, if this task created short-term memory or you explored code and learned something durable, delegate to `cog-mem-validate` to learn and consolidate in one call. Do NOT call memory validation tools directly from the primary agent.
 5. Mention Cog memory in the final response only if you directly used `cog_mem_*` tools or the `cog-mem` sub-agent during this task. Otherwise omit any memory note entirely.
 
 Memory quality guardrails:

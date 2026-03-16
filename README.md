@@ -100,7 +100,7 @@ For each agent you select, `cog init` writes the system prompt, configures the M
 
 | Agent | MCP Config | Sub-Agents | Tool Permissions | Cog-First Override | Context Packaging | Memory Write Enrichment |
 |-------|------------|:----------:|------------------|--------------------|------------------|-------------------------|
-| Amp | `.amp/settings.json` | Yes | Auto-allow | Medium permission bootstrap + skills + plugin | Yes | Hook/config reminders |
+| Amp | `.amp/settings.json` | Yes | Auto-allow | Medium runtime plugins + sub-agent permissions | Yes | Runtime reminders |
 | Claude Code | `.mcp.json` | Yes | Auto-allow | Hard sub-agent allowlist + hooks + project MCP approval | Yes | Hook/config reminders |
 | Cursor | `.cursor/mcp.json` | | | Soft AGENTS.md + rules | Yes | Prompt guidance |
 | Gemini CLI | `.gemini/settings.json` | Yes | Auto-allow | Medium hooks + sub-agent tool scoping | Yes | Hook/config reminders |
@@ -111,7 +111,7 @@ For each agent you select, `cog init` writes the system prompt, configures the M
 | Roo Code | `.roo/mcp.json` | Yes | | Medium native mode groups | Yes | Prompt guidance |
 | Windsurf | Global config | Yes | | Soft skills + rules | Yes | Prompt guidance |
 
-`cog init` now installs Cog-first code exploration guidance everywhere. Stronger enforcement depends on what each host agent can actually express: Claude Code now combines hard-scoped subagents with project hooks, Gemini adds repo-local hook enforcement on top of sub-agent tool scoping, Amp ships an experimental workspace plugin alongside permissions and skills, Windsurf and Goose now use native skill folders, Roo can scope native mode groups, and Cursor falls back to AGENTS.md plus Cursor rules because Cursor does not currently expose a documented repo-local custom-subagent file format.
+`cog init` now installs Cog-first code exploration guidance everywhere. Stronger enforcement depends on what each host agent can actually express: Claude Code now combines hard-scoped subagents with project hooks and a memory-completion stop gate, Gemini adds repo-local hook enforcement on top of sub-agent tool scoping, Amp ships an experimental workspace plugin with runtime memory reminders, OpenCode uses runtime plugins for code, debug, and memory workflow enforcement, Windsurf and Goose use native skill folders, Roo can scope native mode groups, and Cursor falls back to AGENTS.md plus Cursor rules because Cursor does not currently expose a documented repo-local custom-subagent file format.
 
 Hosted memory writes now pass through a client-side context compiler in `cog-cli`. When the remote brain supports enriched write APIs, Cog attaches trusted local provenance such as workspace, repo identity, MCP session, host integration, recent code/debug evidence, and write-reason hints before sending the write upstream. Legacy hosted servers still receive the original tool calls unchanged.
 

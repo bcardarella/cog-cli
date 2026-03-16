@@ -585,6 +585,53 @@ pub fn init(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
                 }
             }
         }
+
+        // g. Deploy validate agent file (only when memory is configured)
+        if (setup_mem) {
+            if (agent.validate_file_path) |validate_path| {
+                const shares_path = if (agent.agent_file_path) |ap|
+                    std.mem.eql(u8, ap, validate_path)
+                else
+                    false;
+
+                if (shares_path) {
+                    hooks_mod.configureValidateAgentFile(allocator, agent) catch {};
+                } else {
+                    var validate_already_written = false;
+                    for (written_agents[0..written_agents_count]) |wa| {
+                        if (std.mem.eql(u8, wa, validate_path)) {
+                            validate_already_written = true;
+                            break;
+                        }
+                    }
+                    if (!validate_already_written) {
+                        const should_write = if (agent.validate_file_header) |header| blk: {
+                            const content = hooks_mod.buildMarkdownAgentContent(allocator, header, build_options.validate_agent_body) catch break :blk true;
+                            defer allocator.free(content);
+                            break :blk shouldWriteFile(allocator, validate_path, content, &accept_all);
+                        } else true;
+                        if (should_write) {
+                            hooks_mod.configureValidateAgentFile(allocator, agent) catch {};
+                            printErr("    ");
+                            tui.checkmark();
+                            printErr(" ");
+                            printErr(validate_path);
+                            printErr("\n");
+                            appendUniquePath(&installed_assets, &installed_assets_count, validate_path);
+                        } else {
+                            printErr("    ");
+                            printErr(dim ++ "  skipped " ++ reset);
+                            printErr(validate_path);
+                            printErr("\n");
+                        }
+                        if (written_agents_count < 32) {
+                            written_agents[written_agents_count] = validate_path;
+                            written_agents_count += 1;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     try writeClientContextManifest(
@@ -1504,6 +1551,32 @@ test "writeClientContextManifest writes selected agents and features" {
     const features = parsed.value.object.get("features").?;
     try std.testing.expect(features.object.get("enhanced_memory_writes").?.bool);
     try std.testing.expect(features.object.get("provenance_envelopes").?.bool);
+}
+
+test "prompt markdown includes stronger memory gate guidance" {
+    try std.testing.expect(std.mem.indexOf(u8, build_options.prompt_md, "Record knowledge as you work - use IF-THEN rules:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_options.prompt_md, "prior knowledge may help") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_options.prompt_md, "Do not launch a separate") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_options.prompt_md, "## BEFORE Responding - Memory Gate") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_options.prompt_md, "Budget: 2-3 code-intelligence calls before responding.") != null);
+}
+
+test "processCogMemTags preserves memory gate in memory mode" {
+    const allocator = std.testing.allocator;
+    const processed = try processCogMemTags(allocator, build_options.prompt_md, true);
+    defer allocator.free(processed);
+
+    try std.testing.expect(std.mem.indexOf(u8, processed, "## BEFORE Responding - Memory Gate") != null);
+    try std.testing.expect(std.mem.indexOf(u8, processed, "delegate to `cog-mem-validate`") != null);
+}
+
+test "processCogMemTags strips memory gate in tools-only mode" {
+    const allocator = std.testing.allocator;
+    const processed = try processCogMemTags(allocator, build_options.prompt_md, false);
+    defer allocator.free(processed);
+
+    try std.testing.expect(std.mem.indexOf(u8, processed, "## BEFORE Responding - Memory Gate") == null);
+    try std.testing.expect(std.mem.indexOf(u8, processed, "cog_mem_learn") == null);
 }
 
 test "ensureCogGitignore writes cog-local ignore patterns" {
