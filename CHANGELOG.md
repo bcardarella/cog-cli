@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-03-17
+
+### Added
+
+- Pi coding agent support — MCP config at `.pi/mcp.json` with `directTools` enabled, skills-based specialist delegation at `.pi/skills/`, and runtime enforcement extension at `.pi/extensions/cog.ts` using Pi's `tool_call` hooks
+
+### Changed
+
+- `cog init` no longer prompts "Allow all Cog tools without prompting?" — tool permissions are now installed automatically for agents that support them
+
+### Fixed
+
+- MCP hang caused by blocking pipe read in the file watcher: the read end of the watcher pipe was not set to non-blocking, so `drainOne()` would block forever when the pipe was empty while holding the runtime mutex, deadlocking all subsequent tool calls
+
 ## [0.19.0] - 2026-03-16
 
 ### Added
@@ -523,6 +537,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GitHub Actions workflow for automated releases and Homebrew tap updates
 - Homebrew installation via `trycog/tap/cog`
 
+[0.20.0]: https://github.com/trycog/cog-cli/releases/tag/v0.20.0
 [0.19.0]: https://github.com/trycog/cog-cli/releases/tag/v0.19.0
 [0.18.1]: https://github.com/trycog/cog-cli/releases/tag/v0.18.1
 [0.18.0]: https://github.com/trycog/cog-cli/releases/tag/v0.18.0
