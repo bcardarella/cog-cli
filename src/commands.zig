@@ -1177,6 +1177,62 @@ fn writeClientContextManifest(
 
 // ── Doctor Command ──────────────────────────────────────────────────────
 
+const RemoteStats = struct {
+    engrams: i64,
+    synapses: i64,
+};
+
+fn parseRemoteStats(allocator: std.mem.Allocator, body: []const u8) ?RemoteStats {
+    // The MCP response wraps the tool result in {"result":{"content":[{"type":"text","text":"..."}]}}
+    const parsed = json.parseFromSlice(json.Value, allocator, body, .{}) catch return null;
+    defer parsed.deinit();
+
+    // Navigate: result -> content -> [0] -> text
+    const result_obj = if (parsed.value == .object) parsed.value.object.get("result") orelse return null else return null;
+    const content = if (result_obj == .object) result_obj.object.get("content") orelse return null else return null;
+    const items = if (content == .array) content.array.items else return null;
+    if (items.len == 0) return null;
+    const first = items[0];
+    const text = if (first == .object) (if (first.object.get("text")) |t| (if (t == .string) t.string else null) else null) else null;
+    const stats_text = text orelse return null;
+
+    // Parse "Engrams: 123" and "Synapses: 456" from the text
+    var engrams: i64 = -1;
+    var synapses: i64 = -1;
+    var lines = std.mem.splitScalar(u8, stats_text, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "Engrams:")) |pos| {
+            const after = std.mem.trim(u8, line[pos + "Engrams:".len ..], &std.ascii.whitespace);
+            // Take first number (before any parenthetical)
+            var num_end: usize = 0;
+            for (after) |c| {
+                if (std.ascii.isDigit(c)) {
+                    num_end += 1;
+                } else break;
+            }
+            if (num_end > 0) {
+                engrams = std.fmt.parseInt(i64, after[0..num_end], 10) catch -1;
+            }
+        }
+        if (std.mem.indexOf(u8, line, "Synapses:")) |pos| {
+            const after = std.mem.trim(u8, line[pos + "Synapses:".len ..], &std.ascii.whitespace);
+            var num_end: usize = 0;
+            for (after) |c| {
+                if (std.ascii.isDigit(c)) {
+                    num_end += 1;
+                } else break;
+            }
+            if (num_end > 0) {
+                synapses = std.fmt.parseInt(i64, after[0..num_end], 10) catch -1;
+            }
+        }
+    }
+
+    if (engrams >= 0 and synapses >= 0) return .{ .engrams = engrams, .synapses = synapses };
+    if (engrams >= 0) return .{ .engrams = engrams, .synapses = 0 };
+    return null;
+}
+
 pub fn doctor(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     if (hasFlag(args, "--help") or hasFlag(args, "-h")) {
         printCommandHelp(help.doctor);
@@ -1325,26 +1381,33 @@ pub fn doctor(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
                 };
                 defer db.close();
 
-                // Count engrams
-                var stmt = db.prepare("SELECT count(*) FROM engrams") catch {
-                    printErr("    " ++ red ++ cross ++ reset ++ " Database: query failed\n");
-                    failures += 1;
-                    break :mem_check;
+                // Count engrams and synapses
+                const engram_count = blk_e: {
+                    var stmt = db.prepare("SELECT count(*) FROM engrams") catch break :blk_e @as(i64, -1);
+                    defer stmt.finalize();
+                    if (stmt.step()) |result| {
+                        if (result == .row) break :blk_e stmt.columnInt(0);
+                    } else |_| {}
+                    break :blk_e @as(i64, -1);
                 };
-                defer stmt.finalize();
+                const synapse_count = blk_s: {
+                    var stmt = db.prepare("SELECT count(*) FROM synapses") catch break :blk_s @as(i64, -1);
+                    defer stmt.finalize();
+                    if (stmt.step()) |result| {
+                        if (result == .row) break :blk_s stmt.columnInt(0);
+                    } else |_| {}
+                    break :blk_s @as(i64, -1);
+                };
 
-                if (stmt.step()) |result| {
-                    if (result == .row) {
-                        const count = stmt.columnInt(0);
-                        var count_buf: [128]u8 = undefined;
-                        const count_msg = std.fmt.bufPrint(&count_buf, "    " ++ cyan ++ check ++ reset ++ " Database: {d} engrams\n", .{count}) catch "    " ++ cyan ++ check ++ reset ++ " Database: accessible\n";
-                        printErr(count_msg);
-                        passed += 1;
-                    } else {
-                        printErr("    " ++ cyan ++ check ++ reset ++ " Database: accessible\n");
-                        passed += 1;
-                    }
-                } else |_| {
+                if (engram_count >= 0) {
+                    var count_buf: [192]u8 = undefined;
+                    const count_msg = if (synapse_count >= 0)
+                        std.fmt.bufPrint(&count_buf, "    " ++ cyan ++ check ++ reset ++ " Database: {d} engrams, {d} synapses\n", .{ engram_count, synapse_count }) catch "    " ++ cyan ++ check ++ reset ++ " Database: accessible\n"
+                    else
+                        std.fmt.bufPrint(&count_buf, "    " ++ cyan ++ check ++ reset ++ " Database: {d} engrams\n", .{engram_count}) catch "    " ++ cyan ++ check ++ reset ++ " Database: accessible\n";
+                    printErr(count_msg);
+                    passed += 1;
+                } else {
                     printErr("    " ++ red ++ cross ++ reset ++ " Database: query failed\n");
                     failures += 1;
                 }
@@ -1358,11 +1421,32 @@ pub fn doctor(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
             passed += 1;
             debug_log.log("doctor: remote brain", .{});
 
-            // Check API key
+            // Check API key and fetch stats
             if (config_mod.getApiKey(allocator)) |key| {
-                allocator.free(key);
+                defer allocator.free(key);
                 printErr("    " ++ cyan ++ check ++ reset ++ " API key configured\n");
                 passed += 1;
+
+                // Try to fetch stats from remote brain (best-effort)
+                remote_stats: {
+                    const api_url = config_mod.extractApiUrl(allocator, url) catch break :remote_stats;
+                    defer allocator.free(api_url);
+
+                    const endpoint = std.fmt.allocPrint(allocator, "{s}/mcp", .{api_url}) catch break :remote_stats;
+                    defer allocator.free(endpoint);
+
+                    debug_log.log("doctor: fetching remote stats from {s}", .{endpoint});
+                    const resp = client.mcpCallToolQuiet(allocator, endpoint, key, null, "stats", "{}") catch break :remote_stats;
+                    defer allocator.free(resp.body);
+                    if (resp.session_id) |sid| allocator.free(sid);
+
+                    if (parseRemoteStats(allocator, resp.body)) |stats| {
+                        var stats_buf: [192]u8 = undefined;
+                        const stats_msg = std.fmt.bufPrint(&stats_buf, "    " ++ cyan ++ check ++ reset ++ " Stats: {d} engrams, {d} synapses\n", .{ stats.engrams, stats.synapses }) catch break :remote_stats;
+                        printErr(stats_msg);
+                        passed += 1;
+                    }
+                }
             } else |_| {
                 printErr("    " ++ red ++ cross ++ reset ++ " COG_API_KEY not set\n");
                 failures += 1;
@@ -1377,17 +1461,25 @@ pub fn doctor(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
 
     printErr("\n" ++ cyan ++ bold ++ "  Code Intelligence" ++ reset ++ "\n");
 
-    switch (code_intel.queryIndexStatusForRuntime(allocator)) {
-        .ready => {
-            printErr("    " ++ cyan ++ check ++ reset ++ " Index ready\n");
-            passed += 1;
-            debug_log.log("doctor: code index ready", .{});
-        },
-        .unavailable => {
-            printErr("    " ++ yellow ++ "!" ++ reset ++ " Index unavailable\n");
-            warnings += 1;
-            debug_log.log("doctor: code index unavailable", .{});
-        },
+    if (code_intel.queryIndexInfo(allocator)) |info| {
+        // Format file size
+        var size_buf: [64]u8 = undefined;
+        const size_str = if (info.file_size >= 1024 * 1024)
+            std.fmt.bufPrint(&size_buf, "{d:.1} MB", .{@as(f64, @floatFromInt(info.file_size)) / (1024.0 * 1024.0)}) catch "?"
+        else if (info.file_size >= 1024)
+            std.fmt.bufPrint(&size_buf, "{d:.1} KB", .{@as(f64, @floatFromInt(info.file_size)) / 1024.0}) catch "?"
+        else
+            std.fmt.bufPrint(&size_buf, "{d} B", .{info.file_size}) catch "?";
+
+        var msg_buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "    " ++ cyan ++ check ++ reset ++ " Index ready ({d} files, {s})\n", .{ info.document_count, size_str }) catch "    " ++ cyan ++ check ++ reset ++ " Index ready\n";
+        printErr(msg);
+        passed += 1;
+        debug_log.log("doctor: code index ready, {d} docs, {d} bytes", .{ info.document_count, info.file_size });
+    } else {
+        printErr("    " ++ yellow ++ "!" ++ reset ++ " Index unavailable\n");
+        warnings += 1;
+        debug_log.log("doctor: code index unavailable", .{});
     }
 
     // ── 4. Extensions ──────────────────────────────────────────────────

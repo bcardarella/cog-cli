@@ -180,7 +180,7 @@ pub fn resolveBrainUrl(allocator: std.mem.Allocator, cog_content: []const u8) ![
     return error.InvalidCogUrl;
 }
 
-fn extractApiUrl(allocator: std.mem.Allocator, url: []const u8) ![]const u8 {
+pub fn extractApiUrl(allocator: std.mem.Allocator, url: []const u8) ![]const u8 {
     // Expect https://host/user/brain — insert /api/v1 after host
     const https_prefix = "https://";
     if (!std.mem.startsWith(u8, url, https_prefix)) return error.InvalidCogUrl;

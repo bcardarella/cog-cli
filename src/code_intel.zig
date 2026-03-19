@@ -1082,32 +1082,50 @@ pub const QueryIndexStatus = enum {
     unavailable,
 };
 
+pub const IndexInfo = struct {
+    file_size: u64,
+    document_count: usize,
+};
+
 pub fn queryIndexStatusForRuntime(allocator: std.mem.Allocator) QueryIndexStatus {
+    const info = queryIndexInfo(allocator);
+    return if (info != null) .ready else .unavailable;
+}
+
+pub fn queryIndexInfo(allocator: std.mem.Allocator) ?IndexInfo {
     const index_path = getIndexPathQuiet(allocator) catch {
-        debug_log.log("queryIndexStatusForRuntime: missing .cog/index.scip", .{});
-        return .unavailable;
+        debug_log.log("queryIndexInfo: missing .cog/index.scip", .{});
+        return null;
     };
     defer allocator.free(index_path);
 
     const file = std.fs.openFileAbsolute(index_path, .{}) catch {
-        debug_log.log("queryIndexStatusForRuntime: index file not readable", .{});
-        return .unavailable;
+        debug_log.log("queryIndexInfo: index file not readable", .{});
+        return null;
     };
     defer file.close();
 
+    const stat = file.stat() catch {
+        debug_log.log("queryIndexInfo: failed to stat index", .{});
+        return null;
+    };
+    const file_size = stat.size;
+
     const data = file.readToEndAlloc(allocator, 256 * 1024 * 1024) catch {
-        debug_log.log("queryIndexStatusForRuntime: failed to read index", .{});
-        return .unavailable;
+        debug_log.log("queryIndexInfo: failed to read index", .{});
+        return null;
     };
     defer allocator.free(data);
 
     var index = scip.decode(allocator, data) catch {
-        debug_log.log("queryIndexStatusForRuntime: failed to decode index", .{});
-        return .unavailable;
+        debug_log.log("queryIndexInfo: failed to decode index", .{});
+        return null;
     };
-    defer scip.freeIndex(allocator, &index);
+    const doc_count = index.documents.len;
+    scip.freeIndex(allocator, &index);
 
-    return .ready;
+    debug_log.log("queryIndexInfo: {d} documents, {d} bytes", .{ doc_count, file_size });
+    return .{ .file_size = file_size, .document_count = doc_count };
 }
 
 // ── Commands ────────────────────────────────────────────────────────────

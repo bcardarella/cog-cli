@@ -140,6 +140,107 @@ pub fn mcpCall(
     };
 }
 
+/// Like mcpCallTool but does not print error messages to stderr.
+pub fn mcpCallToolQuiet(
+    allocator: std.mem.Allocator,
+    endpoint: []const u8,
+    api_key: []const u8,
+    session_id: ?[]const u8,
+    tool_name: []const u8,
+    arguments_json: []const u8,
+) !McpResponse {
+    var aw: Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    var s: json.Stringify = .{ .writer = &aw.writer };
+
+    const parsed_arguments = try json.parseFromSlice(json.Value, allocator, arguments_json, .{});
+    defer parsed_arguments.deinit();
+
+    try s.beginObject();
+    try s.objectField("jsonrpc");
+    try s.write("2.0");
+    try s.objectField("id");
+    try s.write(@as(i64, 1));
+    try s.objectField("method");
+    try s.write("tools/call");
+    try s.objectField("params");
+    try s.beginObject();
+    try s.objectField("name");
+    try s.write(tool_name);
+    try s.objectField("arguments");
+    try s.write(parsed_arguments.value);
+    try s.endObject();
+    try s.endObject();
+
+    const body = try aw.toOwnedSlice();
+    defer allocator.free(body);
+    return mcpCallQuiet(allocator, endpoint, api_key, session_id, body);
+}
+
+fn mcpCallQuiet(
+    allocator: std.mem.Allocator,
+    endpoint: []const u8,
+    api_key: []const u8,
+    session_id: ?[]const u8,
+    body: []const u8,
+) !McpResponse {
+    const auth_header = try std.fmt.allocPrint(allocator, "Authorization: Bearer {s}", .{api_key});
+    defer allocator.free(auth_header);
+
+    var header_count: usize = 3;
+    var session_header: []const u8 = "";
+    defer if (session_id != null) allocator.free(session_header);
+
+    if (session_id) |sid| {
+        session_header = try std.fmt.allocPrint(allocator, "mcp-session-id: {s}", .{sid});
+        header_count = 4;
+    }
+
+    var headers_buf: [4][]const u8 = undefined;
+    headers_buf[0] = auth_header;
+    headers_buf[1] = "Content-Type: application/json";
+    headers_buf[2] = "Accept: application/json";
+    if (session_id != null) {
+        headers_buf[3] = session_header;
+    }
+
+    debug_log.log("mcpCallQuiet: {s}", .{endpoint});
+    const result = curl.postCapturingHeaders(allocator, endpoint, headers_buf[0..header_count], body) catch {
+        debug_log.log("mcpCallQuiet: connection failed", .{});
+        return error.HttpError;
+    };
+    defer allocator.free(result.body);
+
+    var new_session_id: ?[]const u8 = null;
+    if (result.headers.len > 0) {
+        var lines = std.mem.splitScalar(u8, result.headers, '\n');
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, &[_]u8{ '\r', ' ', '\t' });
+            const prefix = "mcp-session-id:";
+            if (trimmed.len > prefix.len and std.ascii.startsWithIgnoreCase(trimmed, prefix)) {
+                const val = std.mem.trim(u8, trimmed[prefix.len..], &[_]u8{ ' ', '\t' });
+                if (val.len > 0) {
+                    new_session_id = try allocator.dupe(u8, val);
+                }
+                break;
+            }
+        }
+    }
+    allocator.free(result.headers);
+    errdefer if (new_session_id) |sid| allocator.free(sid);
+
+    if (result.status_code != 200) {
+        if (new_session_id) |sid| allocator.free(sid);
+        debug_log.log("mcpCallQuiet: status {d}", .{result.status_code});
+        return error.HttpError;
+    }
+
+    return .{
+        .body = try allocator.dupe(u8, result.body),
+        .session_id = new_session_id,
+    };
+}
+
 pub fn post(
     allocator: std.mem.Allocator,
     url: []const u8,
