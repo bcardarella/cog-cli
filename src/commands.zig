@@ -16,6 +16,7 @@ const paths = @import("paths.zig");
 const code_intel = @import("code_intel.zig");
 const extensions_mod = @import("extensions.zig");
 const memory_mod = @import("memory.zig");
+const memory_schema = @import("memory_schema.zig");
 const sqlite = @import("sqlite.zig");
 
 const Config = config_mod.Config;
@@ -1389,6 +1390,13 @@ pub fn doctor(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
                     break :mem_check;
                 };
                 defer db.close();
+
+                // Ensure schema exists (brain.db may have been created but not yet initialized by the MCP server)
+                memory_schema.ensureSchema(&db) catch {
+                    printErr("    " ++ red ++ cross ++ reset ++ " Database: schema initialization failed\n");
+                    failures += 1;
+                    break :mem_check;
+                };
 
                 // Count engrams and synapses
                 const engram_count = blk_e: {
