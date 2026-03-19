@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-03-19
+
+### Fixed
+
+- False-positive hook blocks on Bash commands containing `rg`, `grep`, or `find` as substrings (e.g. `llvmorg` in a URL matched `rg`) — added word boundaries to the shell search guard regex in Claude Code and Gemini CLI hooks
+
 ## [0.20.0] - 2026-03-17
 
 ### Added
@@ -537,6 +543,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GitHub Actions workflow for automated releases and Homebrew tap updates
 - Homebrew installation via `trycog/tap/cog`
 
+[0.20.1]: https://github.com/trycog/cog-cli/releases/tag/v0.20.1
 [0.20.0]: https://github.com/trycog/cog-cli/releases/tag/v0.20.0
 [0.19.0]: https://github.com/trycog/cog-cli/releases/tag/v0.19.0
 [0.18.1]: https://github.com/trycog/cog-cli/releases/tag/v0.18.1
