@@ -376,6 +376,8 @@ pub const LogServer = struct {
         const pattern = getStr(args, "pattern") orelse
             return try self.allocator.dupe(u8, "Error: 'pattern' is required");
         const level_str = getStr(args, "level");
+        const time_start = getStr(args, "time_start");
+        const time_end = getStr(args, "time_end");
         const max_results: usize = getInt(args, "max_results") orelse 50;
         const context_lines: usize = getInt(args, "context_lines") orelse 0;
 
@@ -410,7 +412,7 @@ pub const LogServer = struct {
             return try self.allocator.dupe(u8, "File is empty.");
         }
 
-        return try searchLines(self.allocator, file_data[0..bytes_read], pattern, min_level, max_results, context_lines, session.detected_format);
+        return try searchLines(self.allocator, file_data[0..bytes_read], pattern, min_level, time_start, time_end, max_results, context_lines, session.detected_format);
     }
 
     // ── log_errors ──────────────────────────────────────────────────────
@@ -421,6 +423,7 @@ pub const LogServer = struct {
         const session_id = getStr(args, "session") orelse
             return try self.allocator.dupe(u8, "Error: 'session' is required");
         const max_errors: usize = getInt(args, "max_errors") orelse 20;
+        const since = getStr(args, "since");
 
         debug_log.log("log_errors: session={s} max_errors={d}", .{ session_id, max_errors });
 
@@ -445,7 +448,7 @@ pub const LogServer = struct {
             return try std.fmt.allocPrint(self.allocator, "Error: read failed: {s}", .{@errorName(e)});
         };
 
-        return try extractErrors(self.allocator, file_data[0..bytes_read], max_errors, session.detected_format);
+        return try extractErrors(self.allocator, file_data[0..bytes_read], max_errors, since, session.detected_format);
     }
 
     // ── log_overview ────────────────────────────────────────────────────
@@ -603,14 +606,14 @@ pub const tool_definitions = [_]ToolDef{
         .name = "log_search",
         .description = "Search entire log file for matching lines. Does NOT advance the tail cursor. Supports level filtering and time range filtering.",
         .input_schema =
-        \\{"type":"object","properties":{"session":{"type":"string","description":"Session ID from log_watch"},"pattern":{"type":"string","description":"Text pattern to search for (substring match)"},"level":{"type":"string","description":"Minimum log level filter"},"max_results":{"type":"number","description":"Maximum results (default: 50)"},"context_lines":{"type":"number","description":"Lines of context around each match (default: 0)"}},"required":["session","pattern"]}
+        \\{"type":"object","properties":{"session":{"type":"string","description":"Session ID from log_watch"},"pattern":{"type":"string","description":"Text pattern to search for (substring match)"},"level":{"type":"string","description":"Minimum log level filter"},"time_start":{"type":"string","description":"Only include lines containing timestamps >= this value (prefix match, e.g. '2024-01-15 10:00')"},"time_end":{"type":"string","description":"Only include lines containing timestamps <= this value (prefix match)"},"max_results":{"type":"number","description":"Maximum results (default: 50)"},"context_lines":{"type":"number","description":"Lines of context around each match (default: 0)"}},"required":["session","pattern"]}
         ,
     },
     .{
         .name = "log_errors",
         .description = "Extract and deduplicate errors from the log file. Groups by error fingerprint, collects stack traces, reports counts and first/last occurrence.",
         .input_schema =
-        \\{"type":"object","properties":{"session":{"type":"string","description":"Session ID from log_watch"},"max_errors":{"type":"number","description":"Maximum unique errors to return (default: 20)"}},"required":["session"]}
+        \\{"type":"object","properties":{"session":{"type":"string","description":"Session ID from log_watch"},"max_errors":{"type":"number","description":"Maximum unique errors to return (default: 20)"},"since":{"type":"string","description":"Only include errors from lines containing timestamps >= this value (prefix match, e.g. '2024-01-15')"}},"required":["session"]}
         ,
     },
     .{
@@ -858,7 +861,7 @@ fn filterLines(allocator: Allocator, data: []const u8, min_level: ?LogLevel, pat
 
 // ── Search ──────────────────────────────────────────────────────────────
 
-fn searchLines(allocator: Allocator, data: []const u8, pattern: []const u8, min_level: ?LogLevel, max_results: usize, context_lines: usize, format: LogFormat) ![]const u8 {
+fn searchLines(allocator: Allocator, data: []const u8, pattern: []const u8, min_level: ?LogLevel, time_start: ?[]const u8, time_end: ?[]const u8, max_results: usize, context_lines: usize, format: LogFormat) ![]const u8 {
     // Collect lines
     var lines_list: std.ArrayListUnmanaged([]const u8) = .empty;
     defer lines_list.deinit(allocator);
@@ -886,6 +889,14 @@ fn searchLines(allocator: Allocator, data: []const u8, pattern: []const u8, min_
         if (min_level) |ml| {
             const line_level = extractLevel(line, format) orelse .info;
             if (!line_level.meetsMinimum(ml)) continue;
+        }
+
+        // Time range filter: compare the timestamp prefix in the line
+        if (time_start) |ts| {
+            if (!lineTimestampAfter(line, ts)) continue;
+        }
+        if (time_end) |te| {
+            if (!lineTimestampBefore(line, te)) continue;
         }
 
         result_count += 1;
@@ -938,7 +949,7 @@ const ErrorEntry = struct {
     last_line: usize,
 };
 
-fn extractErrors(allocator: Allocator, data: []const u8, max_errors: usize, format: LogFormat) ![]const u8 {
+fn extractErrors(allocator: Allocator, data: []const u8, max_errors: usize, since: ?[]const u8, format: LogFormat) ![]const u8 {
     var all_lines: std.ArrayListUnmanaged([]const u8) = .empty;
     defer all_lines.deinit(allocator);
 
@@ -968,6 +979,11 @@ fn extractErrors(allocator: Allocator, data: []const u8, max_errors: usize, form
 
         const level = extractLevel(line, format) orelse continue;
         if (!level.meetsMinimum(.err)) continue;
+
+        // Apply `since` filter: skip errors before the given timestamp
+        if (since) |ts| {
+            if (!lineTimestampAfter(line, ts)) continue;
+        }
 
         // Collect stack trace lines
         var stack_end = i + 1;
@@ -1174,6 +1190,52 @@ fn countLines(data: []const u8) usize {
     }
     if (data[data.len - 1] != '\n') count += 1;
     return count;
+}
+
+/// Extract a timestamp-like prefix from a line for comparison.
+/// Returns the first sequence of digits, dashes, colons, dots, and 'T' characters
+/// found at or near the start of the line. Uses prefix/lexicographic comparison.
+fn extractTimestampPrefix(line: []const u8) ?[]const u8 {
+    if (line.len == 0) return null;
+    // Skip optional leading bracket or whitespace
+    var start: usize = 0;
+    if (line[0] == '[') start = 1;
+    while (start < line.len and line[start] == ' ') : (start += 1) {}
+    if (start >= line.len) return null;
+
+    // Must start with a digit
+    if (!std.ascii.isDigit(line[start])) return null;
+
+    var end = start;
+    while (end < line.len) {
+        const c = line[end];
+        if (std.ascii.isDigit(c) or c == '-' or c == ':' or c == 'T' or c == '.' or c == ',' or c == ' ' or c == '+' or c == 'Z') {
+            end += 1;
+        } else {
+            break;
+        }
+    }
+    // Trim trailing spaces
+    while (end > start and line[end - 1] == ' ') : (end -= 1) {}
+
+    if (end > start) return line[start..end];
+    return null;
+}
+
+/// Returns true if the line's timestamp is >= the given prefix (lexicographic).
+fn lineTimestampAfter(line: []const u8, ts_prefix: []const u8) bool {
+    const ts = extractTimestampPrefix(line) orelse return true; // no timestamp → include
+    const cmp_len = @min(ts.len, ts_prefix.len);
+    const order = std.mem.order(u8, ts[0..cmp_len], ts_prefix[0..cmp_len]);
+    return order != .lt;
+}
+
+/// Returns true if the line's timestamp is <= the given prefix (lexicographic).
+fn lineTimestampBefore(line: []const u8, ts_prefix: []const u8) bool {
+    const ts = extractTimestampPrefix(line) orelse return true; // no timestamp → include
+    const cmp_len = @min(ts.len, ts_prefix.len);
+    const order = std.mem.order(u8, ts[0..cmp_len], ts_prefix[0..cmp_len]);
+    return order != .gt;
 }
 
 fn isWordChar(c: u8) bool {
@@ -1408,7 +1470,7 @@ test "log_errors deduplication" {
         \\2024-01-15 10:00:03 ERROR File not found: /tmp/data.csv
     ;
 
-    const result = try extractErrors(std.testing.allocator, data, 20, .timestamped);
+    const result = try extractErrors(std.testing.allocator, data, 20, null, .timestamped);
     defer std.testing.allocator.free(result);
 
     try std.testing.expect(std.mem.indexOf(u8, result, "2 unique errors") != null);
@@ -1417,7 +1479,7 @@ test "log_errors deduplication" {
 test "log_search with context" {
     const data = "line1\nline2\nERROR here\nline4\nline5\n";
 
-    const result = try searchLines(std.testing.allocator, data, "ERROR", null, 50, 1, .plaintext);
+    const result = try searchLines(std.testing.allocator, data, "ERROR", null, null, null, 50, 1, .plaintext);
     defer std.testing.allocator.free(result);
 
     try std.testing.expect(std.mem.indexOf(u8, result, "line2") != null);
@@ -1434,4 +1496,34 @@ test "filter by level" {
     try std.testing.expect(std.mem.indexOf(u8, result.lines, "ERROR") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.lines, "WARN") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.lines, "DEBUG") == null);
+}
+
+test "search with time range" {
+    const data = "2024-01-15 10:00:00 INFO early\n2024-01-15 11:00:00 INFO middle\n2024-01-15 12:00:00 INFO late\n";
+
+    // Only lines after 11:00
+    const result = try searchLines(std.testing.allocator, data, "INFO", null, "2024-01-15 11:00", null, 50, 0, .timestamped);
+    defer std.testing.allocator.free(result);
+
+    try std.testing.expect(std.mem.indexOf(u8, result, "middle") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "late") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "early") == null);
+}
+
+test "errors with since filter" {
+    const data = "2024-01-15 10:00:00 ERROR old error\n2024-01-15 12:00:00 ERROR new error\n";
+
+    const result = try extractErrors(std.testing.allocator, data, 20, "2024-01-15 11:00", .timestamped);
+    defer std.testing.allocator.free(result);
+
+    // Should only find the new error
+    try std.testing.expect(std.mem.indexOf(u8, result, "1 unique errors") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "new error") != null);
+}
+
+test "timestamp prefix extraction" {
+    try std.testing.expectEqualStrings("2024-01-15 10:00:00", extractTimestampPrefix("2024-01-15 10:00:00 INFO test").?);
+    try std.testing.expectEqualStrings("2024-01-15T10:00:00.123Z", extractTimestampPrefix("2024-01-15T10:00:00.123Z INFO test").?);
+    try std.testing.expect(extractTimestampPrefix("INFO no timestamp") == null);
+    try std.testing.expectEqualStrings("15", extractTimestampPrefix("[15/Oct/2024:10:00:00") orelse "");
 }
