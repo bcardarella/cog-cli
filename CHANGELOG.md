@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-03-19
+
+### Added
+
+- `cog doctor` now shows index file count and size under Code Intelligence (e.g. "Index ready (63 files, 7.3 MB)")
+- `cog doctor` now shows engram and synapse counts under Memory for both local and remote brains
+- Batch support for `mem_get` and `mem_flush` via `engram_ids` array parameter
+- Swift language extension ([cog-swift](https://github.com/trycog/cog-swift)) documented in README
+
+### Changed
+
+- `mem:bootstrap` now groups files into subsystem clusters using the SCIP dependency graph and invokes the agent once per subsystem instead of once per file, producing 2-5 architectural concepts per cluster instead of 2-4 per file
+- Bootstrap prompt rewritten to focus on design decisions, constraints, and cross-cutting patterns with explicit anti-patterns against per-file and per-function granularity
+- Bootstrap checkpoint format upgraded to v2 (tracks subsystem IDs); old v1 checkpoints are discarded on next run
+- Bootstrap Phase 2 association narrowed to cross-subsystem pairs only
+- All batch-capable memory tools now require array parameters only: `items` for learn/associate, `queries` for recall, `engram_ids` for get/connections/reinforce/flush — single-item params removed
+- Subagent prompts (cog-mem, cog-mem-validate) updated with explicit batching rules referencing array-only API
+- Main system prompt (PROMPT.md) updated with array-only memory tool guidance
+
+### Removed
+
+- Debug daemon check removed from `cog doctor` — the daemon starts on demand and its socket status is not a useful diagnostic
+
 ## [0.20.1] - 2026-03-19
 
 ### Fixed
@@ -543,6 +566,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GitHub Actions workflow for automated releases and Homebrew tap updates
 - Homebrew installation via `trycog/tap/cog`
 
+[0.21.0]: https://github.com/trycog/cog-cli/releases/tag/v0.21.0
 [0.20.1]: https://github.com/trycog/cog-cli/releases/tag/v0.20.1
 [0.20.0]: https://github.com/trycog/cog-cli/releases/tag/v0.20.0
 [0.19.0]: https://github.com/trycog/cog-cli/releases/tag/v0.19.0
