@@ -375,6 +375,13 @@ const cli_agents = [_]CliAgent{
         .cmd_suffix = &.{ "--format", "json" },
         .env_unset = &.{},
     },
+    .{
+        .id = "pi",
+        .display_name = "Pi",
+        .cmd_prefix = &.{ "pi", "-p" },
+        .cmd_suffix = &.{ "--mode", "json" },
+        .env_unset = &.{},
+    },
 };
 
 const CliMenuEntry = struct {
@@ -3731,7 +3738,7 @@ test "loadCheckpoint missing file" {
 }
 
 test "cli_agents count" {
-    try std.testing.expectEqual(@as(usize, 6), cli_agents.len);
+    try std.testing.expectEqual(@as(usize, 7), cli_agents.len);
 }
 
 test "cli_agents have non-empty prefix" {
