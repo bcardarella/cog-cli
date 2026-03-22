@@ -60,8 +60,8 @@ case "$tool_name" in
       deny "Cog memory workflow: delegate to the cog-mem sub-agent first to check memory before using code exploration tools. Memory may already have the answer."
     fi
     ;;
-  Grep|Glob)
-    deny "Use Cog code intelligence tools before raw file search when the Cog MCP server is configured."
+  Grep)
+    deny "Use Cog code intelligence tools before raw text search when the Cog MCP server is configured."
     ;;
   Bash)
     if printf '%s' "$payload" | grep -Eq '"command"[[:space:]]*:[[:space:]]*"[^"]*\b(rg|grep|find)\b[^"]*"'; then

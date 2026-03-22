@@ -2099,7 +2099,7 @@ test "writeRuntimePolicyAsset creates Claude hook asset" {
 
             try std.testing.expect(std.mem.indexOf(u8, content, "transcript_path") != null);
             try std.testing.expect(std.mem.indexOf(u8, content, "mcp__cog__code_explore") != null);
-            try std.testing.expect(std.mem.indexOf(u8, content, "Use Cog code intelligence tools before raw file search") != null);
+            try std.testing.expect(std.mem.indexOf(u8, content, "Use Cog code intelligence tools before raw text search") != null);
             try std.testing.expect(std.mem.indexOf(u8, content, "Cog memory quality") != null);
             try std.testing.expect(std.mem.indexOf(u8, content, "delegate to the cog-mem sub-agent first to check memory") != null);
         }

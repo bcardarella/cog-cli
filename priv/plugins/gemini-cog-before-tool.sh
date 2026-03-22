@@ -10,8 +10,8 @@ fi
 tool_name=$(printf '%s' "$payload" | sed -n 's/.*"tool_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
 
 case "$tool_name" in
-  grep|glob|search_file_content)
-    printf '%s\n' "Cog policy: use Cog code intelligence tools before raw file search when the Cog MCP server is configured." >&2
+  grep|search_file_content)
+    printf '%s\n' "Cog policy: use Cog code intelligence tools before raw text search when the Cog MCP server is configured." >&2
     exit 2
     ;;
   run_shell_command)

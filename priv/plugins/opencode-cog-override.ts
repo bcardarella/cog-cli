@@ -1,4 +1,4 @@
-const blockedFallbackTools = new Set(["glob", "grep"])
+const blockedFallbackTools = new Set(["grep"])
 const architectureModes = new Set(["overview", "imports", "contains", "calls", "callers"])
 const sessionState = new Map()
 const shellSearchPattern = /(^|\W)(git\s+grep|rg|grep|find)(\W|$)/i

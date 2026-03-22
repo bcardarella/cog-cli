@@ -16,7 +16,7 @@ const memoryWriteTools = new Set([
 ])
 const memoryReviewTools = new Set(['cog_mem_list_short_term'])
 const memoryValidationTools = new Set(['cog_mem_reinforce', 'cog_mem_verify', 'cog_mem_flush'])
-const deepExplorationTools = new Set(['cog_code_explore', 'cog_code_query', 'grep', 'glob', 'search_file_content'])
+const deepExplorationTools = new Set(['cog_code_explore', 'cog_code_query', 'grep', 'search_file_content'])
 
 const sessionState = {
   didRecall: false,

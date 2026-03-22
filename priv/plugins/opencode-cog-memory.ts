@@ -31,7 +31,6 @@ const orientationTools = new Set(["read", "list"])
 const deepExplorationTools = new Set([
   "cog_code_explore",
   "cog_code_query",
-  "glob",
   "grep",
 ])
 
