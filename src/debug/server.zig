@@ -485,6 +485,7 @@ pub const DebugServer = struct {
         debug_log.log("DebugServer.callTool: acquiring mutex for {s}", .{tool_name});
         self.mutex.lock();
         defer {
+            debug_log.log("DebugServer.callTool: {s} completed", .{tool_name});
             self.mutex.unlock();
             debug_log.log("DebugServer.callTool: mutex released for {s}", .{tool_name});
         }
@@ -564,6 +565,7 @@ pub const DebugServer = struct {
         } else if (std.mem.eql(u8, tool_name, "debug_dap_request")) {
             return self.toolDapRequest(allocator, tool_args);
         } else {
+            debug_log.log("DebugServer.callTool: unknown tool {s}", .{tool_name});
             return .{ .err = .{ .code = METHOD_NOT_FOUND, .message = "Unknown tool" } };
         }
     }
@@ -920,6 +922,7 @@ pub const DebugServer = struct {
 
     fn toolLaunch(self: *DebugServer, allocator: std.mem.Allocator, args: ?json.Value) !ToolResult {
         serverLog("[toolLaunch] Entered toolLaunch", .{});
+        debug_log.log("toolLaunch: entered", .{});
         const a = args orelse return .{ .err = .{ .code = INVALID_PARAMS, .message = "Missing arguments" } };
         if (a != .object) return .{ .err = .{ .code = INVALID_PARAMS, .message = "Arguments must be object" } };
 
@@ -930,6 +933,7 @@ pub const DebugServer = struct {
         };
         defer config.deinit(allocator);
         serverLog("[toolLaunch] Config parsed: program={s} module={s}", .{ config.program, config.module orelse "(none)" });
+        debug_log.log("toolLaunch: program={s} language={s}", .{ config.program, config.language orelse "(auto)" });
 
         const client_pid: ?std.posix.pid_t = if (a.object.get("client_pid")) |v|
             (if (v == .integer) @as(std.posix.pid_t, @intCast(v.integer)) else null)
@@ -963,6 +967,8 @@ pub const DebugServer = struct {
         const debug_config = if (resolved_ext) |re| re.debug else null;
         const use_dap = if (debug_config) |dc| dc == .dap else false;
 
+        debug_log.log("toolLaunch: extension resolved, use_dap={}", .{use_dap});
+
         if (use_dap) {
             serverLog("[toolLaunch] Using DAP transport, creating proxy...", .{});
             const dap_proxy = @import("dap/proxy.zig");
@@ -981,17 +987,20 @@ pub const DebugServer = struct {
             var driver = proxy.activeDriver();
             driver.launch(allocator, config) catch |err| {
                 serverLog("[toolLaunch] driver.launch() FAILED: {s}", .{@errorName(err)});
+                debug_log.log("toolLaunch: DAP driver launch failed: {s}", .{@errorName(err)});
                 const msg = errorMessage(err);
                 self.dashboard.onError("debug_launch", msg);
                 return .{ .err = .{ .code = errorToCode(err), .message = msg } };
             };
             serverLog("[toolLaunch] driver.launch() succeeded", .{});
+            debug_log.log("toolLaunch: DAP driver launch succeeded", .{});
 
             const session_id = try self.session_manager.createSession(driver, client_pid, .terminate);
             if (self.session_manager.getSession(session_id)) |s| {
                 s.status = .stopped;
             }
             const display_name = if (config.program.len > 0) config.program else config.module orelse "unknown";
+            debug_log.log("toolLaunch: session created id={s} driver=dap", .{session_id});
             self.dashboard.onLaunch(session_id, display_name, "dap");
             self.emitLaunchEvent(session_id, display_name, "dap");
 
@@ -1005,17 +1014,21 @@ pub const DebugServer = struct {
                 allocator.destroy(engine);
             }
 
+            debug_log.log("toolLaunch: using native/DWARF engine", .{});
             var driver = engine.activeDriver();
             driver.launch(allocator, config) catch |err| {
+                debug_log.log("toolLaunch: DWARF driver launch failed: {s}", .{@errorName(err)});
                 const msg = errorMessage(err);
                 self.dashboard.onError("debug_launch", msg);
                 return .{ .err = .{ .code = errorToCode(err), .message = msg } };
             };
+            debug_log.log("toolLaunch: DWARF driver launch succeeded", .{});
 
             const session_id = try self.session_manager.createSession(driver, client_pid, .terminate);
             if (self.session_manager.getSession(session_id)) |ss| {
                 ss.status = .stopped;
             }
+            debug_log.log("toolLaunch: session created id={s} driver=native", .{session_id});
             self.dashboard.onLaunch(session_id, config.program, "native");
             self.emitLaunchEvent(session_id, config.program, "native");
 
@@ -1030,12 +1043,16 @@ pub const DebugServer = struct {
         const session_id_val = a.object.get("session_id") orelse return .{ .err = .{ .code = INVALID_PARAMS, .message = "Missing session_id" } };
         if (session_id_val != .string) return .{ .err = .{ .code = INVALID_PARAMS, .message = "session_id must be string" } };
 
+        debug_log.log("toolBreakpoint: session_id={s}", .{session_id_val.string});
+
         const session = self.session_manager.getSession(session_id_val.string) orelse
             return .{ .err = .{ .code = INVALID_PARAMS, .message = "Unknown session" } };
 
         const action_val = a.object.get("action") orelse return .{ .err = .{ .code = INVALID_PARAMS, .message = "Missing action" } };
         if (action_val != .string) return .{ .err = .{ .code = INVALID_PARAMS, .message = "action must be string" } };
         const action_str = action_val.string;
+
+        debug_log.log("toolBreakpoint: action={s}", .{action_str});
 
         if (std.mem.eql(u8, action_str, "set")) {
             const file_val = a.object.get("file") orelse return .{ .err = .{ .code = INVALID_PARAMS, .message = "Missing file for set" } };
@@ -1047,10 +1064,13 @@ pub const DebugServer = struct {
             const hit_condition = if (a.object.get("hit_condition")) |c| (if (c == .string) c.string else null) else null;
             const log_message = if (a.object.get("log_message")) |c| (if (c == .string) c.string else null) else null;
 
+            debug_log.log("toolBreakpoint: set file={s} line={d}", .{ file_val.string, @as(i64, line_val.integer) });
             const bp = session.driver.setBreakpointEx(allocator, file_val.string, @intCast(line_val.integer), condition, hit_condition, log_message) catch |err| {
+                debug_log.log("toolBreakpoint: set failed: {s}", .{@errorName(err)});
                 self.dashboard.onError("debug_breakpoint", @errorName(err));
                 return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
             };
+            debug_log.log("toolBreakpoint: set bp#{d} verified={}", .{ bp.id, bp.verified });
             self.dashboard.onBreakpoint("set", bp);
             self.emitBreakpointEvent(session_id_val.string, "set", bp);
 
@@ -1064,9 +1084,11 @@ pub const DebugServer = struct {
             if (bp_id_val != .integer) return .{ .err = .{ .code = INVALID_PARAMS, .message = "id must be integer" } };
 
             session.driver.removeBreakpoint(allocator, @intCast(bp_id_val.integer)) catch |err| {
+                debug_log.log("toolBreakpoint: remove bp#{d} failed: {s}", .{ @as(i64, bp_id_val.integer), @errorName(err) });
                 self.dashboard.onError("debug_breakpoint", @errorName(err));
                 return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
             };
+            debug_log.log("toolBreakpoint: removed bp#{d}", .{@as(i64, bp_id_val.integer)});
             self.dashboard.onBreakpoint("remove", .{
                 .id = @intCast(bp_id_val.integer),
                 .verified = false,
@@ -1083,9 +1105,11 @@ pub const DebugServer = struct {
             return okText(allocator, "Removed breakpoint #{d}.", .{@as(u32, @intCast(bp_id_val.integer))});
         } else if (std.mem.eql(u8, action_str, "list")) {
             const bps = session.driver.listBreakpoints(allocator) catch |err| {
+                debug_log.log("toolBreakpoint: list failed: {s}", .{@errorName(err)});
                 self.dashboard.onError("debug_breakpoint", @errorName(err));
                 return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
             };
+            debug_log.log("toolBreakpoint: listed {d} breakpoints", .{bps.len});
             self.dashboard.onBreakpoint("list", .{
                 .id = 0,
                 .verified = false,
@@ -1158,6 +1182,8 @@ pub const DebugServer = struct {
 
         const action_val = a.object.get("action") orelse return .{ .err = .{ .code = INVALID_PARAMS, .message = "Missing action" } };
         if (action_val != .string) return .{ .err = .{ .code = INVALID_PARAMS, .message = "action must be string" } };
+
+        debug_log.log("toolRun: session_id={s} action={s}", .{ session_id_val.string, action_val.string });
 
         // Handle goto separately — it dispatches through gotoFn, not runFn
         if (std.mem.eql(u8, action_val.string, "goto")) {
@@ -1271,8 +1297,11 @@ pub const DebugServer = struct {
 
         // Async path: return immediately with status:running
         if (timeout_ms <= 0) {
+            debug_log.log("toolRun: async (non-blocking) path, returning immediately", .{});
             return okText(allocator, "Session `{s}` is running in the background.", .{session_id_val.string});
         }
+
+        debug_log.log("toolRun: blocking path, timeout_ms={d}", .{timeout_ms});
 
         // Synchronous blocking path: release mutex, poll until done or timeout,
         // then re-acquire mutex before returning.
@@ -1294,6 +1323,7 @@ pub const DebugServer = struct {
                     // Completed successfully
                     if (pr.stop_state) |state| {
                         session.status = if (state.exit_code != null) .terminated else .stopped;
+                        debug_log.log("toolRun: stopped reason={s} exit_code={any}", .{ @tagName(state.stop_reason), state.exit_code });
                         self.dashboard.onRun(session_id_val.string, action_val.string, state);
                         self.emitStopEvent(session_id_val.string, action_val.string, state);
 
@@ -1306,6 +1336,7 @@ pub const DebugServer = struct {
                         return .{ .ok = stop_result };
                     }
                     // stop_state was null — shouldn't happen, treat as error
+                    debug_log.log("toolRun: completed but no stop state", .{});
                     pr.thread.join();
                     pr.deinit();
                     session.pending_run = null;
@@ -1314,6 +1345,7 @@ pub const DebugServer = struct {
                 } else if (status == 2) {
                     // Error
                     const err_msg = pr.error_msg orelse "unknown error";
+                    debug_log.log("toolRun: run error: {s}", .{err_msg});
                     session.status = .stopped;
 
                     pr.thread.join();
@@ -1329,6 +1361,7 @@ pub const DebugServer = struct {
 
             // Check timeout
             if (std.time.milliTimestamp() >= deadline_ms) {
+                debug_log.log("toolRun: timeout reached, sending pause", .{});
                 // Timeout: send pause to debuggee and return timeout status
                 session.driver.sendPause(allocator, null) catch {};
 
@@ -1598,6 +1631,11 @@ pub const DebugServer = struct {
 
         if (requireStopped(session)) |err_result| return err_result;
 
+        {
+            const expr_hint = if (a.object.get("expression")) |v| (if (v == .string) v.string else "(none)") else "(none)";
+            debug_log.log("toolInspect: session_id={s} expression={s}", .{ session_id_val.string, expr_hint });
+        }
+
         const request = types.InspectRequest{
             .expression = if (a.object.get("expression")) |v| (if (v == .string) v.string else null) else null,
             .variable_ref = if (a.object.get("variable_ref")) |v| (if (v == .integer) @as(u32, @intCast(v.integer)) else null) else null,
@@ -1607,10 +1645,12 @@ pub const DebugServer = struct {
         };
 
         const result_val = session.driver.inspect(allocator, request) catch |err| {
+            debug_log.log("toolInspect: inspect failed: {s}", .{@errorName(err)});
             self.dashboard.onError("debug_inspect", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
         defer result_val.deinit(allocator);
+        debug_log.log("toolInspect: result count={d} is_error={}", .{ result_val.children.len, result_val.is_error });
         self.dashboard.onInspect(
             session_id_val.string,
             if (request.expression) |e| e else "(scope)",
@@ -1639,6 +1679,7 @@ pub const DebugServer = struct {
         if (session_id_val != .string) return .{ .err = .{ .code = INVALID_PARAMS, .message = "session_id must be string" } };
 
         const session_id = session_id_val.string;
+        debug_log.log("toolStop: session_id={s}", .{session_id});
 
         const terminate_only = if (a.object.get("terminate_only")) |v| (v == .bool and v.bool) else false;
         const detach = if (a.object.get("detach")) |v| (v == .bool and v.bool) else false;
@@ -1680,6 +1721,7 @@ pub const DebugServer = struct {
         defer allocator.free(id_copy);
         _ = self.session_manager.destroySession(id_copy);
 
+        debug_log.log("toolStop: session {s} terminated", .{id_copy});
         return .{ .ok_static = "{\"stopped\":true}" };
     }
 
@@ -1924,6 +1966,7 @@ pub const DebugServer = struct {
         if (self.session_manager.getSession(session_id)) |s| {
             s.status = .stopped;
         }
+        debug_log.log("toolAttach: session created id={s} driver={s}", .{ session_id, driver_type_name });
         self.dashboard.onLaunch(session_id, "attached", driver_type_name);
         self.dashboard.onAttach(session_id, pid_val.integer);
         self.emitLaunchEvent(session_id, "attached", driver_type_name);
@@ -2106,13 +2149,17 @@ pub const DebugServer = struct {
         const session_id_val = a.object.get("session_id") orelse return .{ .err = .{ .code = INVALID_PARAMS, .message = "Missing session_id" } };
         if (session_id_val != .string) return .{ .err = .{ .code = INVALID_PARAMS, .message = "session_id must be string" } };
 
+        debug_log.log("toolModules: session_id={s}", .{session_id_val.string});
+
         const session = self.session_manager.getSession(session_id_val.string) orelse
             return .{ .err = .{ .code = INVALID_PARAMS, .message = "Unknown session" } };
 
         const mod_list = session.driver.modules(allocator) catch |err| {
+            debug_log.log("toolModules: failed: {s}", .{@errorName(err)});
             self.dashboard.onError("debug_modules", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
+        debug_log.log("toolModules: found {d} modules", .{mod_list.len});
         self.dashboard.onModules(session_id_val.string, mod_list.len);
 
         return .{ .ok = try formatModulesText(allocator, mod_list) };
@@ -2125,13 +2172,17 @@ pub const DebugServer = struct {
         const session_id_val = a.object.get("session_id") orelse return .{ .err = .{ .code = INVALID_PARAMS, .message = "Missing session_id" } };
         if (session_id_val != .string) return .{ .err = .{ .code = INVALID_PARAMS, .message = "session_id must be string" } };
 
+        debug_log.log("toolLoadedSources: session_id={s}", .{session_id_val.string});
+
         const session = self.session_manager.getSession(session_id_val.string) orelse
             return .{ .err = .{ .code = INVALID_PARAMS, .message = "Unknown session" } };
 
         const source_list = session.driver.loadedSources(allocator) catch |err| {
+            debug_log.log("toolLoadedSources: failed: {s}", .{@errorName(err)});
             self.dashboard.onError("debug_loaded_sources", @errorName(err));
             return .{ .err = .{ .code = errorToCode(err), .message = @errorName(err) } };
         };
+        debug_log.log("toolLoadedSources: found {d} sources", .{source_list.len});
         self.dashboard.onLoadedSources(session_id_val.string, source_list.len);
 
         return .{ .ok = try formatLoadedSourcesText(allocator, source_list) };
@@ -2733,6 +2784,7 @@ pub const DebugServer = struct {
         if (self.session_manager.getSession(session_id)) |s| {
             s.status = .stopped;
         }
+        debug_log.log("toolLoadCore: session created id={s} driver=native", .{session_id});
         self.dashboard.onLaunch(session_id, "core_dump", "native");
         self.emitLaunchEvent(session_id, "core_dump", "native");
 
