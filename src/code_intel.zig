@@ -1121,11 +1121,22 @@ pub fn queryIndexInfo(allocator: std.mem.Allocator) ?IndexInfo {
         debug_log.log("queryIndexInfo: failed to decode index", .{});
         return null;
     };
-    const doc_count = index.documents.len;
+
+    // Count only project-local documents (exclude external/dependency files)
+    var project_doc_count: usize = 0;
+    for (index.documents) |doc| {
+        const path = doc.relative_path;
+        if (path.len == 0) continue;
+        // Skip absolute paths (external dependencies)
+        if (path[0] == '/') continue;
+        // Skip paths reaching outside the project
+        if (std.mem.startsWith(u8, path, "../") or std.mem.indexOf(u8, path, "/../") != null) continue;
+        project_doc_count += 1;
+    }
     scip.freeIndex(allocator, &index);
 
-    debug_log.log("queryIndexInfo: {d} documents, {d} bytes", .{ doc_count, file_size });
-    return .{ .file_size = file_size, .document_count = doc_count };
+    debug_log.log("queryIndexInfo: {d} project documents ({d} total), {d} bytes", .{ project_doc_count, index.documents.len, file_size });
+    return .{ .file_size = file_size, .document_count = project_doc_count };
 }
 
 // ── Commands ────────────────────────────────────────────────────────────
