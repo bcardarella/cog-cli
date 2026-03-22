@@ -261,8 +261,9 @@ export default async () => ({
 
     if (!state.didRecall && orientationTools.has(input.tool)) {
       if (state.preRecallExplorationCount >= 1) {
-        throw new Error(
-          "Cog memory workflow: use memory before continuing exploration. One initial orientation step is allowed, but after that call cog_mem_recall or delegate to the cog-mem subagent before exploring further.",
+        output.system = output.system || []
+        output.system.push(
+          "Cog memory workflow: consider using memory before continuing exploration. Call cog_mem_recall or delegate to the cog-mem subagent when prior knowledge may help.",
         )
       }
     }
@@ -272,8 +273,9 @@ export default async () => ({
       const memoryTask = isMemoryTask(args)
 
       if (state.memoryTriageActive && !memoryTask) {
-        throw new Error(
-          "Cog memory workflow: cog-mem is already handling retrieval-first triage for this question. Do not launch Explore or another specialist in parallel; wait for cog-mem to return and let it escalate internally if memory is insufficient.",
+        output.system = output.system || []
+        output.system.push(
+          "Cog memory workflow: cog-mem is already handling retrieval-first triage for this question. Consider waiting for cog-mem to return before launching other specialists.",
         )
       }
 
@@ -282,8 +284,9 @@ export default async () => ({
       }
 
       if (!state.didRecall && !isMemoryTask(args)) {
-        throw new Error(
-          "Cog memory workflow: delegate to the cog-mem subagent before broader work when prior knowledge may help.",
+        output.system = output.system || []
+        output.system.push(
+          "Cog memory workflow: consider delegating to the cog-mem subagent first when prior knowledge may help.",
         )
       }
     }
