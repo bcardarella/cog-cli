@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-03-22
+
+### Fixed
+
+- `cog doctor` index file count now filters out external dependency documents from the SCIP index, matching the count shown by `cog code:index`
+
 ## [0.22.0] - 2026-03-21
 
 ### Added
@@ -583,6 +589,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GitHub Actions workflow for automated releases and Homebrew tap updates
 - Homebrew installation via `trycog/tap/cog`
 
+[0.22.1]: https://github.com/trycog/cog-cli/releases/tag/v0.22.1
 [0.22.0]: https://github.com/trycog/cog-cli/releases/tag/v0.22.0
 [0.21.0]: https://github.com/trycog/cog-cli/releases/tag/v0.21.0
 [0.20.1]: https://github.com/trycog/cog-cli/releases/tag/v0.20.1
