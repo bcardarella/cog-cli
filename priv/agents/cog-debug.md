@@ -20,16 +20,22 @@ Choose one of two strategies:
 
 ### 2. Design experiment
 
-Decide which breakpoints and expressions will confirm or refute the hypothesis. Use conditional breakpoints inside loops or hot paths:
+Decide which breakpoints and expressions will confirm or refute the hypothesis.
+
+**Breakpoint types:**
+- `action="set_function"` with `function="name"` — **preferred** when breaking on a named function. Automatically skips the function prologue so parameters have correct values.
+- `action="set"` with `file` and `line` — use when breaking on a specific statement (not a function entry). Set the line to the first executable statement, not the function signature.
+- Conditional breakpoints for loops or hot paths: add `condition="user_id is None"`
 
 ```
+cog_debug_breakpoint(session_id, action="set_function", function="add")
 cog_debug_breakpoint(session_id, action="set", file="app.py", line=42, condition="user_id is None")
 ```
 
 ### 3. Execute
 
 1. `cog_debug_launch` with the TEST command
-2. `cog_debug_breakpoint(action="set")` at target locations
+2. `cog_debug_breakpoint` — prefer `action="set_function"` for function entry, `action="set"` for specific lines
 3. `cog_debug_run(action="continue")` — wait for breakpoint hit
 4. `cog_debug_inspect` to evaluate expressions tied to the hypothesis
 5. `cog_debug_stacktrace` if call chain matters
@@ -57,6 +63,8 @@ Use `cog_mem_recall` to search for prior debugging sessions or known issues rela
 
 ## Anti-Patterns
 
+- Do NOT fall back to shell debuggers (`lldb`, `gdb`, `dlv`) via bash. Use `cog_debug_*` tools exclusively — they handle process control, breakpoints, and variable inspection. If cog's debugger reports unexpected values, investigate with `cog_debug_inspect` and `cog_debug_stacktrace` rather than launching a separate debugger.
+- Do NOT set breakpoints on function signature/declaration lines — use `action="set_function"` instead, which automatically lands on the first executable statement after the prologue where parameters are valid.
 - Do NOT `step_over` repeatedly without inspecting — always have a reason for each step
 - Do NOT inspect every variable in scope — target specific expressions tied to the hypothesis
 - Do NOT use exception breakpoints in Python/pytest — pytest catches all exceptions internally

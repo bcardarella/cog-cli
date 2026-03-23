@@ -55,8 +55,10 @@ Debugger workflow:
 1. Locate the relevant code with `cog_code_*` tools.
 2. State a `QUESTION`, `HYPOTHESIS`, and `TEST` command.
 3. Launch one debug session, set targeted breakpoints, run, and inspect observed values.
-4. Inspect after stepping; do not step blindly.
-5. Always stop the debug session when done.
+4. Use `action="set_function"` to break on function entry — it skips the prologue so parameters are valid. Use `action="set"` with file:line only for specific statements.
+5. Inspect after stepping; do not step blindly.
+6. Always stop the debug session when done.
+7. Do NOT fall back to shell debuggers (lldb, gdb, dlv) — use `cog_debug_*` tools exclusively.
 
 <cog:mem>
 ## Memory
