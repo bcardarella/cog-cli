@@ -344,10 +344,10 @@ pub const DwarfEngine = struct {
             self.loadDsymDebugInfo(program) catch {};
         }
 
-        // Fallback 2: on macOS, load DWARF from object files via N_OSO stab entries
+        // Fallback 2: on macOS, run dsymutil to generate a dSYM from N_OSO object files
         if (self.line_entries.len == 0) {
-            debug_log.log("dwarf.engine: no dSYM found, trying N_OSO object files", .{});
-            self.loadObjectFileDebugInfo(program) catch {};
+            debug_log.log("dwarf.engine: no dSYM found, checking for N_OSO stab entries", .{});
+            self.generateAndLoadDsym(program) catch {};
         }
 
         // Parse function info from debug_info + debug_abbrev
@@ -703,8 +703,10 @@ pub const DwarfEngine = struct {
         self.dsym_binary = dsym_binary;
     }
 
-    fn loadObjectFileDebugInfo(self: *DwarfEngine, program: []const u8) !void {
-        // Read the binary data
+    /// When N_OSO stab entries exist but no dSYM bundle, run dsymutil to generate
+    /// a proper dSYM with relocated addresses, then load it via the existing dSYM path.
+    fn generateAndLoadDsym(self: *DwarfEngine, program: []const u8) !void {
+        // First verify N_OSO entries actually exist
         const file = try std.fs.cwd().openFile(program, .{});
         defer file.close();
         const stat = try file.stat();
@@ -712,108 +714,49 @@ pub const DwarfEngine = struct {
         defer self.allocator.free(data);
         _ = try file.readAll(data);
 
-        // Extract N_OSO object file paths
         const obj_paths = binary_macho.extractObjectFilePaths(self.allocator, data) catch return;
         defer {
             for (obj_paths) |p| self.allocator.free(p);
             self.allocator.free(obj_paths);
         }
 
-        debug_log.log("dwarf.engine: found {d} object files via N_OSO", .{obj_paths.len});
-        if (obj_paths.len == 0) return;
+        if (obj_paths.len == 0) {
+            debug_log.log("dwarf.engine: no N_OSO entries found, giving up", .{});
+            return;
+        }
+        debug_log.log("dwarf.engine: found {d} N_OSO entries, running dsymutil", .{obj_paths.len});
 
-        // Load and merge DWARF from each object file
-        var all_line_entries = std.ArrayListUnmanaged(parser.LineEntry).empty;
-        var all_file_entries = std.ArrayListUnmanaged(parser.FileEntry).empty;
-        var all_allocated_paths = std.ArrayListUnmanaged([]const u8).empty;
-        var all_functions = std.ArrayListUnmanaged(parser.FunctionInfo).empty;
+        // Run dsymutil to generate the dSYM bundle
+        var child = std.process.Child.init(&.{ "dsymutil", program }, self.allocator);
+        child.stderr_behavior = .Ignore;
+        child.stdout_behavior = .Ignore;
+        child.spawn() catch |err| {
+            debug_log.log("dwarf.engine: dsymutil spawn failed: {s}", .{@errorName(err)});
+            return;
+        };
+        const term = child.wait() catch |err| {
+            debug_log.log("dwarf.engine: dsymutil wait failed: {s}", .{@errorName(err)});
+            return;
+        };
 
-        for (obj_paths) |obj_path| {
-            debug_log.log("dwarf.engine: loading object file {s}", .{obj_path});
-            var obj_binary = binary_macho.MachoBinary.loadFile(self.allocator, obj_path) catch {
-                debug_log.log("dwarf.engine: failed to load object file {s}", .{obj_path});
-                continue;
-            };
-
-            if (!obj_binary.sections.hasDebugInfo()) {
-                debug_log.log("dwarf.engine: object file {s} has no debug info", .{obj_path});
-                obj_binary.deinit(self.allocator);
-                continue;
-            }
-
-            // Parse line program from this object file
-            if (obj_binary.sections.debug_line) |line_section| {
-                const line_data = (obj_binary.getSectionDataAlloc(self.allocator, line_section) catch null) orelse obj_binary.getSectionData(line_section);
-                if (line_data) |ld| {
-                    const line_str_data = if (obj_binary.sections.debug_line_str) |ls|
-                        (obj_binary.getSectionDataAlloc(self.allocator, ls) catch null) orelse obj_binary.getSectionData(ls)
-                    else
-                        null;
-                    if (parser.parseLineProgramWithFilesEx(ld, self.allocator, line_str_data)) |result| {
-                        for (result.line_entries) |entry| {
-                            all_line_entries.append(self.allocator, entry) catch continue;
-                        }
-                        if (result.line_entries.len > 0) self.allocator.free(result.line_entries);
-
-                        for (result.file_entries) |entry| {
-                            all_file_entries.append(self.allocator, entry) catch continue;
-                        }
-                        if (result.file_entries.len > 0) self.allocator.free(result.file_entries);
-
-                        for (result.allocated_paths) |p| {
-                            all_allocated_paths.append(self.allocator, p) catch continue;
-                        }
-                        if (result.allocated_paths.len > 0) self.allocator.free(result.allocated_paths);
-                    } else |_| {
-                        // Try simpler parse
-                        if (parser.parseLineProgram(ld, self.allocator)) |entries| {
-                            for (entries) |entry| {
-                                all_line_entries.append(self.allocator, entry) catch continue;
-                            }
-                            self.allocator.free(entries);
-                        } else |_| {}
-                    }
+        switch (term) {
+            .Exited => |code| {
+                if (code != 0) {
+                    debug_log.log("dwarf.engine: dsymutil exited with code {d}", .{code});
+                    return;
                 }
-            }
-
-            // Parse function info from this object file
-            if (obj_binary.sections.debug_info) |info_section| {
-                if (obj_binary.sections.debug_abbrev) |abbrev_section| {
-                    const info_data = (obj_binary.getSectionDataAlloc(self.allocator, info_section) catch null) orelse obj_binary.getSectionData(info_section);
-                    const abbrev_data = (obj_binary.getSectionDataAlloc(self.allocator, abbrev_section) catch null) orelse obj_binary.getSectionData(abbrev_section);
-                    if (info_data) |id| {
-                        if (abbrev_data) |ad| {
-                            const str_data = if (obj_binary.sections.debug_str) |s| (obj_binary.getSectionDataAlloc(self.allocator, s) catch null) orelse obj_binary.getSectionData(s) else null;
-                            if (parser.parseCompilationUnitEx(id, ad, str_data, .{}, self.allocator)) |funcs| {
-                                for (funcs) |f| {
-                                    all_functions.append(self.allocator, f) catch continue;
-                                }
-                                self.allocator.free(funcs);
-                            } else |_| {}
-                        }
-                    }
-                }
-            }
-
-            obj_binary.deinit(self.allocator);
+                debug_log.log("dwarf.engine: dsymutil succeeded, loading generated dSYM", .{});
+            },
+            else => {
+                debug_log.log("dwarf.engine: dsymutil terminated abnormally", .{});
+                return;
+            },
         }
 
-        // Store merged results
-        if (all_line_entries.items.len > 0) {
-            self.line_entries = all_line_entries.toOwnedSlice(self.allocator) catch return;
-            debug_log.log("dwarf.engine: merged {d} line entries from object files", .{self.line_entries.len});
-        }
-        if (all_file_entries.items.len > 0) {
-            self.file_entries = all_file_entries.toOwnedSlice(self.allocator) catch return;
-            debug_log.log("dwarf.engine: merged {d} file entries from object files", .{self.file_entries.len});
-        }
-        if (all_allocated_paths.items.len > 0) {
-            self.allocated_paths = all_allocated_paths.toOwnedSlice(self.allocator) catch return;
-        }
-        if (all_functions.items.len > 0) {
-            self.functions = all_functions.toOwnedSlice(self.allocator) catch return;
-            debug_log.log("dwarf.engine: merged {d} functions from object files", .{self.functions.len});
-        }
+        // Now load the dSYM bundle that dsymutil just created
+        self.loadDsymDebugInfo(program) catch |err| {
+            debug_log.log("dwarf.engine: failed to load generated dSYM: {s}", .{@errorName(err)});
+        };
     }
 
     // ── Run ─────────────────────────────────────────────────────────
