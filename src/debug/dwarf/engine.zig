@@ -3561,27 +3561,50 @@ pub const DwarfEngine = struct {
         // Find function by name
         for (self.functions) |func| {
             if (std.mem.eql(u8, func.name, name)) {
-                // Find first line entry after function prologue (first source line in body)
-                // This skips the prologue so parameters are established when we stop
+                // Find the first executable line AFTER the function prologue.
+                // The first line entry at low_pc is typically the function signature/declaration
+                // where arguments aren't yet materialized. We skip to the second distinct line
+                // (the first statement in the body) so parameters have correct values when we stop.
                 var bp_addr = func.low_pc;
                 var bp_line: u32 = 0;
                 if (self.line_entries.len > 0) {
-                    var best_addr: ?u64 = null;
-                    var best_line: u32 = 0;
+                    // Collect line entries within this function's range, sorted by address
+                    var first_addr: ?u64 = null;
+                    var first_line: u32 = 0;
+                    var second_addr: ?u64 = null;
+                    var second_line: u32 = 0;
                     for (self.line_entries) |entry| {
                         if (entry.end_sequence) continue;
                         if (entry.address >= func.low_pc and
                             (func.high_pc == 0 or entry.address < func.high_pc))
                         {
-                            if (best_addr == null or entry.address < best_addr.?) {
-                                best_addr = entry.address;
-                                best_line = entry.line;
+                            if (first_addr == null or entry.address < first_addr.?) {
+                                // Push previous first to second if it was a different line
+                                if (first_addr != null and first_line != entry.line) {
+                                    if (second_addr == null or first_addr.? < second_addr.?) {
+                                        second_addr = first_addr;
+                                        second_line = first_line;
+                                    }
+                                }
+                                first_addr = entry.address;
+                                first_line = entry.line;
+                            } else if (first_addr != null and entry.line != first_line) {
+                                // Different line than the first — candidate for second
+                                if (second_addr == null or entry.address < second_addr.?) {
+                                    second_addr = entry.address;
+                                    second_line = entry.line;
+                                }
                             }
                         }
                     }
-                    if (best_addr) |addr| {
+                    // Prefer the second line (first body statement) over the declaration line
+                    if (second_addr) |addr| {
                         bp_addr = addr;
-                        bp_line = best_line;
+                        bp_line = second_line;
+                        debug_log.log("dwarf.engine: function bp skipped prologue, line {d} -> {d}", .{ first_line, second_line });
+                    } else if (first_addr) |addr| {
+                        bp_addr = addr;
+                        bp_line = first_line;
                     }
                 }
 
