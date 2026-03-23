@@ -1094,11 +1094,9 @@ fn writeToolCatalog(runtime: *Runtime, allocator: std.mem.Allocator, s: *Stringi
         }
     }
 
-    for (debug_server_mod.tool_definitions) |tool| {
-        if (tool.tier.isWithin(runtime.debug_tool_tier)) {
-            try writeToolDefWithSchemaJson(allocator, s, tool.name, tool.description, tool.input_schema);
-        }
-    }
+    // Debug tools are NOT advertised in tools/list — they pollute the primary
+    // agent's context window. The cog-debug subagent prompt documents available
+    // tools directly. Debug tools are still callable via tools/call.
 }
 
 fn runtimeCallTool(runtime: *Runtime, tool_name: []const u8, arguments: ?json.Value) ![]const u8 {

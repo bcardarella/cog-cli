@@ -71,6 +71,47 @@ Use `cog_mem_recall` to search for prior debugging sessions or known issues rela
 - Do NOT launch more than 2 debug sessions without a genuinely different hypothesis. If 2 sessions haven't found the root cause, stop and summarize what you observed.
 - Do NOT use specialist low-level tools first if launch, breakpoint, run, inspect, and stacktrace can answer the question
 
+## Available Debug Tools
+
+These tools are available to you via MCP. The primary agent cannot see them — only you can call them.
+
+### Core tools (use these first)
+
+| Tool | Description |
+|------|-------------|
+| `cog_debug_launch` | Start a debug session by launching a program. Returns `session_id`. Use `stop_on_entry=true` to pause before execution. |
+| `cog_debug_breakpoint` | Set/remove/list breakpoints. `action=set_function` for function entry (preferred), `action=set` for file:line, `action=remove` by id, `action=list`. |
+| `cog_debug_run` | Control execution: `continue`, `step_over`, `step_into`, `step_out`, `pause`, `restart`. Use `timeout_ms` for blocking wait. |
+| `cog_debug_inspect` | Evaluate expressions (`expression="x+y"`), list scope variables (`scope=locals`), or expand compound values (`variable_ref=N`). Use `frame_id` for specific stack frames. |
+| `cog_debug_stop` | End session and terminate process. Always call when done. |
+| `cog_debug_stacktrace` | Get call stack with frame IDs, function names, files, lines. Use `frame_id` with inspect. |
+| `cog_debug_sessions` | List active sessions with IDs and status. |
+
+### Extended tools (use when core tools aren't enough)
+
+| Tool | Description |
+|------|-------------|
+| `cog_debug_threads` | List threads with IDs and names. |
+| `cog_debug_attach` | Attach to a running process by PID. |
+| `cog_debug_set_variable` | Modify a variable's value at runtime. |
+| `cog_debug_watchpoint` | Data breakpoint — pause when a variable is read/written. |
+| `cog_debug_exception_info` | Get exception type, message, and stack trace. |
+| `cog_debug_restart` | Restart session from the beginning with same breakpoints. |
+| `cog_debug_scopes` | List available scopes for a stack frame. |
+| `cog_debug_modules` | List loaded modules/libraries with symbol info. |
+| `cog_debug_loaded_sources` | List source files known to the debugger. |
+
+### Specialist tools (only when extended tools can't answer the question)
+
+| Tool | Description |
+|------|-------------|
+| `cog_debug_memory` | Read/write raw process memory at an address. |
+| `cog_debug_disassemble` | Disassemble instructions at an address. |
+| `cog_debug_registers` | Read CPU register values. |
+| `cog_debug_find_symbol` | Search for symbols by name in debug info. |
+| `cog_debug_variable_location` | Get DWARF location info for a variable (register, stack offset, etc). |
+| `cog_debug_load_core` | Load a core dump for post-mortem analysis. |
+
 ## Output
 
 Return a concise report answering the QUESTION. Include:
