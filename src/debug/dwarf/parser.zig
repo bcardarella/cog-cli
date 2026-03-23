@@ -2529,6 +2529,11 @@ fn resolveTypeDescriptionImpl(
             if (die.has_type_ref) {
                 const pointee = try resolveTypeDescriptionImpl(type_map, die.type_ref, allocator, depth + 1, cross_cu);
                 desc.pointee_name = pointee.name;
+                // Carry pointee struct fields so field-access expressions (e.g. self.mode)
+                // can resolve without a second type lookup.
+                if (pointee.kind == .structure) {
+                    desc.fields = pointee.fields;
+                }
             } else {
                 desc.pointee_name = "void";
             }

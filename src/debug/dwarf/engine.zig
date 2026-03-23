@@ -2699,21 +2699,22 @@ pub const DwarfEngine = struct {
                 .value => |val| blk: {
                     var raw: [8]u8 = undefined;
                     std.mem.writeInt(u64, &raw, val, .little);
-                    const effective_size = if (v.type_byte_size > 0) v.type_byte_size else 8;
+                    const effective_size: u8 = if (v.type_byte_size > 0) @min(v.type_byte_size, 8) else 8;
                     break :blk location.formatVariable(raw[0..effective_size], v.type_name, v.type_encoding, effective_size, &fmt_buf);
                 },
                 .address => |addr| blk: {
-                    const size: usize = if (v.type_byte_size > 0) v.type_byte_size else 4;
-                    const mval = mem_reader.read(addr, size) orelse break :blk "<unreadable>";
+                    const declared_size: usize = if (v.type_byte_size > 0) v.type_byte_size else 4;
+                    const read_size: usize = @min(declared_size, 8);
+                    const mval = mem_reader.read(addr, read_size) orelse break :blk "<unreadable>";
                     var raw: [8]u8 = undefined;
                     std.mem.writeInt(u64, &raw, mval, .little);
-                    break :blk location.formatVariable(raw[0..size], v.type_name, v.type_encoding, @intCast(size), &fmt_buf);
+                    break :blk location.formatVariable(raw[0..read_size], v.type_name, v.type_encoding, @intCast(read_size), &fmt_buf);
                 },
                 .register => |reg| blk: {
                     const rval = reg_provider.read(reg) orelse break :blk "<unavailable>";
                     var raw: [8]u8 = undefined;
                     std.mem.writeInt(u64, &raw, rval, .little);
-                    const effective_size = if (v.type_byte_size > 0) v.type_byte_size else 8;
+                    const effective_size: u8 = if (v.type_byte_size > 0) @min(v.type_byte_size, 8) else 8;
                     break :blk location.formatVariable(raw[0..effective_size], v.type_name, v.type_encoding, effective_size, &fmt_buf);
                 },
                 .implicit_pointer => "<implicit pointer>",
@@ -3233,7 +3234,7 @@ pub const DwarfEngine = struct {
                     },
                     .address => |addr| {
                         // Read from process memory
-                        const size: usize = if (v.type_byte_size > 0) v.type_byte_size else 4;
+                        const size: usize = if (v.type_byte_size > 0) @min(@as(usize, v.type_byte_size), 8) else 4;
                         const val = mem_reader.read(addr, size) orelse return null;
                         return interpretAsI64(val, v.type_encoding, v.type_byte_size);
                     },
@@ -3244,6 +3245,58 @@ pub const DwarfEngine = struct {
                     .empty, .implicit_pointer, .composite => return null,
                 }
             }
+        }
+
+        // Field access: try dot-notation (e.g. "self.mode")
+        if (std.mem.indexOfScalar(u8, name, '.')) |dot_pos| {
+            const base_name = name[0..dot_pos];
+            const field_name = name[dot_pos + 1 ..];
+            if (base_name.len > 0 and field_name.len > 0) {
+                return readFieldAsI64(base_name, field_name, variables, reg_provider, frame_base, mem_reader);
+            }
+        }
+
+        return null;
+    }
+
+    /// Read a struct field as i64 for use in binary expressions and conditions.
+    fn readFieldAsI64(
+        base_name: []const u8,
+        field_name: []const u8,
+        variables: []const parser.VariableInfo,
+        reg_provider: location.RegisterProvider,
+        frame_base: ?u64,
+        mem_reader: location.MemoryReader,
+    ) ?i64 {
+        for (variables) |v| {
+            if (!std.mem.eql(u8, v.name, base_name)) continue;
+            if (v.location_expr.len == 0) return null;
+
+            const type_desc = v.type_desc orelse return null;
+            const loc = location.evalLocationWithMemory(v.location_expr, reg_provider, frame_base, mem_reader);
+
+            // Resolve base address (dereference pointer if needed)
+            const base_addr: u64 = switch (loc) {
+                .address => |addr| blk: {
+                    if (type_desc.kind == .pointer) {
+                        break :blk mem_reader.read(addr, 8) orelse return null;
+                    }
+                    break :blk addr;
+                },
+                .value => |val| val,
+                .register => |reg| reg_provider.read(reg) orelse return null,
+                .empty, .implicit_pointer, .composite => return null,
+            };
+
+            // Find the field
+            for (type_desc.fields) |field| {
+                if (std.mem.eql(u8, field.name, field_name)) {
+                    const field_size: usize = if (field.byte_size > 0) @min(@as(usize, field.byte_size), 8) else 4;
+                    const val = mem_reader.read(base_addr + field.offset, field_size) orelse return null;
+                    return interpretAsI64(val, field.encoding, field.byte_size);
+                }
+            }
+            return null; // field not found
         }
         return null;
     }
@@ -3290,20 +3343,21 @@ pub const DwarfEngine = struct {
                     .value => |val| {
                         var raw: [8]u8 = undefined;
                         std.mem.writeInt(u64, &raw, val, .little);
-                        const effective_size = if (v.type_byte_size > 0) v.type_byte_size else 8;
+                        const effective_size: u8 = if (v.type_byte_size > 0) @min(v.type_byte_size, 8) else 8;
                         const formatted = location.formatVariable(raw[0..effective_size], v.type_name, v.type_encoding, effective_size, &fmt_buf);
                         const result_str = allocator.dupe(u8, formatted) catch return .{ .result = "<alloc error>", .type = "" };
                         const type_owned = allocator.dupe(u8, v.type_name) catch return .{ .result = result_str, .type = "", .result_allocated = true };
                         return .{ .result = result_str, .type = type_owned, .result_allocated = true };
                     },
                     .address => |addr| {
-                        const size: usize = if (v.type_byte_size > 0) v.type_byte_size else 4;
-                        const val = mem_reader.read(addr, size) orelse {
+                        const declared_size: usize = if (v.type_byte_size > 0) v.type_byte_size else 4;
+                        const read_size: usize = @min(declared_size, 8);
+                        const val = mem_reader.read(addr, read_size) orelse {
                             return .{ .result = "<unreadable>", .type = v.type_name };
                         };
                         var raw: [8]u8 = undefined;
                         std.mem.writeInt(u64, &raw, val, .little);
-                        const formatted = location.formatVariable(raw[0..size], v.type_name, v.type_encoding, @intCast(size), &fmt_buf);
+                        const formatted = location.formatVariable(raw[0..read_size], v.type_name, v.type_encoding, @intCast(read_size), &fmt_buf);
                         const result_str = allocator.dupe(u8, formatted) catch return .{ .result = "<alloc error>", .type = "" };
                         const type_owned = allocator.dupe(u8, v.type_name) catch return .{ .result = result_str, .type = "", .result_allocated = true };
                         return .{ .result = result_str, .type = type_owned, .result_allocated = true };
@@ -3314,7 +3368,7 @@ pub const DwarfEngine = struct {
                         };
                         var raw: [8]u8 = undefined;
                         std.mem.writeInt(u64, &raw, val, .little);
-                        const effective_size = if (v.type_byte_size > 0) v.type_byte_size else 8;
+                        const effective_size: u8 = if (v.type_byte_size > 0) @min(v.type_byte_size, 8) else 8;
                         const formatted = location.formatVariable(raw[0..effective_size], v.type_name, v.type_encoding, effective_size, &fmt_buf);
                         const result_str = allocator.dupe(u8, formatted) catch return .{ .result = "<alloc error>", .type = "" };
                         const type_owned = allocator.dupe(u8, v.type_name) catch return .{ .result = result_str, .type = "", .result_allocated = true };
@@ -3332,6 +3386,121 @@ pub const DwarfEngine = struct {
                 }
             }
         }
+        // Field access: try dot-notation (e.g. "self.mode", "calc.precision_shift")
+        if (std.mem.indexOfScalar(u8, name, '.')) |dot_pos| {
+            const base_name = name[0..dot_pos];
+            const field_path = name[dot_pos + 1 ..];
+            if (base_name.len > 0 and field_path.len > 0) {
+                debug_log.log("dwarf.engine: field access base={s} field={s}", .{ base_name, field_path });
+                return evaluateFieldAccess(base_name, field_path, variables, reg_provider, frame_base, mem_reader, allocator);
+            }
+        }
+
+        return .{ .result = "<unknown variable>", .type = "" };
+    }
+
+    /// Evaluate a field access expression like "self.mode" by resolving the base variable,
+    /// dereferencing pointers, and reading the field at the correct offset.
+    fn evaluateFieldAccess(
+        base_name: []const u8,
+        field_path: []const u8,
+        variables: []const parser.VariableInfo,
+        reg_provider: location.RegisterProvider,
+        frame_base: ?u64,
+        mem_reader: location.MemoryReader,
+        allocator: std.mem.Allocator,
+    ) InspectResult {
+        // Find the base variable
+        for (variables) |v| {
+            if (!std.mem.eql(u8, v.name, base_name)) continue;
+            if (v.location_expr.len == 0) return .{ .result = "<optimized out>", .type = v.type_name };
+
+            const type_desc = v.type_desc orelse return .{ .result = "<no type info>", .type = v.type_name };
+
+            // Resolve the base address
+            const loc = location.evalLocationWithMemory(v.location_expr, reg_provider, frame_base, mem_reader);
+            var base_addr: u64 = switch (loc) {
+                .address => |addr| blk: {
+                    if (type_desc.kind == .pointer) {
+                        // Base is a pointer variable stored at addr — dereference to get struct address
+                        break :blk mem_reader.read(addr, 8) orelse return .{ .result = "<unreadable>", .type = v.type_name };
+                    }
+                    break :blk addr;
+                },
+                .value => |val| blk: {
+                    if (type_desc.kind == .pointer) {
+                        // Pointer value is the struct address
+                        break :blk val;
+                    }
+                    // For struct-in-register (value), we can't do field access
+                    break :blk val;
+                },
+                .register => |reg| blk: {
+                    const val = reg_provider.read(reg) orelse return .{ .result = "<unavailable>", .type = v.type_name };
+                    if (type_desc.kind == .pointer) {
+                        break :blk val;
+                    }
+                    break :blk val;
+                },
+                .empty => return .{ .result = "<optimized out>", .type = v.type_name },
+                .implicit_pointer, .composite => return .{ .result = "<composite>", .type = v.type_name },
+            };
+
+            // Walk the field path (supports nested fields like "history.items.len")
+            var remaining_fields = field_path;
+            var current_fields = type_desc.fields;
+            var result_encoding: u8 = 0;
+            var result_byte_size: u8 = 0;
+            var result_type_name: []const u8 = "";
+
+            while (remaining_fields.len > 0) {
+                const next_dot = std.mem.indexOfScalar(u8, remaining_fields, '.');
+                const current_field_name = if (next_dot) |dp| remaining_fields[0..dp] else remaining_fields;
+                remaining_fields = if (next_dot) |dp| remaining_fields[dp + 1 ..] else "";
+
+                // Find the field in the struct layout
+                var found_field = false;
+                for (current_fields) |field| {
+                    if (std.mem.eql(u8, field.name, current_field_name)) {
+                        base_addr += field.offset;
+                        result_encoding = field.encoding;
+                        result_byte_size = field.byte_size;
+                        result_type_name = field.type_name;
+                        // For nested access we'd need the field's own TypeDescription,
+                        // which isn't available in StructField. Stop here for nested paths.
+                        current_fields = &.{};
+                        found_field = true;
+                        break;
+                    }
+                }
+
+                if (!found_field) {
+                    const err_msg = std.fmt.allocPrint(allocator, "<no field '{s}'>", .{current_field_name}) catch
+                        return .{ .result = "<no field>", .type = "" };
+                    return .{ .result = err_msg, .type = "", .result_allocated = true };
+                }
+
+                // If there are more fields to traverse but no sub-fields available, stop
+                if (remaining_fields.len > 0 and current_fields.len == 0) {
+                    return .{ .result = "<nested field access not supported>", .type = result_type_name };
+                }
+            }
+
+            // Read the field value from memory
+            if (result_byte_size == 0) result_byte_size = 4; // default
+            const read_size: usize = @min(@as(usize, result_byte_size), 8);
+            const field_val = mem_reader.read(base_addr, read_size) orelse
+                return .{ .result = "<unreadable>", .type = result_type_name };
+
+            var raw: [8]u8 = undefined;
+            std.mem.writeInt(u64, &raw, field_val, .little);
+            var fmt_buf: [64]u8 = undefined;
+            const formatted = location.formatVariable(raw[0..read_size], result_type_name, result_encoding, @intCast(read_size), &fmt_buf);
+            const result_str = allocator.dupe(u8, formatted) catch return .{ .result = "<alloc error>", .type = "" };
+            const type_owned = allocator.dupe(u8, result_type_name) catch return .{ .result = result_str, .type = "", .result_allocated = true };
+            return .{ .result = result_str, .type = type_owned, .result_allocated = true };
+        }
+
         return .{ .result = "<unknown variable>", .type = "" };
     }
 
