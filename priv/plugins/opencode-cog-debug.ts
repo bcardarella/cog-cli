@@ -257,8 +257,17 @@ export default async () => ({
     if (!debugTools.has(input.tool)) return
 
     if (input.tool === "cog_debug_launch" || input.tool === "cog_debug_attach") {
-      state.activeDebugSession = true
-      state.launchCount += 1
+      // Only mark session active if the launch succeeded (not an error response)
+      const output = typeof input.output === "string" ? input.output : ""
+      const failed =
+        input.isError ||
+        output.includes("NoDebugInfo") ||
+        output.includes("launch failed") ||
+        output.includes("error")
+      if (!failed) {
+        state.activeDebugSession = true
+        state.launchCount += 1
+      }
       state.inspectionRequired = false
       return
     }
