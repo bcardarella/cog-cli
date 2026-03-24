@@ -395,16 +395,16 @@ pub const Agent = struct {
     }
 
     /// Detect if this agent appears to be in use in the current project by
-    /// checking for its characteristic files (prompt target, MCP config, agent files).
+    /// checking for agent-specific files. We deliberately skip prompt_target
+    /// (CLAUDE.md, AGENTS.md, etc.) because those are shared across agents —
+    /// e.g. Cursor also reads CLAUDE.md, and AMP/Windsurf/OpenCode all use AGENTS.md.
     pub fn isDetectedInCwd(self: *const Agent) bool {
         const hooks = @import("hooks.zig");
-        // Check prompt target file
-        if (hooks.fileExistsInCwd(self.prompt_target.filename())) return true;
-        // Check MCP config file
+        // Check MCP config file (unique per agent)
         if (self.mcp_path) |path| {
-            if (hooks.fileExistsInCwd(path)) return true;
+            if (self.mcp_format != .global_only and hooks.fileExistsInCwd(path)) return true;
         }
-        // Check agent sub-agent files (any one is sufficient)
+        // Check cog sub-agent files (unique per agent)
         if (self.agent_file_path) |path| {
             if (hooks.fileExistsInCwd(path)) return true;
         }
