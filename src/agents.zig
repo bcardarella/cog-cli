@@ -394,6 +394,23 @@ pub const Agent = struct {
         return if (self.capabilities().auto_tool_permissions) "Auto-allow" else "";
     }
 
+    /// Detect if this agent appears to be in use in the current project by
+    /// checking for its characteristic files (prompt target, MCP config, agent files).
+    pub fn isDetectedInCwd(self: *const Agent) bool {
+        const hooks = @import("hooks.zig");
+        // Check prompt target file
+        if (hooks.fileExistsInCwd(self.prompt_target.filename())) return true;
+        // Check MCP config file
+        if (self.mcp_path) |path| {
+            if (hooks.fileExistsInCwd(path)) return true;
+        }
+        // Check agent sub-agent files (any one is sufficient)
+        if (self.agent_file_path) |path| {
+            if (hooks.fileExistsInCwd(path)) return true;
+        }
+        return false;
+    }
+
     pub fn mcpConfigSummary(self: *const Agent) []const u8 {
         return switch (self.mcp_format) {
             .global_only => "Global config",

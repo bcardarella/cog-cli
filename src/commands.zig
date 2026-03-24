@@ -305,13 +305,18 @@ pub fn init(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
 
     tui.separator();
 
-    // Agent multi-select
+    // Agent multi-select with auto-detection of already-configured agents
     const agent_menu_entries = try agents_mod.buildMenuEntries(allocator);
     var agent_menu_items: [agents_mod.agents.len]tui.MenuItem = undefined;
-    for (agent_menu_entries, 0..) |entry, i| agent_menu_items[i] = entry.item;
+    var agent_preselected: [agents_mod.agents.len]bool = undefined;
+    for (agent_menu_entries, 0..) |entry, i| {
+        agent_menu_items[i] = entry.item;
+        agent_preselected[i] = agents_mod.agents[entry.agent_index].isDetectedInCwd();
+    }
     const agent_result = try tui.multiSelect(allocator, .{
         .prompt = "Select your AI coding agents:",
         .items = &agent_menu_items,
+        .initial_selected = &agent_preselected,
     });
     const selected_indices = switch (agent_result) {
         .selected => |indices| indices,
