@@ -1,5 +1,6 @@
 const blockedFallbackTools = new Set(["grep"])
 const architectureModes = new Set(["overview", "imports", "contains", "calls", "callers"])
+const cogCodeTools = new Set(["cog_code_explore", "cog_code_query"])
 const sessionState = new Map()
 const shellSearchPattern = /(^|\W)(git\s+grep|rg|grep|find)(\W|$)/i
 
@@ -8,6 +9,7 @@ function getState(sessionID) {
   if (!state) {
     state = {
       sawRepoExplore: false,
+      hasCogTools: false,
       fileArchitectureQueries: [],
     }
     sessionState.set(sessionID, state)
@@ -102,6 +104,17 @@ export default async () => ({
     )
   },
   "tool.execute.before": async (input, output) => {
+    const state = getState(input.sessionID)
+
+    // When a cog code tool is called, mark this session as having cog tool
+    // access. Sessions without cog tools (e.g. OpenCode tasks that don't
+    // inherit MCP connections) are allowed to use shell search as fallback.
+    if (cogCodeTools.has(input.tool)) {
+      state.hasCogTools = true
+    }
+
+    if (!state.hasCogTools) return
+
     if (blockedFallbackTools.has(input.tool)) {
       throw new Error(
         "Cog override policy: use cog_code_explore or cog_code_query. Glob and grep are disabled for OpenCode exploration workflows."
@@ -117,7 +130,6 @@ export default async () => ({
     const args = getArgs(output.args)
     if (!isFileArchitectureQuery(input.tool, args)) return
 
-    const state = getState(input.sessionID)
     if (state.sawRepoExplore && hasDifferentPriorFile(state, getFile(args))) {
       throw new Error(
         "Cog batching policy: repeated file-scoped architecture queries after a repo explore are not allowed. Use the initial batched result, or merge remaining targets into one cog_code_explore call."
@@ -134,6 +146,11 @@ export default async () => ({
   "tool.execute.after": async (input) => {
     const args = getArgs(input.args)
     const state = getState(input.sessionID)
+
+    // Confirm cog tool access after successful execution
+    if (cogCodeTools.has(input.tool)) {
+      state.hasCogTools = true
+    }
 
     if (isRepoExplore(input.tool, args)) {
       state.sawRepoExplore = true
