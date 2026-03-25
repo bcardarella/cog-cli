@@ -63,11 +63,6 @@ case "$tool_name" in
   Grep)
     deny "Use Cog code intelligence tools before raw text search when the Cog MCP server is configured."
     ;;
-  Bash)
-    if printf '%s' "$payload" | grep -Eq '"command"[[:space:]]*:[[:space:]]*"[^"]*\b(rg|grep|find)\b[^"]*"'; then
-      deny "Use Cog code intelligence tools before shell search commands like grep, rg, find, or git grep when the Cog MCP server is configured."
-    fi
-    ;;
   mcp__cog__mem_*|cog_mem_*)
     if printf '%s' "$payload" | grep -Eq '"relation"[[:space:]]*:[[:space:]]*"related_to"'; then
       advise "Cog memory quality: prefer a stronger predicate than related_to when the relationship is directional or structural."
