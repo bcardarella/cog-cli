@@ -73,12 +73,16 @@ const evidenceTools = new Set([
 
 const sessionState = new Map()
 
+// Daemon reaps idle sessions after 10 minutes; auto-expire plugin state to match.
+const SESSION_EXPIRE_MS = 10 * 60 * 1000
+
 function getState(sessionID) {
   let state = sessionState.get(sessionID)
   if (!state) {
     state = {
       sawCodeIntel: false,
       activeDebugSession: false,
+      activeDebugSessionAt: 0,
       inspectionRequired: false,
       launchCount: 0,
       sawEvidence: false,
@@ -89,6 +93,13 @@ function getState(sessionID) {
       lastHypothesis: "",
     }
     sessionState.set(sessionID, state)
+  }
+  // Auto-expire stale debug sessions that the daemon has likely reaped
+  if (state.activeDebugSession && state.activeDebugSessionAt > 0) {
+    if (Date.now() - state.activeDebugSessionAt > SESSION_EXPIRE_MS) {
+      state.activeDebugSession = false
+      state.inspectionRequired = false
+    }
   }
   return state
 }
@@ -264,9 +275,20 @@ export default async () => ({
       const succeeded = !input.isError && output.length > 0 && output.includes("session")
       if (succeeded) {
         state.activeDebugSession = true
+        state.activeDebugSessionAt = Date.now()
         state.launchCount += 1
       }
       state.inspectionRequired = false
+      return
+    }
+
+    // Reset stale state when sessions list confirms no active sessions
+    if (input.tool === "cog_debug_sessions") {
+      const output = typeof input.output === "string" ? input.output : ""
+      if (!input.isError && (output.includes("No active") || output.includes("0 session"))) {
+        state.activeDebugSession = false
+        state.inspectionRequired = false
+      }
       return
     }
 
