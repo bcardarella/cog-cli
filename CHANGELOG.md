@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.1] - 2026-03-27
+
+### Fixed
+
+- Bootstrap association phase (Phase 2) agent errors now fully captured in debug log — previously stderr was discarded or only inherited to terminal, and no `debug_log` calls existed for spawn errors, exit codes, signals, or wait failures
+- Bootstrap per-file agent (Phase 1) `wait()` error now written to debug log in addition to terminal stderr
+- Agent stderr in association phase piped and read on background thread to prevent deadlocks, matching Phase 1 behavior
+- All association phase failure paths now route through `logSubsystemError` for consistent 4KB-chunked stderr/stdout capture
+
 ## [0.24.0] - 2026-03-25
 
 ### Added
@@ -673,4 +682,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.9.0]: https://github.com/trycog/cog-cli/releases/tag/v0.9.0
 [0.23.0]: https://github.com/trycog/cog-cli/releases/tag/v0.23.0
 [0.23.1]: https://github.com/trycog/cog-cli/releases/tag/v0.23.1
+[0.24.1]: https://github.com/trycog/cog-cli/releases/tag/v0.24.1
 [0.24.0]: https://github.com/trycog/cog-cli/releases/tag/v0.24.0
