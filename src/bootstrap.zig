@@ -2371,6 +2371,7 @@ fn runSubsystem(
     defer if (stdout_data) |d| allocator.free(d);
 
     const term = child.wait() catch |err| {
+        debug_log.log("runSubsystem: {s} wait error: {s}", .{ subsystem.label, @errorName(err) });
         tw.cancelled.store(true, .release);
         if (tw_thread) |t| t.join();
         if (stderr_thread) |t| t.join();
@@ -2530,19 +2531,23 @@ fn runAssociationPhase(
     // Bail out if cancellation was requested before spawning
     if (g_cancel_requested.load(.acquire)) return fail;
 
+    debug_log.log("runAssociationPhase: starting (argv len={d})", .{argv_buf.items.len});
+
     var child = std.process.Child.init(argv_buf.items, allocator);
     child.cwd = project_root;
     child.stdin_behavior = .Ignore; // Prevent children from consuming Ctrl+C bytes on stdin
-    child.stderr_behavior = if (debug) .Inherit else .Ignore;
+    child.stderr_behavior = .Pipe;
     child.stdout_behavior = .Pipe;
     child.pgid = 0; // Make child its own process group leader for reliable group kill
 
     child.spawn() catch |err| {
+        debug_log.log("runAssociationPhase: spawn error {s}", .{@errorName(err)});
         if (!use_tui) printFmtErr(allocator, "    " ++ red ++ "spawn error: {s}" ++ reset ++ "\n", .{@errorName(err)});
         return fail;
     };
     const assoc_pid: i32 = child.id;
     if (assoc_pid > 0) registerChild(assoc_pid);
+    debug_log.log("runAssociationPhase: spawned child pid={d}", .{assoc_pid});
     const reaper = spawnReaper(assoc_pid);
 
     // If cancel arrived during spawn, kill this child immediately
@@ -2563,6 +2568,13 @@ fn runAssociationPhase(
     else
         null;
 
+    // Read stderr on a background thread to avoid deadlocking with stdout
+    var stderr_data: ?[]const u8 = null;
+    const stderr_thread = if (child.stderr) |pipe|
+        std.Thread.spawn(.{}, readPipeToEnd, .{ pipe, allocator, &stderr_data }) catch null
+    else
+        null;
+
     const stdout_data = if (child.stdout) |stdout|
         stdout.readToEndAlloc(allocator, 10 * 1024 * 1024) catch null
     else
@@ -2570,8 +2582,11 @@ fn runAssociationPhase(
     defer if (stdout_data) |d| allocator.free(d);
 
     const term = child.wait() catch |err| {
+        debug_log.log("runAssociationPhase: wait error: {s}", .{@errorName(err)});
         tw.cancelled.store(true, .release);
         if (tw_thread) |t| t.join();
+        if (stderr_thread) |t| t.join();
+        if (stderr_data) |d| allocator.free(d);
         if (assoc_pid > 0) unregisterChild(assoc_pid);
         dismissReaper(reaper);
         if (!use_tui) printFmtErr(allocator, "    " ++ red ++ "wait error: {s}" ++ reset ++ "\n", .{@errorName(err)});
@@ -2579,17 +2594,24 @@ fn runAssociationPhase(
     };
     tw.cancelled.store(true, .release);
     if (tw_thread) |t| t.join();
+    if (stderr_thread) |t| t.join();
+    defer if (stderr_data) |d| allocator.free(d);
     if (assoc_pid > 0) unregisterChild(assoc_pid);
     dismissReaper(reaper);
 
+    const assoc_label = "association-phase";
     switch (term) {
         .Exited => |code| {
+            debug_log.log("runAssociationPhase: exited code={d}", .{code});
             if (code != 0) {
+                logSubsystemError(allocator, assoc_label, stderr_data, stdout_data, debug, use_tui);
                 if (!use_tui) printFmtErr(allocator, "    " ++ red ++ "exited with code {d}" ++ reset ++ "\n", .{code});
                 return fail;
             }
         },
         .Signal => |sig| {
+            debug_log.log("runAssociationPhase: killed by signal {d}", .{sig});
+            logSubsystemError(allocator, assoc_label, stderr_data, stdout_data, debug, use_tui);
             if (!use_tui) {
                 if (sig == posix.SIG.KILL and tw.fired.load(.acquire)) {
                     printFmtErr(allocator, "    " ++ red ++ "timed out after {d}m" ++ reset ++ "\n", .{timeout_ms / 60_000});
@@ -2599,7 +2621,10 @@ fn runAssociationPhase(
             }
             return fail;
         },
-        else => return fail,
+        else => {
+            logSubsystemError(allocator, assoc_label, stderr_data, stdout_data, debug, use_tui);
+            return fail;
+        },
     }
 
     // Parse token usage
