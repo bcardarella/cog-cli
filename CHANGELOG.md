@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.2] - 2026-03-31
+
+### Fixed
+
+- SIGABRT crash during file watcher reindexing — tree-sitter parsing and SCIP protobuf decoding now run in a forked child process so a crash in the indexer cannot kill the MCP server
+- Added granular debug logging to `acquireIndexLock` to pinpoint exact failure line on future crash reports (allocPrint, toPosixPath, open, flock each logged separately with error names)
+- Code tool handlers (`code_query`, `code_explore`) now log error names on failure for easier diagnosis
+
 ## [0.24.1] - 2026-03-27
 
 ### Fixed
@@ -682,5 +690,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.9.0]: https://github.com/trycog/cog-cli/releases/tag/v0.9.0
 [0.23.0]: https://github.com/trycog/cog-cli/releases/tag/v0.23.0
 [0.23.1]: https://github.com/trycog/cog-cli/releases/tag/v0.23.1
+[0.24.2]: https://github.com/trycog/cog-cli/releases/tag/v0.24.2
 [0.24.1]: https://github.com/trycog/cog-cli/releases/tag/v0.24.1
 [0.24.0]: https://github.com/trycog/cog-cli/releases/tag/v0.24.0
