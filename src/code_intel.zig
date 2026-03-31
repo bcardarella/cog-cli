@@ -22,17 +22,29 @@ const LOCK_UN: c_int = 8;
 /// Acquire an exclusive advisory lock on .cog/index.lock.
 /// Blocks until the lock is acquired. Returns the lock fd, or null on failure.
 fn acquireIndexLock(allocator: std.mem.Allocator, cog_dir: []const u8) ?posix.fd_t {
-    debug_log.log("acquireIndexLock: {s}/index.lock", .{cog_dir});
-    const lock_path = std.fmt.allocPrint(allocator, "{s}/index.lock", .{cog_dir}) catch return null;
+    debug_log.log("acquireIndexLock: {s}/index.lock (cog_dir.len={d})", .{ cog_dir, cog_dir.len });
+    const lock_path = std.fmt.allocPrint(allocator, "{s}/index.lock", .{cog_dir}) catch |err| {
+        debug_log.log("acquireIndexLock: allocPrint failed: {s}", .{@errorName(err)});
+        return null;
+    };
     defer allocator.free(lock_path);
-    const lock_path_z = posix.toPosixPath(lock_path) catch return null;
-    const fd = posix.open(&lock_path_z, .{ .ACCMODE = .RDWR, .CREAT = true }, 0o644) catch return null;
+    debug_log.log("acquireIndexLock: path allocated, len={d}", .{lock_path.len});
+    const lock_path_z = posix.toPosixPath(lock_path) catch |err| {
+        debug_log.log("acquireIndexLock: toPosixPath failed: {s}", .{@errorName(err)});
+        return null;
+    };
+    debug_log.log("acquireIndexLock: opening file", .{});
+    const fd = posix.open(&lock_path_z, .{ .ACCMODE = .RDWR, .CREAT = true }, 0o644) catch |err| {
+        debug_log.log("acquireIndexLock: open failed: {s}", .{@errorName(err)});
+        return null;
+    };
+    debug_log.log("acquireIndexLock: fd={d}, calling flock", .{fd});
     if (flock(fd, LOCK_EX) != 0) {
-        debug_log.log("acquireIndexLock: flock failed", .{});
+        debug_log.log("acquireIndexLock: flock failed errno={d}", .{std.c._errno().*});
         posix.close(fd);
         return null;
     }
-    debug_log.log("acquireIndexLock: acquired", .{});
+    debug_log.log("acquireIndexLock: acquired fd={d}", .{fd});
     return fd;
 }
 
@@ -2236,6 +2248,7 @@ fn removeDocument(allocator: std.mem.Allocator, index: *scip.Index, rel_path: []
 /// Returns true if the file was found and removed, false otherwise.
 /// Uses flock() advisory locking to serialize concurrent access.
 pub fn removeFileFromIndex(allocator: std.mem.Allocator, file_path: []const u8) bool {
+    debug_log.log("removeFileFromIndex: starting for {s}", .{file_path});
     const cog_dir = paths.findCogDir(allocator) catch return false;
     defer allocator.free(cog_dir);
 
@@ -2260,6 +2273,7 @@ pub fn removeFileFromIndex(allocator: std.mem.Allocator, file_path: []const u8) 
 /// Re-index a single file and update the master index.
 /// Uses flock() advisory locking to serialize concurrent access.
 pub fn reindexFile(allocator: std.mem.Allocator, file_path: []const u8) bool {
+    debug_log.log("reindexFile: starting for {s}", .{file_path});
     const cog_dir = paths.findCogDir(allocator) catch return false;
     defer allocator.free(cog_dir);
 

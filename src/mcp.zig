@@ -137,7 +137,12 @@ const Runtime = struct {
 
     fn ensureCodeCache(self: *Runtime) !*code_intel.CodeIndex {
         if (self.code_cache == null) {
-            self.code_cache = try code_intel.loadIndexForRuntime(self.allocator);
+            debug_log_mod.log("ensureCodeCache: loading index", .{});
+            self.code_cache = code_intel.loadIndexForRuntime(self.allocator) catch |err| {
+                debug_log_mod.log("ensureCodeCache: load failed: {s}", .{@errorName(err)});
+                return err;
+            };
+            debug_log_mod.log("ensureCodeCache: index loaded successfully", .{});
         }
         return &self.code_cache.?;
     }
@@ -1183,13 +1188,21 @@ fn runtimeCallTool(runtime: *Runtime, tool_name: []const u8, arguments: ?json.Va
         return result;
     }
 
-    // Code tools
+    // Code tools — these involve SCIP index access and tree-sitter data.
+    // Errors are caught and returned as descriptive messages rather than
+    // propagating panics from potentially corrupt index data.
     if (std.mem.eql(u8, tool_name, "code_query")) {
-        const result = try callCodeQuery(runtime, arguments);
+        const result = callCodeQuery(runtime, arguments) catch |err| {
+            debug_log_mod.log("runtimeCallTool: code_query failed: {s}", .{@errorName(err)});
+            return err;
+        };
         try session_context_mod.recordToolEvent(session_ctx, tool_name, arguments);
         return result;
     } else if (std.mem.eql(u8, tool_name, "code_explore")) {
-        const result = try callCodeExplore(runtime, arguments);
+        const result = callCodeExplore(runtime, arguments) catch |err| {
+            debug_log_mod.log("runtimeCallTool: code_explore failed: {s}", .{@errorName(err)});
+            return err;
+        };
         try session_context_mod.recordToolEvent(session_ctx, tool_name, arguments);
         return result;
     }
@@ -1707,13 +1720,92 @@ fn processWatcherEvents(runtime: *Runtime) void {
     }
 
     if (paths_buf.items.len == 0) return;
-    debug_log_mod.log("processWatcherEvents: reindexing {d} files (no mutex held)", .{paths_buf.items.len});
+    debug_log_mod.log("processWatcherEvents: reindexing {d} files via child process", .{paths_buf.items.len});
 
-    // Step 2: Reindex each file without holding the runtime mutex.
-    // reindexFile/removeFileFromIndex use flock() for disk serialization,
-    // so concurrent tool calls can proceed while we do the heavy I/O.
+    // Step 2: Fork a child process to do the reindexing.
+    // If the child crashes (SIGABRT, SIGSEGV, etc.) the MCP server survives.
+    // The child does file I/O and exits with code 0 if anything changed, 1 if not.
+    const changed = forkReindex(allocator, paths_buf.items);
+
+    // Step 3: Re-acquire mutex only to swap the in-memory code cache.
+    if (changed) {
+        debug_log_mod.log("processWatcherEvents: acquiring runtime mutex (cache swap)", .{});
+        runtime.mutex.lock();
+        defer {
+            runtime.mutex.unlock();
+            debug_log_mod.log("processWatcherEvents: runtime mutex released (cache swap)", .{});
+        }
+        debug_log_mod.log("processWatcherEvents: runtime mutex acquired (cache swap)", .{});
+        runtime.syncCodeCacheAfterWrite() catch {};
+    }
+}
+
+/// Fork a child process to reindex files. Returns true if any file changed.
+/// If the child crashes, the parent survives and returns false.
+fn forkReindex(allocator: std.mem.Allocator, file_paths: []const []const u8) bool {
+    if (builtin.os.tag == .windows) {
+        // No fork on Windows — fall back to in-process reindexing
+        return reindexInProcess(allocator, file_paths);
+    }
+
+    const pid = posix.fork() catch |err| {
+        debug_log_mod.log("forkReindex: fork failed: {s}, falling back to in-process", .{@errorName(err)});
+        return reindexInProcess(allocator, file_paths);
+    };
+
+    if (pid == 0) {
+        // ── Child process ──
+        // Do the heavy work. If we crash, only the child dies.
+        var changed = false;
+        for (file_paths) |path_copy| {
+            const exists = blk: {
+                std.fs.cwd().access(path_copy, .{}) catch break :blk false;
+                break :blk true;
+            };
+            if (exists) {
+                if (code_intel.reindexFile(allocator, path_copy)) {
+                    changed = true;
+                }
+            } else {
+                if (code_intel.removeFileFromIndex(allocator, path_copy)) {
+                    changed = true;
+                }
+            }
+        }
+        // Exit code 0 = changed, 1 = no changes
+        std.c._exit(if (changed) 0 else 1);
+    }
+
+    // ── Parent process ──
+    debug_log_mod.log("forkReindex: child pid={d}, waiting", .{pid});
+    const result = posix.waitpid(pid, 0);
+    const status = result.status;
+
+    if (std.posix.W.IFEXITED(status)) {
+        const exit_code = std.posix.W.EXITSTATUS(status);
+        if (exit_code == 0) {
+            debug_log_mod.log("forkReindex: child exited with 0 (changed)", .{});
+            return true;
+        } else {
+            debug_log_mod.log("forkReindex: child exited with {d} (no change)", .{exit_code});
+            return false;
+        }
+    }
+
+    if (std.posix.W.IFSIGNALED(status)) {
+        const sig = std.posix.W.TERMSIG(status);
+        debug_log_mod.log("forkReindex: child killed by signal {d} — crash isolated", .{sig});
+        return false;
+    }
+
+    debug_log_mod.log("forkReindex: child exited with unexpected status {d}", .{status});
+    return false;
+}
+
+/// In-process reindexing fallback for platforms without fork (Windows).
+fn reindexInProcess(allocator: std.mem.Allocator, file_paths: []const []const u8) bool {
     var changed = false;
-    for (paths_buf.items) |path_copy| {
+    for (file_paths) |path_copy| {
         const exists = blk: {
             std.fs.cwd().access(path_copy, .{}) catch break :blk false;
             break :blk true;
@@ -1730,18 +1822,7 @@ fn processWatcherEvents(runtime: *Runtime) void {
             }
         }
     }
-
-    // Step 3: Re-acquire mutex only to swap the in-memory code cache.
-    if (changed) {
-        debug_log_mod.log("processWatcherEvents: acquiring runtime mutex (cache swap)", .{});
-        runtime.mutex.lock();
-        defer {
-            runtime.mutex.unlock();
-            debug_log_mod.log("processWatcherEvents: runtime mutex released (cache swap)", .{});
-        }
-        debug_log_mod.log("processWatcherEvents: runtime mutex acquired (cache swap)", .{});
-        runtime.syncCodeCacheAfterWrite() catch {};
-    }
+    return changed;
 }
 
 fn callDebugTool(runtime: *Runtime, tool_name: []const u8, arguments: ?json.Value) ![]const u8 {
