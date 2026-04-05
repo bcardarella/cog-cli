@@ -325,7 +325,7 @@ fn printFmtErr(allocator: std.mem.Allocator, comptime fmt: []const u8, args: any
 // ── Agent CLI definitions ───────────────────────────────────────────────
 // Only agents that support non-interactive CLI prompting are listed here.
 
-const CliAgent = struct {
+pub const CliAgent = struct {
     id: []const u8,
     display_name: []const u8,
     cmd_prefix: []const []const u8,
@@ -334,7 +334,7 @@ const CliAgent = struct {
     env_unset: []const []const u8,
 };
 
-const cli_agents = [_]CliAgent{
+pub const cli_agents = [_]CliAgent{
     .{
         .id = "claude_code",
         .display_name = "Claude Code",
@@ -386,7 +386,7 @@ const cli_agents = [_]CliAgent{
     },
 };
 
-const CliMenuEntry = struct {
+pub const CliMenuEntry = struct {
     cli_index: usize,
     item: tui.MenuItem,
 };
@@ -400,7 +400,7 @@ fn cliAgentLessThan(counts: *const agent_usage.Counts, lhs_index: usize, rhs_ind
     return std.mem.order(u8, lhs.display_name, rhs.display_name) == .lt;
 }
 
-fn buildCliMenuEntries(allocator: std.mem.Allocator) ![cli_agents.len]CliMenuEntry {
+pub fn buildCliMenuEntries(allocator: std.mem.Allocator) ![cli_agents.len]CliMenuEntry {
     var counts = try agent_usage.loadCounts(allocator);
     defer agent_usage.deinitCounts(allocator, &counts);
 
@@ -665,18 +665,10 @@ fn memUpgrade(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     defer allocator.free(list_url);
 
     debug_log.log("memUpgrade: listing brains at {s}", .{list_url});
-    const brains_resp = client.apiPost(allocator, list_url, api_key, "{}") catch {
-        printErr("  error: failed to connect to server\n");
-        return error.Explained;
-    };
-    defer allocator.free(brains_resp.body);
+    const brains_text = try client.post(allocator, list_url, api_key, "{}");
+    defer allocator.free(brains_text);
 
-    if (brains_resp.status_code != 200) {
-        printFmtErr(allocator, "  error: failed to list brains (HTTP {d})\n", .{brains_resp.status_code});
-        return error.Explained;
-    }
-
-    const accounts_parsed = json.parseFromSlice(json.Value, allocator, brains_resp.body, .{}) catch {
+    const accounts_parsed = json.parseFromSlice(json.Value, allocator, brains_text, .{}) catch {
         printErr("  error: invalid response from server\n");
         return error.Explained;
     };

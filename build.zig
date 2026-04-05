@@ -82,6 +82,7 @@ pub fn build(b: *std.Build) void {
     build_options.addOption([]const u8, "pi_cog_extension", @embedFile("priv/plugins/pi-cog.ts"));
     build_options.addOption([]const u8, "bootstrap_prompt", @embedFile("priv/prompts/bootstrap.md"));
     build_options.addOption([]const u8, "bootstrap_associate_prompt", @embedFile("priv/prompts/bootstrap_associate.md"));
+    build_options.addOption([]const u8, "project_scan_prompt", @embedFile("priv/prompts/project_scan.md"));
     const build_options_mod = build_options.createModule();
 
     mod.addImport("build_options", build_options_mod);
@@ -351,6 +352,7 @@ fn addRelease(
     release_options.addOption([]const u8, "pi_cog_extension", @embedFile("priv/plugins/pi-cog.ts"));
     release_options.addOption([]const u8, "bootstrap_prompt", @embedFile("priv/prompts/bootstrap.md"));
     release_options.addOption([]const u8, "bootstrap_associate_prompt", @embedFile("priv/prompts/bootstrap_associate.md"));
+    release_options.addOption([]const u8, "project_scan_prompt", @embedFile("priv/prompts/project_scan.md"));
     const release_options_mod = release_options.createModule();
 
     release_mod.addImport("build_options", release_options_mod);

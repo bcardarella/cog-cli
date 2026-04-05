@@ -1054,6 +1054,49 @@ fn confirmFallback(prompt: []const u8) !bool {
     return buf[0] == 'y' or buf[0] == 'Y';
 }
 
+pub const ConfirmAllResult = enum { yes, no, all };
+
+/// Like confirm() but with an additional "all" option: y/N/a
+pub fn confirmWithAll(prompt: []const u8) !ConfirmAllResult {
+    const fd = std.fs.File.stdin().handle;
+
+    if (!posix.isatty(fd)) {
+        return confirmWithAllFallback(prompt);
+    }
+
+    stderrWrite("  " ++ cyan ++ "?" ++ reset ++ " " ++ bold);
+    stderrWrite(prompt);
+    stderrWrite(reset ++ " " ++ dim ++ "(y/N/a)" ++ reset ++ " ");
+
+    var term = try RawTerminal.enter(fd);
+    defer term.leave();
+
+    const event = try term.readInputEvent();
+    stderrWrite("\n");
+    return switch (event) {
+        .char => |c| if (c == 'y' or c == 'Y')
+            .yes
+        else if (c == 'a' or c == 'A')
+            .all
+        else
+            .no,
+        else => .no,
+    };
+}
+
+fn confirmWithAllFallback(prompt: []const u8) !ConfirmAllResult {
+    stderrWrite("  ? ");
+    stderrWrite(prompt);
+    stderrWrite(" (y/N/a) ");
+
+    var buf: [64]u8 = undefined;
+    const n = posix.read(std.fs.File.stdin().handle, &buf) catch return .no;
+    if (n == 0) return .no;
+    if (buf[0] == 'y' or buf[0] == 'Y') return .yes;
+    if (buf[0] == 'a' or buf[0] == 'A') return .all;
+    return .no;
+}
+
 // ── Brain Name Validation ───────────────────────────────────────────────
 
 const reserved_brain_names = [_][]const u8{

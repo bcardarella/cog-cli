@@ -16,6 +16,7 @@ const paths = @import("paths.zig");
 const code_intel = @import("code_intel.zig");
 const extensions_mod = @import("extensions.zig");
 const memory_mod = @import("memory.zig");
+const bootstrap_mod = @import("bootstrap.zig");
 const memory_schema = @import("memory_schema.zig");
 const sqlite = @import("sqlite.zig");
 
@@ -301,6 +302,12 @@ pub fn init(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
             .input => unreachable,
         }
         deployBootstrapTemplates();
+    }
+
+    // Offer project scan when settings.json didn't exist before init
+    if (existing_settings == null) {
+        tui.separator();
+        try maybeRunProjectScan(allocator);
     }
 
     tui.separator();
@@ -650,6 +657,376 @@ pub fn init(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         signForDebug(allocator);
     }
 }
+
+// ── Project Scan ────────────────────────────────────────────────────────
+
+fn maybeRunProjectScan(allocator: std.mem.Allocator) !void {
+    debug_log.log("maybeRunProjectScan: offering project scan", .{});
+
+    const do_scan = try tui.confirm("Scan project to auto-configure code indexing?");
+    if (!do_scan) return;
+
+    printErr("\n");
+
+    // Agent selection (same as mem:bootstrap)
+    const cli_menu_entries = try bootstrap_mod.buildCliMenuEntries(allocator);
+    var menu_items: [bootstrap_mod.cli_agents.len + 1]tui.MenuItem = undefined;
+    for (cli_menu_entries, 0..) |entry, i| {
+        menu_items[i] = entry.item;
+    }
+    menu_items[bootstrap_mod.cli_agents.len] = .{ .label = "Custom command", .is_input_option = true };
+
+    const agent_result = try tui.select(allocator, .{
+        .prompt = "Select an agent to scan the project:",
+        .items = &menu_items,
+    });
+
+    const selected_agent: ?*const bootstrap_mod.CliAgent = switch (agent_result) {
+        .selected => |idx| if (idx < bootstrap_mod.cli_agents.len) &bootstrap_mod.cli_agents[cli_menu_entries[idx].cli_index] else null,
+        .input => null,
+        .back, .cancelled => {
+            printErr("  Skipped.\n");
+            return;
+        },
+    };
+
+    const custom_cmd: ?[]const u8 = switch (agent_result) {
+        .input => |cmd| cmd,
+        else => null,
+    };
+
+    if (selected_agent) |agent| {
+        try agent_usage.incrementCounts(allocator, &.{agent.id});
+    }
+
+    printErr("\n  Scanning project...\n\n");
+
+    const scan_result = runProjectScan(allocator, selected_agent, custom_cmd) orelse {
+        printErr("  " ++ dim ++ "Scan did not produce results. Skipping." ++ reset ++ "\n");
+        return;
+    };
+    defer allocator.free(scan_result);
+
+    // Parse JSON response
+    const parsed = json.parseFromSlice(json.Value, allocator, scan_result, .{}) catch {
+        debug_log.log("maybeRunProjectScan: failed to parse scan JSON", .{});
+        printErr("  " ++ dim ++ "Could not parse scan results. Skipping." ++ reset ++ "\n");
+        return;
+    };
+    defer parsed.deinit();
+
+    if (parsed.value != .object) {
+        printErr("  " ++ dim ++ "Unexpected scan output format. Skipping." ++ reset ++ "\n");
+        return;
+    }
+
+    // Extract index_patterns
+    const index_patterns: ?[]const json.Value = if (parsed.value.object.get("index_patterns")) |v|
+        if (v == .array) v.array.items else null
+    else
+        null;
+
+    if (index_patterns) |patterns| {
+        if (patterns.len > 0) {
+            // Collect string patterns
+            var pattern_strs: std.ArrayListUnmanaged([]const u8) = .empty;
+            defer pattern_strs.deinit(allocator);
+
+            for (patterns) |p| {
+                if (p == .string) {
+                    try pattern_strs.append(allocator, p.string);
+                }
+            }
+
+            if (pattern_strs.items.len > 0) {
+                printErr("  " ++ bold ++ "Index patterns:" ++ reset ++ "\n");
+                for (pattern_strs.items) |pat| {
+                    printErr("    ");
+                    printErr(pat);
+                    printErr("\n");
+                }
+                printErr("\n");
+
+                try writeSettingsCodeIndex(allocator, pattern_strs.items);
+                printErr("  ");
+                tui.checkmark();
+                printErr(" Written to .cog/settings.json\n\n");
+            }
+        }
+    }
+
+    // Extract extensions
+    const ext_recommendations: ?[]const json.Value = if (parsed.value.object.get("extensions")) |v|
+        if (v == .array) v.array.items else null
+    else
+        null;
+
+    if (ext_recommendations) |recs| {
+        if (recs.len > 0) {
+            // Get installed extensions to skip already-installed ones
+            const installed = extensions_mod.listInstalled(allocator) catch &.{};
+            defer if (installed.len > 0) extensions_mod.freeInstalledList(allocator, @constCast(installed));
+
+            var install_all = false;
+
+            for (recs) |rec| {
+                if (rec != .string) continue;
+                const ext_name = rec.string;
+
+                // Look up in registry
+                const registry_entry = findRegistryEntry(ext_name) orelse continue;
+
+                // Check if already installed
+                if (isExtensionInstalled(installed, registry_entry.name)) {
+                    printErr("  ");
+                    tui.checkmark();
+                    printErr(" ");
+                    printErr(ext_name);
+                    printErr(" (already installed)\n");
+                    continue;
+                }
+
+                if (!install_all) {
+                    const prompt_msg = try std.fmt.allocPrint(allocator, "Install {s}?", .{ext_name});
+                    defer allocator.free(prompt_msg);
+                    const result = try tui.confirmWithAll(prompt_msg);
+                    switch (result) {
+                        .no => continue,
+                        .all => install_all = true,
+                        .yes => {},
+                    }
+                }
+
+                // Install the extension
+                printErr("  Installing ");
+                printErr(ext_name);
+                printErr("...");
+                debug_log.log("maybeRunProjectScan: installing {s} from {s}", .{ ext_name, registry_entry.repo_url });
+                const install_result = extensions_mod.installExtensionToDir(allocator, registry_entry.repo_url, null, null) catch {
+                    printErr(" failed\n");
+                    continue;
+                };
+                extensions_mod.freeInstallResult(allocator, &install_result);
+                printErr(" ");
+                tui.checkmark();
+                printErr("\n");
+            }
+            printErr("\n");
+        }
+    }
+}
+
+fn findRegistryEntry(name: []const u8) ?*const extensions_mod.ExtensionRegistryEntry {
+    for (&extensions_mod.extension_registry) |*entry| {
+        if (std.mem.eql(u8, entry.name, name)) return entry;
+    }
+    return null;
+}
+
+fn isExtensionInstalled(installed: []const extensions_mod.InstalledInfo, ext_name: []const u8) bool {
+    // Strip "cog-" prefix for matching against display names
+    const prefix = "cog-";
+    const display_name = if (std.mem.startsWith(u8, ext_name, prefix) and ext_name.len > prefix.len)
+        ext_name[prefix.len..]
+    else
+        ext_name;
+
+    for (installed) |info| {
+        if (std.mem.eql(u8, info.name, display_name) or std.mem.eql(u8, info.name, ext_name)) return true;
+    }
+    return false;
+}
+
+fn runProjectScan(
+    allocator: std.mem.Allocator,
+    selected_agent: ?*const bootstrap_mod.CliAgent,
+    custom_cmd: ?[]const u8,
+) ?[]const u8 {
+    const prompt = build_options.project_scan_prompt;
+
+    // Build argv
+    var argv_buf: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer argv_buf.deinit(allocator);
+
+    if (selected_agent) |agent| {
+        if (agent.env_unset.len > 0) {
+            argv_buf.append(allocator, "env") catch return null;
+            for (agent.env_unset) |var_name| {
+                argv_buf.append(allocator, "-u") catch return null;
+                argv_buf.append(allocator, var_name) catch return null;
+            }
+        }
+        for (agent.cmd_prefix) |token| {
+            argv_buf.append(allocator, token) catch return null;
+        }
+        argv_buf.append(allocator, prompt) catch return null;
+        for (agent.cmd_suffix) |token| {
+            argv_buf.append(allocator, token) catch return null;
+        }
+    } else if (custom_cmd) |cmd| {
+        var cmd_iter = std.mem.splitScalar(u8, cmd, ' ');
+        while (cmd_iter.next()) |token| {
+            if (token.len > 0) {
+                argv_buf.append(allocator, token) catch return null;
+            }
+        }
+        argv_buf.append(allocator, prompt) catch return null;
+    } else {
+        return null;
+    }
+
+    debug_log.log("runProjectScan: spawning agent (argv len={d})", .{argv_buf.items.len});
+
+    var child = std.process.Child.init(argv_buf.items, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stderr_behavior = .Pipe;
+    child.stdout_behavior = .Pipe;
+
+    child.spawn() catch |err| {
+        debug_log.log("runProjectScan: spawn error {s}", .{@errorName(err)});
+        return null;
+    };
+
+    // Read stderr on background thread to avoid deadlock
+    const StderrReader = struct {
+        fn run(stderr: std.fs.File, alloc: std.mem.Allocator) void {
+            _ = stderr.readToEndAlloc(alloc, 10 * 1024 * 1024) catch {};
+        }
+    };
+    const stderr_thread = std.Thread.spawn(.{}, StderrReader.run, .{ child.stderr.?, allocator }) catch null;
+
+    // Read stdout (JSON output)
+    const stdout_data = child.stdout.?.readToEndAlloc(allocator, 10 * 1024 * 1024) catch {
+        debug_log.log("runProjectScan: failed to read stdout", .{});
+        _ = child.wait() catch {};
+        return null;
+    };
+
+    if (stderr_thread) |t| t.join();
+
+    const term = child.wait() catch {
+        debug_log.log("runProjectScan: wait failed", .{});
+        allocator.free(stdout_data);
+        return null;
+    };
+
+    if (term.Exited != 0) {
+        debug_log.log("runProjectScan: agent exited with code {d}", .{term.Exited});
+        allocator.free(stdout_data);
+        return null;
+    }
+
+    if (stdout_data.len == 0) {
+        allocator.free(stdout_data);
+        return null;
+    }
+
+    // Some agents wrap their output in JSON with a "result" field; try to extract that
+    if (json.parseFromSlice(json.Value, allocator, stdout_data, .{})) |outer| {
+        defer outer.deinit();
+        if (outer.value == .object) {
+            if (outer.value.object.get("result")) |result_val| {
+                if (result_val == .string) {
+                    // The actual JSON is inside the "result" string — re-parse
+                    const inner = allocator.dupe(u8, result_val.string) catch return stdout_data;
+                    allocator.free(stdout_data);
+                    return inner;
+                }
+            }
+            // If outer already has index_patterns, it's the direct response
+            if (outer.value.object.get("index_patterns") != null) {
+                return stdout_data;
+            }
+        }
+    } else |_| {}
+
+    return stdout_data;
+}
+
+fn writeSettingsCodeIndex(allocator: std.mem.Allocator, patterns: []const []const u8) !void {
+    // Read existing settings
+    const existing = readCwdFile(allocator, ".cog/settings.json");
+    defer if (existing) |e| allocator.free(e);
+
+    var aw: Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    var s: Stringify = .{ .writer = &aw.writer, .options = .{ .whitespace = .indent_2 } };
+
+    try s.beginObject();
+
+    if (existing) |content| {
+        if (json.parseFromSlice(json.Value, allocator, content, .{})) |parsed_val| {
+            defer parsed_val.deinit();
+
+            if (parsed_val.value == .object) {
+                // Copy all non-code top-level keys
+                var top_iter = parsed_val.value.object.iterator();
+                while (top_iter.next()) |entry| {
+                    if (std.mem.eql(u8, entry.key_ptr.*, "code")) continue;
+                    try s.objectField(entry.key_ptr.*);
+                    try s.write(entry.value_ptr.*);
+                }
+
+                // Deep merge code, preserving non-index keys
+                try s.objectField("code");
+                try s.beginObject();
+
+                if (parsed_val.value.object.get("code")) |code| {
+                    if (code == .object) {
+                        var code_iter = code.object.iterator();
+                        while (code_iter.next()) |entry| {
+                            if (std.mem.eql(u8, entry.key_ptr.*, "index")) continue;
+                            try s.objectField(entry.key_ptr.*);
+                            try s.write(entry.value_ptr.*);
+                        }
+                    }
+                }
+
+                // Write new index patterns
+                try s.objectField("index");
+                try s.beginArray();
+                for (patterns) |pat| {
+                    try s.write(pat);
+                }
+                try s.endArray();
+                try s.endObject(); // code
+            } else {
+                try writeFreshCodeIndex(&s, patterns);
+            }
+        } else |_| {
+            try writeFreshCodeIndex(&s, patterns);
+        }
+    } else {
+        try writeFreshCodeIndex(&s, patterns);
+    }
+
+    try s.endObject();
+
+    const new_content = try aw.toOwnedSlice();
+    defer allocator.free(new_content);
+
+    const with_newline = std.fmt.allocPrint(allocator, "{s}\n", .{new_content}) catch {
+        printErr("  error: failed to format settings\n");
+        return error.Explained;
+    };
+    defer allocator.free(with_newline);
+
+    try writeCwdFile(".cog/settings.json", with_newline);
+}
+
+fn writeFreshCodeIndex(s: *Stringify, patterns: []const []const u8) !void {
+    try s.objectField("code");
+    try s.beginObject();
+    try s.objectField("index");
+    try s.beginArray();
+    for (patterns) |pat| {
+        try s.write(pat);
+    }
+    try s.endArray();
+    try s.endObject();
+}
+
+// ── Brain Setup ─────────────────────────────────────────────────────────
 
 fn initBrain(allocator: std.mem.Allocator, host: []const u8, existing_parts: ?BrainUrlParts) !void {
     // Get API key

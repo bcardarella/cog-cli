@@ -108,6 +108,23 @@ pub const IndexerConfig = union(IndexerType) {
     scip_binary: ScipBinaryConfig,
 };
 
+// ── Extension Registry ──────────────────────────────────────────────────
+
+/// A known cog extension available for installation from github.com/trycog/.
+pub const ExtensionRegistryEntry = struct {
+    name: []const u8,
+    repo_url: []const u8,
+    file_extensions: []const []const u8,
+};
+
+pub const extension_registry = [_]ExtensionRegistryEntry{
+    .{ .name = "cog-elixir", .repo_url = "https://github.com/trycog/cog-elixir", .file_extensions = &.{ ".ex", ".exs" } },
+    .{ .name = "cog-ruby", .repo_url = "https://github.com/trycog/cog-ruby", .file_extensions = &.{ ".rb", ".erb" } },
+    .{ .name = "cog-zig", .repo_url = "https://github.com/trycog/cog-zig", .file_extensions = &.{ ".zig", ".zon" } },
+    .{ .name = "cog-nix", .repo_url = "https://github.com/trycog/cog-nix", .file_extensions = &.{".nix"} },
+    .{ .name = "cog-swift", .repo_url = "https://github.com/trycog/cog-swift", .file_extensions = &.{".swift"} },
+};
+
 // ── Extension ───────────────────────────────────────────────────────────
 
 /// An extension definition (either built-in or installed).
@@ -1087,7 +1104,7 @@ const ResolvedRelease = struct {
     tarball_url: []u8,
 };
 
-const InstallResult = struct {
+pub const InstallResult = struct {
     name: []u8,
     path: []u8,
     version: []u8,
@@ -1276,7 +1293,7 @@ fn freeInstallMetadata(allocator: std.mem.Allocator, metadata: *const InstallMet
     allocator.free(metadata.tag);
 }
 
-fn freeInstallResult(allocator: std.mem.Allocator, result: *const InstallResult) void {
+pub fn freeInstallResult(allocator: std.mem.Allocator, result: *const InstallResult) void {
     allocator.free(result.name);
     allocator.free(result.path);
     allocator.free(result.version);
@@ -1379,7 +1396,7 @@ fn downloadReleaseTarball(allocator: std.mem.Allocator, tarball_url: []const u8,
     try file.writeAll(response.body);
 }
 
-fn installExtensionToDir(allocator: std.mem.Allocator, git_url: []const u8, requested_version: ?[]const u8, install_dir_name: ?[]const u8) !InstallResult {
+pub fn installExtensionToDir(allocator: std.mem.Allocator, git_url: []const u8, requested_version: ?[]const u8, install_dir_name: ?[]const u8) !InstallResult {
     const resolved_name = install_dir_name orelse blk: {
         var name = std.fs.path.basename(git_url);
         if (std.mem.endsWith(u8, name, ".git")) {
