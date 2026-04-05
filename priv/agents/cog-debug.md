@@ -57,6 +57,18 @@ Compare observed values to the hypothesis. Report what you found clearly:
 
 Always `cog_debug_stop` when done, even on failure or timeout.
 
+## Correlating with log files
+
+When the target application produces log files, use `cog_log_*` tools alongside the debugger:
+
+1. `cog_log_watch` the application log before launching
+2. `cog_debug_launch` the program or trigger the failing behavior
+3. `cog_log_tail` to see what was logged during execution
+4. `cog_log_errors` to extract and analyze failures with stack traces
+5. Set breakpoints based on what the logs reveal
+
+This is especially useful when the application logs rich context (request IDs, state transitions) that complements the debugger's view of local variables and call stacks.
+
 ## Recalling prior debugging context
 
 Use `cog_mem_recall` to search for prior debugging sessions or known issues related to the current investigation. This can save time by surfacing previously identified root causes or patterns.

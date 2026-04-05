@@ -57,6 +57,23 @@ Fast-stack exception: if the language stack recompiles or hot-reloads so quickly
 
 Do NOT fall back to shell debuggers (lldb, gdb, dlv) — the `cog-debug` sub-agent handles all debugging.
 
+## Log Analysis
+
+`cog_log_*` tools watch log files and read them incrementally — no need to shell out to `tail`, `grep`, or `cat`.
+
+Typical workflow:
+1. `cog_log_watch` — open a log file, get a session ID and initial tail
+2. `cog_log_tail` — read new lines since last read (cursor advances automatically)
+3. `cog_log_search` — search the entire file for patterns (does NOT advance cursor)
+4. `cog_log_errors` — extract and deduplicate errors with stack traces
+5. `cog_log_overview` — file metadata, level distribution, head/tail samples
+6. `cog_log_sessions` — list active sessions
+7. `cog_log_stop` — close a session when done
+
+Use `cog_log_*` tools instead of shell commands for log inspection. They detect format automatically (JSON lines, logfmt, timestamped, plaintext), filter by log level, and handle multiline stack traces.
+
+For debugging workflows: watch the log, trigger the behavior, then tail to see what happened. Use `level` filter to focus on errors/warnings.
+
 <cog:mem>
 ## Memory
 
