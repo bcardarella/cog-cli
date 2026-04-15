@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-04-14
+
+### Added
+
+- **`mem:upgrade` command** — replaces `mem:upload`, migrates a local SQLite brain to hosted memory on trycog.ai with individual engram/synapse uploads, TUI progress bar, checkpoint-based resume, and automatic settings update
+- **Project scan during `cog init`** — bootstraps initial project context when setting up a new Cog installation
+
+### Fixed
+
+- PreCompact hook `printf` crash when output lines start with a dash (interpreted as option flag)
+- Progress bar not updating during `mem:upgrade` migration
+- `mem:upgrade` API envelope format corrected for hosted brain compatibility
+
 ## [0.25.0] - 2026-03-31
 
 ### Added
@@ -702,6 +715,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.9.0]: https://github.com/trycog/cog-cli/releases/tag/v0.9.0
 [0.23.0]: https://github.com/trycog/cog-cli/releases/tag/v0.23.0
 [0.23.1]: https://github.com/trycog/cog-cli/releases/tag/v0.23.1
+[0.26.0]: https://github.com/trycog/cog-cli/releases/tag/v0.26.0
 [0.25.0]: https://github.com/trycog/cog-cli/releases/tag/v0.25.0
 [0.24.2]: https://github.com/trycog/cog-cli/releases/tag/v0.24.2
 [0.24.1]: https://github.com/trycog/cog-cli/releases/tag/v0.24.1
