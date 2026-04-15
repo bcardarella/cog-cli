@@ -32,16 +32,16 @@ if [ -S ".cog/debug.sock" ]; then
 fi
 
 # Build carry-forward text
-printf '[Cog compact carry-forward]\n'
+printf '%s\n' '[Cog compact carry-forward]'
 if [ "$has_memory" = true ]; then
-  printf '- Cog memory is available. Delegate to cog-mem sub-agent before broad code exploration.\n'
+  printf '%s\n' '- Cog memory is available. Delegate to cog-mem sub-agent before broad code exploration.'
 fi
 if [ "$has_index" = true ]; then
-  printf '- Cog code intelligence is available via code_explore and code_query.\n'
+  printf '%s\n' '- Cog code intelligence is available via code_explore and code_query.'
 fi
 if [ "$has_debug" = true ]; then
-  printf '- A Cog debug daemon is running. Check for active debug sessions and stop them when done.\n'
+  printf '%s\n' '- A Cog debug daemon is running. Check for active debug sessions and stop them when done.'
 fi
-printf '- If Cog code tools were used, ensure durable findings are stored via cog-mem-validate before finishing.\n'
+printf '%s\n' '- If Cog code tools were used, ensure durable findings are stored via cog-mem-validate before finishing.'
 
 exit 0
