@@ -20,35 +20,21 @@ pub const ToolResult = union(enum) {
     };
 };
 
-// ── Tool Tier ───────────────────────────────────────────────────────────
-
-pub const ToolTier = enum {
-    core,
-    extended,
-
-    pub fn isWithin(self: ToolTier, threshold: ToolTier) bool {
-        return @intFromEnum(self) <= @intFromEnum(threshold);
-    }
-};
-
 // ── Tool Definitions ────────────────────────────────────────────────────
 
 pub const ToolDef = struct {
     name: []const u8,
     description: []const u8,
     input_schema: []const u8,
-    tier: ToolTier = .extended,
 };
 
 pub const tool_definitions = [_]ToolDef{
-    // ── Core tier ──
     .{
         .name = "observe_start",
         .description = "Start an observation session. Captures system-level events (syscalls, GPU operations, network flows, or cost data) for a target process. Returns a session ID for querying results.",
         .input_schema =
         \\{"type":"object","properties":{"backend":{"type":"string","enum":["syscall","gpu","net","cost"],"description":"Observation backend to use"},"pid":{"type":"integer","description":"Process ID to observe"},"command":{"type":"string","description":"Command to launch and observe (alternative to pid)"},"filters":{"type":"object","description":"Backend-specific event filters"}},"required":["backend"]}
         ,
-        .tier = .core,
     },
     .{
         .name = "observe_stop",
@@ -56,7 +42,6 @@ pub const tool_definitions = [_]ToolDef{
         .input_schema =
         \\{"type":"object","properties":{"session_id":{"type":"string","description":"Session ID returned by observe_start"}},"required":["session_id"]}
         ,
-        .tier = .core,
     },
     .{
         .name = "observe_events",
@@ -64,7 +49,6 @@ pub const tool_definitions = [_]ToolDef{
         .input_schema =
         \\{"type":"object","properties":{"session_id":{"type":"string","description":"Session ID to query"},"event_type":{"type":"string","description":"Filter by event type (e.g. 'sys_enter', 'cuda_launch')"},"pid":{"type":"integer","description":"Filter by process ID"},"limit":{"type":"integer","description":"Maximum events to return (default: 100)"},"offset":{"type":"integer","description":"Skip first N events"},"time_range":{"type":"object","properties":{"start_ns":{"type":"integer"},"end_ns":{"type":"integer"}},"description":"Filter by timestamp range"}},"required":["session_id"]}
         ,
-        .tier = .core,
     },
     .{
         .name = "observe_sessions",
@@ -72,24 +56,20 @@ pub const tool_definitions = [_]ToolDef{
         .input_schema =
         \\{"type":"object","properties":{"status":{"type":"string","enum":["capturing","stopped","finalized","error"],"description":"Filter by session status"}}}
         ,
-        .tier = .core,
     },
     .{
         .name = "observe_status",
-        .description = "Check observation subsystem status. Reports available backends, daemon health, and platform capabilities.",
+        .description = "Check observation subsystem status. Reports available backends, active sessions, and platform capabilities.",
         .input_schema =
         \\{"type":"object","properties":{}}
         ,
-        .tier = .core,
     },
-    // ── Extended tier ──
     .{
         .name = "observe_causal_chains",
         .description = "Get pre-computed causal chains from an observation session. Causal chains explain sequences of events that led to performance issues, errors, or notable behavior — in plain language.",
         .input_schema =
         \\{"type":"object","properties":{"session_id":{"type":"string","description":"Session ID to query"},"chain_type":{"type":"string","description":"Filter by chain type (e.g. 'io_blocking', 'error_cascade', 'gpu_stall')"},"event_id":{"type":"integer","description":"Find chains involving a specific event"}},"required":["session_id"]}
         ,
-        .tier = .extended,
     },
     .{
         .name = "observe_query",
@@ -97,7 +77,6 @@ pub const tool_definitions = [_]ToolDef{
         .input_schema =
         \\{"type":"object","properties":{"session_id":{"type":"string","description":"Session ID identifying the investigation database"},"sql":{"type":"string","description":"Read-only SQL query (SELECT only)"}},"required":["session_id","sql"]}
         ,
-        .tier = .extended,
     },
 };
 
@@ -208,7 +187,7 @@ pub const ObserveServer = struct {
         _ = allocator;
         _ = args;
         debug_log.log("toolStatus: entered", .{});
-        return .{ .ok_static = "{\"daemon\":\"not_running\",\"backends\":{\"syscall\":\"not_available\",\"gpu\":\"not_available\",\"net\":\"not_available\",\"cost\":\"not_available\"},\"platform\":\"" ++ @tagName(@import("builtin").os.tag) ++ "\"}" };
+        return .{ .ok_static = "{\"active_sessions\":0,\"backends\":{\"syscall\":\"not_available\",\"gpu\":\"not_available\",\"net\":\"not_available\",\"cost\":\"not_available\"},\"platform\":\"" ++ @tagName(@import("builtin").os.tag) ++ "\"}" };
     }
 
     fn toolCausalChains(self: *ObserveServer, allocator: std.mem.Allocator, args: ?json.Value) !ToolResult {
@@ -287,7 +266,7 @@ test "callTool dispatches known tools" {
     const result = try server.callTool(std.testing.allocator, "observe_status", null);
     switch (result) {
         .ok_static => |payload| {
-            try std.testing.expect(std.mem.indexOf(u8, payload, "daemon") != null);
+            try std.testing.expect(std.mem.indexOf(u8, payload, "active_sessions") != null);
         },
         else => return error.UnexpectedResult,
     }
