@@ -1524,6 +1524,7 @@ const CodexSpecialistKind = enum {
     debug,
     memory,
     validate,
+    observe,
 };
 
 fn buildCodexSpecialistInstructions(allocator: std.mem.Allocator, kind: CodexSpecialistKind, body: []const u8) ![]const u8 {
@@ -1556,6 +1557,14 @@ fn buildCodexSpecialistInstructions(allocator: std.mem.Allocator, kind: CodexSpe
         \\- This specialist handles the full learn-and-consolidate lifecycle in one call.
         \\- Do not edit files or explore code from this specialist.
         \\- Return concise summaries with engram IDs.
+        \\
+        ,
+        .observe =>
+        \\Host guidance:
+        \\- Use this specialist for system-level observability (syscalls, GPU, network, cost).
+        \\- Start observation sessions, analyze causal chains, and query raw events.
+        \\- Use shell commands only to reproduce the target workload.
+        \\- Do not edit files from this specialist.
         \\
         ,
     };
@@ -1602,6 +1611,15 @@ fn buildWorkflowSpecialistInstructions(allocator: std.mem.Allocator, agent_name:
             \\
             \\{s}
         , .{body}),
+        .observe => try std.fmt.allocPrint(allocator,
+            \\Workflow guidance:
+            \\- This host uses workflow files rather than hard-scoped subagents.
+            \\- Use this workflow for system-level observability (syscalls, GPU, network, cost).
+            \\- Start observation sessions, analyze causal chains, and query raw events.
+            \\- Use shell commands only to reproduce the target workload.
+            \\
+            \\{s}
+        , .{body}),
     };
 }
 
@@ -1637,6 +1655,14 @@ fn buildPromptOnlySpecialistInstructions(allocator: std.mem.Allocator, agent_nam
             \\- {s} cannot hard-deny tools per specialist, so keep this role focused on memory validation.
             \\- Handle the full learn-and-consolidate lifecycle in one call.
             \\- Return concise summaries with engram IDs.
+            \\
+            \\{s}
+        , .{ agent_name, body }),
+        .observe => try std.fmt.allocPrint(allocator,
+            \\Host guidance:
+            \\- {s} cannot hard-deny tools per specialist, so keep this role focused on system observability.
+            \\- Use observe tools for syscall, GPU, network, and cost investigation.
+            \\- Use shell commands only to reproduce the target workload.
             \\
             \\{s}
         , .{ agent_name, body }),
@@ -1679,7 +1705,36 @@ fn buildConfigScopedSpecialistInstructions(allocator: std.mem.Allocator, agent_n
             \\
             \\{s}
         , .{ agent_name, body }),
+        .observe => try std.fmt.allocPrint(allocator,
+            \\Host guidance:
+            \\- {s} provides config-level scoping for this observability specialist.
+            \\- Use observe tools for syscall, GPU, network, and cost investigation.
+            \\- Use shell commands only to reproduce the target workload.
+            \\
+            \\{s}
+        , .{ agent_name, body }),
     };
+}
+
+pub fn configureObserveAgentFile(allocator: std.mem.Allocator, agent: agents_mod.Agent) !void {
+    const observe_path = agent.observe_file_path orelse return;
+    const caps = agent.capabilities();
+
+    if (caps.subagent_support == .workflow_files) {
+        const header = agent.observe_file_header orelse return;
+        const instructions = try buildWorkflowSpecialistInstructions(allocator, agent.display_name, .observe, build_options.observe_agent_body);
+        defer allocator.free(instructions);
+        try writeMarkdownAgent(allocator, observe_path, header, instructions);
+    } else if (caps.subagent_support == .dedicated_files) {
+        const header = agent.observe_file_header orelse return;
+        try writeMarkdownAgent(allocator, observe_path, header, build_options.observe_agent_body);
+    } else if (std.mem.eql(u8, agent.id, "codex")) {
+        const instructions = try buildCodexSpecialistInstructions(allocator, .observe, build_options.observe_agent_body);
+        defer allocator.free(instructions);
+        try writeTomlAgent(allocator, observe_path, "cog-observe", "System observability sub-agent for syscall, GPU, network, and cost investigation", instructions);
+    } else if (std.mem.eql(u8, agent.id, "roo")) {
+        try writeRooAgent(allocator, observe_path, "cog-observe", "Cog Observe", "You are a system observability sub-agent. Use cog_observe tools to investigate system-level behavior — syscalls, GPU operations, network flows, and costs. Start sessions, analyze causal chains, and query raw events. Return concise reports with observed behavior, causal chains, and timestamps.");
+    }
 }
 
 pub fn buildMarkdownAgentContent(allocator: std.mem.Allocator, header: []const u8, body: []const u8) ![]const u8 {

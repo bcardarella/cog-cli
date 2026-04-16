@@ -62,6 +62,38 @@ pub const AgentCapabilities = struct {
     memory_write_enrichment: CapabilityLevel,
 };
 
+const gemini_observe_tools =
+    \\tools:
+    \\  - cog__observe_start
+    \\  - cog__observe_stop
+    \\  - cog__observe_events
+    \\  - cog__observe_causal_chains
+    \\  - cog__observe_query
+    \\  - cog__observe_sessions
+    \\  - cog__observe_status
+    \\  - cog__code_explore
+    \\  - cog__code_query
+    \\  - cog__mem_recall
+    \\  - read_file
+    \\  - run_shell_command
+;
+
+const copilot_observe_tools =
+    \\tools:
+    \\  - cog/observe_start
+    \\  - cog/observe_stop
+    \\  - cog/observe_events
+    \\  - cog/observe_causal_chains
+    \\  - cog/observe_query
+    \\  - cog/observe_sessions
+    \\  - cog/observe_status
+    \\  - cog/code_explore
+    \\  - cog/code_query
+    \\  - cog/mem_recall
+    \\  - read
+    \\  - execute
+;
+
 const gemini_code_query_tools =
     \\tools:
     \\  - cog__code_explore
@@ -204,6 +236,8 @@ pub const Agent = struct {
     mem_file_header: ?[]const u8,
     validate_file_path: ?[]const u8 = null,
     validate_file_header: ?[]const u8 = null,
+    observe_file_path: ?[]const u8 = null,
+    observe_file_header: ?[]const u8 = null,
 
     pub fn capabilities(self: *const Agent) AgentCapabilities {
         if (std.mem.eql(u8, self.id, "claude_code")) {
@@ -622,6 +656,30 @@ pub const agents = [_]Agent{
         \\---
         \\
         ,
+        .observe_file_path = ".claude/agents/cog-observe.md",
+        .observe_file_header =
+        \\---
+        \\name: cog-observe
+        \\description: System observability sub-agent that investigates syscalls, GPU, network, and cost via cog observe tools
+        \\tools:
+        \\  - mcp__cog__observe_start
+        \\  - mcp__cog__observe_stop
+        \\  - mcp__cog__observe_events
+        \\  - mcp__cog__observe_causal_chains
+        \\  - mcp__cog__observe_query
+        \\  - mcp__cog__observe_sessions
+        \\  - mcp__cog__observe_status
+        \\  - mcp__cog__code_explore
+        \\  - mcp__cog__code_query
+        \\  - mcp__cog__mem_recall
+        \\  - Read
+        \\  - Bash
+        \\mcpServers:
+        \\  - cog
+        \\maxTurns: 15
+        \\---
+        \\
+        ,
     },
     // ── Gemini CLI ──────────────────────────────────────────────────
     .{
@@ -664,6 +722,16 @@ pub const agents = [_]Agent{
         \\name: cog-mem-validate
         \\description: Post-task memory validation — learns durable knowledge and consolidates short-term memories in one call
     ++ gemini_validate_tools ++
+        \\---
+        \\
+        ,
+        .observe_file_path = ".gemini/agents/cog-observe.md",
+        .observe_file_header =
+        \\---
+        \\name: cog-observe
+        \\description: System observability sub-agent that investigates syscalls, GPU, network, and cost via cog observe tools
+    ++ gemini_observe_tools ++
+        \\max_turns: 15
         \\---
         \\
         ,
@@ -710,6 +778,16 @@ pub const agents = [_]Agent{
         \\name: cog-mem-validate
         \\description: Post-task memory validation — learns durable knowledge and consolidates short-term memories in one call
     ++ copilot_validate_tools ++
+        \\user-invokable: false
+        \\---
+        \\
+        ,
+        .observe_file_path = ".github/agents/cog-observe.agent.md",
+        .observe_file_header =
+        \\---
+        \\name: cog-observe
+        \\description: System observability sub-agent that investigates syscalls, GPU, network, and cost via cog observe tools
+    ++ copilot_observe_tools ++
         \\user-invokable: false
         \\---
         \\

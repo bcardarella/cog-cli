@@ -57,6 +57,26 @@ Fast-stack exception: if the language stack recompiles or hot-reloads so quickly
 
 Do NOT fall back to shell debuggers (lldb, gdb, dlv) — the `cog-debug` sub-agent handles all debugging.
 
+## Observability
+
+**Always delegate system observability to the `cog-observe` sub-agent.** Do NOT call `cog_observe_*` tools directly from the primary agent.
+
+When you need to investigate system-level behavior — slow syscalls, GPU stalls, network latency, or resource costs — delegate to the `cog-observe` sub-agent with a prompt containing:
+- **QUESTION**: what system behavior to investigate
+- **HYPOTHESIS**: your theory about the system-level cause
+- **TARGET**: process PID or command to observe
+
+The sub-agent handles session lifecycle, event capture, causal chain analysis, and raw SQL investigation. It returns a concise report with observed system behavior and a verdict.
+
+Prefer the observe sub-agent when:
+- a performance issue cannot be explained from application-level debugging alone
+- you need to see what the OS, GPU, or network is doing during an operation
+- you need to correlate application behavior with system-level events (syscalls, network flows, GPU operations)
+
+Prefer the debugger instead when the issue is clearly application logic — wrong values, control flow, or crash state.
+
+Do NOT fall back to shell profiling tools (strace, perf, dtrace, tcpdump) — the `cog-observe` sub-agent handles all system observability.
+
 <cog:mem>
 ## Memory
 

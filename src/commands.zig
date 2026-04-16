@@ -640,6 +640,51 @@ pub fn init(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
                 }
             }
         }
+
+        // h. Deploy observe agent file
+        if (agent.observe_file_path) |observe_path| {
+            const shares_path = if (agent.agent_file_path) |ap|
+                std.mem.eql(u8, ap, observe_path)
+            else
+                false;
+
+            if (shares_path) {
+                hooks_mod.configureObserveAgentFile(allocator, agent) catch {};
+            } else {
+                var observe_already_written = false;
+                for (written_agents[0..written_agents_count]) |wa| {
+                    if (std.mem.eql(u8, wa, observe_path)) {
+                        observe_already_written = true;
+                        break;
+                    }
+                }
+                if (!observe_already_written) {
+                    const should_write = if (agent.observe_file_header) |header| blk: {
+                        const content = hooks_mod.buildMarkdownAgentContent(allocator, header, build_options.observe_agent_body) catch break :blk true;
+                        defer allocator.free(content);
+                        break :blk shouldWriteFile(allocator, observe_path, content, &accept_all);
+                    } else true;
+                    if (should_write) {
+                        hooks_mod.configureObserveAgentFile(allocator, agent) catch {};
+                        printErr("    ");
+                        tui.checkmark();
+                        printErr(" ");
+                        printErr(observe_path);
+                        printErr("\n");
+                        appendUniquePath(&installed_assets, &installed_assets_count, observe_path);
+                    } else {
+                        printErr("    ");
+                        printErr(dim ++ "  skipped " ++ reset);
+                        printErr(observe_path);
+                        printErr("\n");
+                    }
+                    if (written_agents_count < 32) {
+                        written_agents[written_agents_count] = observe_path;
+                        written_agents_count += 1;
+                    }
+                }
+            }
+        }
     }
 
     try writeClientContextManifest(

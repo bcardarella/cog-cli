@@ -70,6 +70,7 @@ pub fn build(b: *std.Build) void {
     build_options.addOption([]const u8, "debug_agent_body", @embedFile("priv/agents/cog-debug.md"));
     build_options.addOption([]const u8, "mem_agent_body", @embedFile("priv/agents/cog-mem.md"));
     build_options.addOption([]const u8, "validate_agent_body", @embedFile("priv/agents/cog-mem-validate.md"));
+    build_options.addOption([]const u8, "observe_agent_body", @embedFile("priv/agents/cog-observe.md"));
     build_options.addOption([]const u8, "opencode_override_plugin", @embedFile("priv/plugins/opencode-cog-override.ts"));
     build_options.addOption([]const u8, "opencode_memory_plugin", @embedFile("priv/plugins/opencode-cog-memory.ts"));
     build_options.addOption([]const u8, "opencode_debug_plugin", @embedFile("priv/plugins/opencode-cog-debug.ts"));
@@ -340,6 +341,7 @@ fn addRelease(
     release_options.addOption([]const u8, "debug_agent_body", @embedFile("priv/agents/cog-debug.md"));
     release_options.addOption([]const u8, "mem_agent_body", @embedFile("priv/agents/cog-mem.md"));
     release_options.addOption([]const u8, "validate_agent_body", @embedFile("priv/agents/cog-mem-validate.md"));
+    release_options.addOption([]const u8, "observe_agent_body", @embedFile("priv/agents/cog-observe.md"));
     release_options.addOption([]const u8, "opencode_override_plugin", @embedFile("priv/plugins/opencode-cog-override.ts"));
     release_options.addOption([]const u8, "opencode_memory_plugin", @embedFile("priv/plugins/opencode-cog-memory.ts"));
     release_options.addOption([]const u8, "opencode_debug_plugin", @embedFile("priv/plugins/opencode-cog-debug.ts"));
