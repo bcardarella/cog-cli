@@ -58,14 +58,8 @@ pub const mem_upgrade =
 
 // ── Observe ──────────────────────────────────────────────────────────
 
-pub const observe_start =
-    bold ++ "  cog observe:start" ++ reset ++ "\n" ++ "\n" ++ "  Start an observation session. Captures system-level events\n" ++ "  (syscalls, GPU operations, network flows, or cost data) for\n" ++ "  a target process.\n" ++ "\n" ++ cyan ++ bold ++ "  Usage" ++ reset ++ "\n" ++ "    cog observe:start --backend <type> " ++ dim ++ "[options]" ++ reset ++ "\n" ++ "\n" ++ cyan ++ bold ++ "  Options" ++ reset ++ "\n" ++ "    " ++ bold ++ "--backend" ++ reset ++ " TYPE        " ++ dim ++ "Backend: syscall, gpu, net, cost" ++ reset ++ "\n" ++ "    " ++ bold ++ "--pid" ++ reset ++ " PID              " ++ dim ++ "Process ID to observe" ++ reset ++ "\n" ++ "    " ++ bold ++ "--command" ++ reset ++ " CMD         " ++ dim ++ "Command to launch and observe" ++ reset ++ "\n" ++ "\n" ++ cyan ++ bold ++ "  Examples" ++ reset ++ "\n" ++ "    cog observe:start --backend syscall --pid 1234\n" ++ "    cog observe:start --backend gpu --command \"./train.py\"\n" ++ "\n";
-
-pub const observe_stop =
-    bold ++ "  cog observe:stop" ++ reset ++ "\n" ++ "\n" ++ "  Stop an active observation session and finalize the\n" ++ "  investigation database.\n" ++ "\n" ++ cyan ++ bold ++ "  Usage" ++ reset ++ "\n" ++ "    cog observe:stop --session <id>\n" ++ "\n";
-
 pub const observe_status =
-    bold ++ "  cog observe:status" ++ reset ++ "\n" ++ "\n" ++ "  Check observation subsystem status. Reports daemon health,\n" ++ "  available backends, and platform capabilities.\n" ++ "\n" ++ cyan ++ bold ++ "  Usage" ++ reset ++ "\n" ++ "    cog observe:status\n" ++ "\n";
+    bold ++ "  cog observe:status" ++ reset ++ "\n" ++ "\n" ++ "  Check observation subsystem status. Reports available\n" ++ "  backends and platform capabilities.\n" ++ "\n" ++ cyan ++ bold ++ "  Usage" ++ reset ++ "\n" ++ "    cog observe:status\n" ++ "\n";
 
 pub const observe_sessions =
     bold ++ "  cog observe:sessions" ++ reset ++ "\n" ++ "\n" ++ "  List observation sessions. Shows active and completed\n" ++ "  investigation databases with backend type and event counts.\n" ++ "\n" ++ cyan ++ bold ++ "  Usage" ++ reset ++ "\n" ++ "    cog observe:sessions " ++ dim ++ "[--status <filter>]" ++ reset ++ "\n" ++ "\n";

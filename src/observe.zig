@@ -46,24 +46,6 @@ pub fn dispatch(allocator: std.mem.Allocator, subcmd: []const u8, args: []const 
         return;
     }
 
-    if (std.mem.eql(u8, subcmd, "observe:start")) {
-        if (hasFlag(args, "--help") or hasFlag(args, "-h")) {
-            printCommandHelp(help.observe_start);
-            return;
-        }
-        printErr("Observe subsystem is not yet available. This feature is under development.\n");
-        return;
-    }
-
-    if (std.mem.eql(u8, subcmd, "observe:stop")) {
-        if (hasFlag(args, "--help") or hasFlag(args, "-h")) {
-            printCommandHelp(help.observe_stop);
-            return;
-        }
-        printErr("Observe subsystem is not yet available. This feature is under development.\n");
-        return;
-    }
-
     if (std.mem.eql(u8, subcmd, "observe:query")) {
         if (hasFlag(args, "--help") or hasFlag(args, "-h")) {
             printCommandHelp(help.observe_query);
